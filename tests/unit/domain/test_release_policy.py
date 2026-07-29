@@ -16,6 +16,7 @@ NOW = datetime(2026, 7, 29, tzinfo=UTC)
 @dataclass(frozen=True)
 class ReleaseCommand:
     project_id: str = "LLD"
+    change_request_id: str = "CHG-LLD-001"
     approved_by: str = "产品经理"
     impact_reviewed: bool = True
     release_note: str = "完成目标客群规则调整并保留来源、决定和版本追溯记录。"
@@ -71,20 +72,47 @@ def _policy():
     return importlib.import_module("src.domain.policies.release_policy").ReleasePolicy()
 
 
+def _validate(
+    command: ReleaseCommand,
+    baseline_manifest: BaselineManifest,
+    change_request: ChangeRequest,
+    *,
+    target_version_exists: bool = False,
+    manifest_integrity_ok: bool = True,
+):
+    return _policy().validate(
+        command,
+        baseline_manifest,
+        change_request,
+        target_version_exists=target_version_exists,
+        manifest_integrity_ok=manifest_integrity_ok,
+    )
+
+
 def test_release_rejects_change_that_has_not_been_approved():
     """Catches publishing a pending change without an explicit review decision."""
     with pytest.raises(DomainError, match="CHANGE_NOT_APPROVED"):
-        _policy().validate(
+        _validate(
             ReleaseCommand(impact_reviewed=False),
             manifest(),
             change(ChangeStatus.PENDING_APPROVAL),
         )
 
 
+def test_release_rejects_forged_approved_status_without_review_audit():
+    """Catches model_copy or persistence hydration bypassing model-level review validation."""
+    forged = change(ChangeStatus.PENDING_APPROVAL).model_copy(
+        update={"status": ChangeStatus.APPROVED}
+    )
+
+    with pytest.raises(DomainError, match="CHANGE_REVIEW_INVALID"):
+        _validate(ReleaseCommand(), manifest(), forged)
+
+
 def test_release_requires_impact_review_for_approved_change():
     """Catches publishing an approved change before its impact is checked."""
     with pytest.raises(DomainError, match="IMPACT_REVIEW_REQUIRED"):
-        _policy().validate(
+        _validate(
             ReleaseCommand(impact_reviewed=False),
             manifest(),
             change(),
@@ -101,7 +129,7 @@ def test_release_requires_impact_review_for_approved_change():
 def test_release_note_must_be_between_20_and_200_characters(release_note):
     """Catches an unauditable or oversized release explanation."""
     with pytest.raises(DomainError, match="INVALID_RELEASE_NOTE"):
-        _policy().validate(
+        _validate(
             ReleaseCommand(release_note=release_note),
             manifest(),
             change(),
@@ -111,8 +139,18 @@ def test_release_note_must_be_between_20_and_200_characters(release_note):
 def test_release_requires_same_project_across_command_manifest_and_change():
     """Catches a change being published into another project's current baseline."""
     with pytest.raises(DomainError, match="RELEASE_PROJECT_MISMATCH"):
-        _policy().validate(
+        _validate(
             ReleaseCommand(project_id="OTHER"),
+            manifest(),
+            change(),
+        )
+
+
+def test_release_command_must_reference_the_validated_change_request():
+    """Catches validating one change while publishing another change ID."""
+    with pytest.raises(DomainError, match="RELEASE_CHANGE_MISMATCH"):
+        _validate(
+            ReleaseCommand(change_request_id="CHG-OTHER-001"),
             manifest(),
             change(),
         )
@@ -123,13 +161,35 @@ def test_release_rejects_current_version_as_target():
     current_change = change().model_copy(update={"target_version": "LLD-724_1"})
 
     with pytest.raises(DomainError, match="TARGET_VERSION_ALREADY_EFFECTIVE"):
-        _policy().validate(ReleaseCommand(), manifest(), current_change)
+        _validate(ReleaseCommand(), manifest(), current_change)
+
+
+def test_release_rejects_any_preexisting_target_version():
+    """Catches reusing a historical baseline version or directory."""
+    with pytest.raises(DomainError, match="TARGET_VERSION_ALREADY_EXISTS"):
+        _validate(
+            ReleaseCommand(),
+            manifest(),
+            change(),
+            target_version_exists=True,
+        )
+
+
+def test_release_requires_current_manifest_integrity():
+    """Catches publishing on top of a baseline whose manifest no longer matches files."""
+    with pytest.raises(DomainError, match="BASELINE_INTEGRITY_FAILED"):
+        _validate(
+            ReleaseCommand(),
+            manifest(),
+            change(),
+            manifest_integrity_ok=False,
+        )
 
 
 def test_release_requires_nonblank_approver():
     """Catches publishing a baseline without a traceable accountable approver."""
     with pytest.raises(DomainError, match="RELEASE_APPROVER_REQUIRED"):
-        _policy().validate(
+        _validate(
             ReleaseCommand(approved_by=" "),
             manifest(),
             change(),
@@ -138,4 +198,14 @@ def test_release_requires_nonblank_approver():
 
 def test_approved_reviewed_change_with_impact_check_can_be_released():
     """Catches over-restricting the valid governed release path."""
-    _policy().validate(ReleaseCommand(), manifest(), change())
+    _validate(ReleaseCommand(), manifest(), change())
+
+
+def test_domain_error_exposes_safe_ui_contract():
+    """Catches UI code having to display raw exception details or guess retry behavior."""
+    error = DomainError("CHANGE_NOT_APPROVED", "internal object details")
+
+    assert error.code == "CHANGE_NOT_APPROVED"
+    assert error.user_message == "变更尚未批准"
+    assert error.retryable is False
+    assert "internal object details" in str(error)

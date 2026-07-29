@@ -81,6 +81,14 @@ def test_redacted_authorized_l2_source_can_call_external_model():
     assert policy.can_call_external_model(project(), source()) is True
 
 
+def test_source_cannot_borrow_another_projects_external_model_authorization():
+    """Catches crossing project authorization boundaries during model calls."""
+    policy = importlib.import_module("src.domain.policies.security_policy")
+    other_project_source = source().model_copy(update={"project_id": "OTHER"})
+
+    assert policy.can_call_external_model(project(), other_project_source) is False
+
+
 @pytest.mark.parametrize(
     ("project_allowed", "source_allowed", "redacted"),
     [

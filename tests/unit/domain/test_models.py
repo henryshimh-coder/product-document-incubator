@@ -27,6 +27,34 @@ def _models():
     return importlib.import_module("src.domain.models")
 
 
+def _pending_change_request(models):
+    return models.ChangeRequest(
+        id="CHG-LLD-001",
+        project_id="LLD",
+        issue_id="ISSUE-LLD-001",
+        decision_id="DEC-LLD-001",
+        target_card_id="RULE-LLD-001",
+        before_content="原规则",
+        after_content="新规则",
+        rationale="采纳风险意见",
+        evidence_refs=["CIT-RISK-001"],
+        impacted_objects=["产品方案/目标客群"],
+        responsible_domain="产品",
+        required_approver_role="产品与风险负责人",
+        demo_confirmer="产品经理",
+        status=ChangeStatus.PENDING_APPROVAL,
+        review_action=None,
+        reviewed_by=None,
+        review_comment=None,
+        review_idempotency_key=None,
+        reviewed_at=None,
+        target_version="LLD-724_2",
+        effective_condition="发布后生效",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
 def test_project_rejects_blank_business_id():
     """Catches persisting an entity that cannot be addressed by repositories or audit logs."""
     models = _models()
@@ -71,6 +99,36 @@ def test_source_record_rejects_non_sha256_digest():
             ingest_status="pending",
             created_at=NOW,
         )
+
+
+def test_source_record_allows_zero_size_consistently_with_storage_schema():
+    """Catches a domain/database constraint mismatch during repository hydration."""
+    models = _models()
+
+    record = models.SourceRecord(
+        id="SRC-LLD-EMPTY",
+        project_id="LLD",
+        original_filename="空白材料.md",
+        archive_path="data/source_archive/" + "a" * 64 + ".md",
+        sha256="a" * 64,
+        mime_type="text/markdown",
+        size_bytes=0,
+        source_type="other",
+        authority_level=AuthorityLevel.DISCUSSION_REFERENCE,
+        source_department="产品",
+        provider=None,
+        document_date=date(2026, 7, 29),
+        document_version="v1.0",
+        applicable_baseline_version="LLD-724_1",
+        security_level=SecurityLevel.L1_PUBLIC_SIMULATED,
+        is_redacted=True,
+        allow_external_model=False,
+        is_sandbox=True,
+        ingest_status="pending",
+        created_at=NOW,
+    )
+
+    assert record.size_bytes == 0
 
 
 def test_effective_knowledge_card_requires_source_reference():
@@ -129,6 +187,101 @@ def test_major_issue_requires_two_distinct_evidence_items():
         )
 
 
+def test_major_issue_requires_evidence_from_two_distinct_sources():
+    """Catches two excerpts from one side being presented as a two-sided conflict."""
+    models = _models()
+    evidence = [
+        models.IssueEvidence(
+            source_id="SRC-RISK",
+            citation_id=f"CIT-RISK-{index}",
+            excerpt=f"风险意见片段 {index}",
+            document_version="v1.0",
+            page_or_section=f"第 {index} 节",
+        )
+        for index in (1, 2)
+    ]
+
+    with pytest.raises(ValidationError, match="distinct sources"):
+        models.IssueCard(
+            id="ISSUE-LLD-001",
+            project_id="LLD",
+            issue_type="conflict",
+            severity=IssueSeverity.BLOCKING,
+            status=IssueStatus.OPEN,
+            title="客群边界不一致",
+            description="需要会议确认当前执行口径",
+            evidence=evidence,
+            impacted_domains=["产品", "风险"],
+            options=[],
+            ai_recommendation=None,
+            ai_confidence=None,
+            uncertainty=None,
+            owner=None,
+            due_at=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+
+def test_pending_information_issue_must_describe_missing_content():
+    """Catches an information gap that does not say what evidence is missing."""
+    models = _models()
+
+    with pytest.raises(ValidationError, match="uncertainty"):
+        models.IssueCard(
+            id="ISSUE-LLD-002",
+            project_id="LLD",
+            issue_type="missing_market_evidence",
+            severity=IssueSeverity.PENDING_INFO,
+            status=IssueStatus.OPEN,
+            title="缺少同业证据",
+            description="当前材料中没有同业对标数据",
+            evidence=[],
+            impacted_domains=["市场"],
+            options=[],
+            ai_recommendation=None,
+            ai_confidence=None,
+            uncertainty=None,
+            owner=None,
+            due_at=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+
+def test_failed_direct_status_assignment_does_not_mutate_change_request():
+    """Catches a failed validation leaving an unreviewed change in approved state."""
+    models = _models()
+    change = _pending_change_request(models)
+
+    with pytest.raises(ValidationError):
+        change.status = ChangeStatus.APPROVED
+
+    assert change.status == ChangeStatus.PENDING_APPROVAL
+
+
+def test_change_transition_returns_a_new_fully_validated_instance():
+    """Catches in-place mutation or unchecked copies bypassing approval audit fields."""
+    models = _models()
+    transition = importlib.import_module("src.domain.policies.state_transition")
+    pending = _pending_change_request(models)
+
+    approved = transition.transition_change(
+        pending,
+        ChangeStatus.APPROVED,
+        review_action=ChangeReviewAction.APPROVE,
+        reviewed_by="产品经理",
+        review_comment="已核对修改前后、证据、影响对象和目标版本。",
+        review_idempotency_key="REVIEW-CHG-001",
+        reviewed_at=NOW,
+        updated_at=NOW,
+    )
+
+    assert pending.status == ChangeStatus.PENDING_APPROVAL
+    assert approved.status == ChangeStatus.APPROVED
+    assert approved.review_action == ChangeReviewAction.APPROVE
+
+
 def test_approved_change_requires_complete_review_audit():
     """Catches an approved state without reviewer, comment, idempotency key, and time."""
     models = _models()
@@ -158,6 +311,57 @@ def test_approved_change_requires_complete_review_audit():
             effective_condition="发布后生效",
             created_at=NOW,
             updated_at=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("action", "responsible_party", "due_at", "verification_condition"),
+    [
+        ("accept_change", None, None, "风险复核通过"),
+        ("accept_change", "产品经理", None, None),
+        ("defer", "产品经理", None, "材料补齐后复核"),
+    ],
+)
+def test_decision_action_requires_its_execution_fields(
+    action,
+    responsible_party,
+    due_at,
+    verification_condition,
+):
+    """Catches persisting a decision that cannot be assigned, verified, or revisited."""
+    models = _models()
+
+    with pytest.raises(ValidationError, match="decision"):
+        models.Decision(
+            id="DEC-LLD-001",
+            project_id="LLD",
+            issue_id="ISSUE-LLD-001",
+            action=action,
+            conclusion="会议同意按讨论方案执行",
+            confirmed_by="产品经理",
+            responsible_party=responsible_party,
+            due_at=due_at,
+            verification_condition=verification_condition,
+            created_at=NOW,
+        )
+
+
+def test_false_positive_decision_requires_an_explanatory_conclusion():
+    """Catches marking an issue false positive without recording an auditable reason."""
+    models = _models()
+
+    with pytest.raises(ValidationError, match="decision"):
+        models.Decision(
+            id="DEC-LLD-002",
+            project_id="LLD",
+            issue_id="ISSUE-LLD-002",
+            action="false_positive",
+            conclusion="误报",
+            confirmed_by="产品经理",
+            responsible_party=None,
+            due_at=None,
+            verification_condition=None,
+            created_at=NOW,
         )
 
 

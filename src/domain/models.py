@@ -26,8 +26,8 @@ NonNegativeInt = Annotated[int, Field(ge=0)]
 class DomainModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
+        frozen=True,
         str_strip_whitespace=True,
-        validate_assignment=True,
     )
 
 
@@ -49,7 +49,7 @@ class SourceRecord(DomainModel):
     archive_path: NonEmptyStr
     sha256: Sha256Str
     mime_type: NonEmptyStr
-    size_bytes: int = Field(gt=0)
+    size_bytes: NonNegativeInt
     source_type: NonEmptyStr
     authority_level: AuthorityLevel
     source_department: NonEmptyStr
@@ -155,9 +155,11 @@ class IssueCard(DomainModel):
             IssueSeverity.BLOCKING,
             IssueSeverity.PENDING_DECISION,
         }:
-            unique_citations = {item.citation_id for item in self.evidence}
-            if len(unique_citations) < 2:
-                raise ValueError("evidence must contain two distinct citations for a major issue")
+            unique_sources = {item.source_id for item in self.evidence}
+            if len(unique_sources) < 2:
+                raise ValueError("evidence must come from two distinct sources for a major issue")
+        if self.severity == IssueSeverity.PENDING_INFO and self.uncertainty is None:
+            raise ValueError("uncertainty must describe the missing content")
         return self
 
 
@@ -172,6 +174,20 @@ class Decision(DomainModel):
     due_at: datetime | None
     verification_condition: NonEmptyStr | None
     created_at: datetime
+
+    @model_validator(mode="after")
+    def ensure_action_has_execution_fields(self) -> Self:
+        if self.action == DecisionAction.ACCEPT_CHANGE and (
+            self.responsible_party is None or self.verification_condition is None
+        ):
+            raise ValueError(
+                "decision accept_change requires responsible_party and verification_condition"
+            )
+        if self.action == DecisionAction.DEFER and self.due_at is None:
+            raise ValueError("decision defer requires due_at")
+        if self.action == DecisionAction.FALSE_POSITIVE and len(self.conclusion) < 10:
+            raise ValueError("decision false_positive conclusion must explain the reason")
+        return self
 
 
 class ChangeRequest(DomainModel):

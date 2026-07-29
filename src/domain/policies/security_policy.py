@@ -7,6 +7,7 @@ from src.domain.models import Project, SourceRecord
 def can_call_external_model(project: Project, source: SourceRecord) -> bool:
     return all(
         (
+            project.id == source.project_id,
             project.allow_external_model,
             source.allow_external_model,
             source.is_redacted,
