@@ -43,11 +43,13 @@ statuses:
 
 relation_types:
   - derived_from
-  - conflicts_with
   - supports
-  - decided_by
-  - changes
-  - released_as
+  - conflicts_with
+  - proposes_change_to
+  - approved_as
+  - supersedes
+  - impacts
+  - to_be_verified_by
 
 id_prefixes:
   project: PRJ
