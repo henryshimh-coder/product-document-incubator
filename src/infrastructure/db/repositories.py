@@ -353,10 +353,11 @@ class SqliteIssueRepository:
             ).fetchall()
         return [self._to_model(row) for row in rows]
 
-    def update_status(self, issue_id: str, status: IssueStatus) -> None:
+    def update_status(self, issue_id: str, status: IssueStatus, updated_at: datetime) -> None:
         with connect(self.db_path) as connection:
             result = connection.execute(
-                "UPDATE issue_cards SET status = ? WHERE id = ?", (status.value, issue_id)
+                "UPDATE issue_cards SET status = ?, updated_at = ? WHERE id = ?",
+                (status.value, updated_at.isoformat(), issue_id),
             )
             if result.rowcount != 1:
                 raise KeyError(f"issue not found: {issue_id}")
@@ -483,10 +484,11 @@ class SqliteChangeRepository:
                 raise KeyError(f"change request not found: {change_id}")
         return self.get(change_id)
 
-    def update_status(self, change_id: str, status: ChangeStatus) -> None:
+    def update_status(self, change_id: str, status: ChangeStatus, updated_at: datetime) -> None:
         with connect(self.db_path) as connection:
             result = connection.execute(
-                "UPDATE change_requests SET status = ? WHERE id = ?", (status.value, change_id)
+                "UPDATE change_requests SET status = ?, updated_at = ? WHERE id = ?",
+                (status.value, updated_at.isoformat(), change_id),
             )
             if result.rowcount != 1:
                 raise KeyError(f"change request not found: {change_id}")

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from src.domain.enums import (
     AuthorityLevel,
+    BaselineStatus,
     ChangeReviewAction,
     ChangeStatus,
     DecisionAction,
@@ -14,6 +15,7 @@ from src.domain.enums import (
     SecurityLevel,
 )
 from src.domain.models import (
+    Baseline,
     ChangeRequest,
     Decision,
     IssueCard,
@@ -23,6 +25,7 @@ from src.domain.models import (
 )
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
+    SqliteBaselineRepository,
     SqliteChangeRepository,
     SqliteDecisionRepository,
     SqliteIssueRepository,
@@ -78,6 +81,46 @@ def test_source_repository_round_trip_and_hash_lookup(tmp_path: Path) -> None:
     assert repository.get(source.id) == source
     assert repository.find_by_sha256(source.project_id, source.sha256) == source
     assert repository.list_for_project(source.project_id) == [source]
+
+
+def test_baseline_repository_round_trip_and_supersede(tmp_path: Path) -> None:
+    """Protects baseline history from losing its immutable release metadata."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    baseline = Baseline(
+        id="BASE-LLD-724_1",
+        project_id="LLD",
+        version="LLD-724_1",
+        parent_baseline_id=None,
+        status=BaselineStatus.EFFECTIVE,
+        full_document_path="data/obsidian_vault/02_Current_Baseline/LLD-724_1/full.md",
+        card_snapshot_path="data/obsidian_vault/02_Current_Baseline/LLD-724_1/cards.json",
+        manifest_sha256="c" * 64,
+        change_request_id=None,
+        approved_by="产品经理",
+        effective_at=NOW,
+        created_at=NOW,
+    )
+    repository = SqliteBaselineRepository(db_path)
+    repository.add(baseline)
+
+    assert repository.get(baseline.id) == baseline
+    repository.mark_superseded(baseline.id)
+    assert repository.get(baseline.id) == baseline.model_copy(
+        update={"status": BaselineStatus.SUPERSEDED}
+    )
 
 
 def test_knowledge_issue_decision_and_change_repositories_restore_validated_models(
@@ -196,3 +239,11 @@ def test_knowledge_issue_decision_and_change_repositories_restore_validated_mode
     assert changes.get(change.id) == reviewed
     assert changes.find_by_review_idempotency_key("review-001") == reviewed
     assert changes.list_pending("LLD") == []
+
+    issue_updated_at = NOW + timedelta(minutes=1)
+    change_updated_at = NOW + timedelta(minutes=2)
+    issues.update_status(issue.id, IssueStatus.DECIDED, issue_updated_at)
+    changes.update_status(change.id, ChangeStatus.PUBLISHED, change_updated_at)
+
+    assert issues.get(issue.id).updated_at == issue_updated_at
+    assert changes.get(change.id).updated_at == change_updated_at

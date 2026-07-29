@@ -9,6 +9,10 @@ from pydantic import ValidationError
 from src.domain.models import BaselineManifest
 
 
+class ManifestDurabilityUncertainError(RuntimeError):
+    """The replacement occurred, but its directory sync could not be confirmed."""
+
+
 def fsync_file(path: Path) -> None:
     with path.open("rb") as file:
         os.fsync(file.fileno())
@@ -48,7 +52,12 @@ class ManifestStore:
             temp_path.write_text(payload, encoding="utf-8")
             fsync_file(temp_path)
             os.replace(temp_path, self.path)
-            fsync_directory(self.path.parent)
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise
+        try:
+            fsync_directory(self.path.parent)
+        except OSError as error:
+            raise ManifestDurabilityUncertainError(
+                f"Manifest replacement completed but durability is uncertain: {self.path}"
+            ) from error

@@ -10,8 +10,8 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.domain.enums import BaselineStatus
-from src.domain.models import Baseline, BaselineManifest, Project
+from src.domain.enums import AuthorityLevel, BaselineStatus, KnowledgeStatus
+from src.domain.models import Baseline, BaselineManifest, KnowledgeCard, Project
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import SqliteBaselineRepository, SqliteProjectRepository
 from src.infrastructure.files.manifest_store import ManifestStore
@@ -28,45 +28,51 @@ def bootstrap(project_root: Path) -> BaselineManifest:
     db_path = project_root / "data/local_state/product_intelligence.db"
     migrate(db_path)
     markdown_store = MarkdownStore(project_root)
-    full_document_path, card_snapshot_path = markdown_store.write_baseline(
-        BASELINE_VERSION,
-        "# 产品智策初始基线\n\n当前版本：LLD-724_1\n\n## 目标客群\n\n仅作为脱敏演示基线使用。\n",
-        [
-            {
-                "applicable_scope": "演示",
-                "authority_level": "formal_effective",
-                "card_type": "rule",
-                "content": "仅作为脱敏演示基线使用。",
-                "id": "RULE-LLD-001",
-                "owner": "产品经理",
-                "product_version": BASELINE_VERSION,
-                "source_refs": ["SRC-LLD-BASE"],
-                "status": "effective",
-                "title": "目标客群",
-            }
-        ],
-    )
-    manifest = BaselineManifest(
-        schema_version="1.0",
-        project_id=PROJECT_ID,
-        current_baseline_id=BASELINE_ID,
-        current_version=BASELINE_VERSION,
-        parent_baseline_id=None,
-        full_document_path=full_document_path,
-        card_snapshot_path=card_snapshot_path,
-        full_document_sha256=markdown_store.sha256_for(full_document_path),
-        card_snapshot_sha256=markdown_store.sha256_for(card_snapshot_path),
-        change_request_id=None,
-        approved_by="产品经理",
-        published_at=PUBLISHED_AT,
-    )
     manifest_path = project_root / "data/local_state/current_baseline.json"
     manifest_store = ManifestStore(manifest_path)
     if manifest_path.exists():
-        existing = manifest_store.read_and_validate()
-        _validate_manifest_assets(project_root, existing)
-        manifest = existing
+        manifest = manifest_store.read_and_validate()
+        _validate_manifest_assets(project_root, manifest)
     else:
+        full_document_path, card_snapshot_path = markdown_store.write_baseline(
+            BASELINE_VERSION,
+            (
+                "# 产品智策初始基线\n\n当前版本：LLD-724_1\n\n## 目标客群\n\n"
+                "仅作为脱敏演示基线使用。\n"
+            ),
+            [
+                KnowledgeCard(
+                    id="RULE-LLD-001",
+                    project_id=PROJECT_ID,
+                    card_type="rule",
+                    title="目标客群",
+                    content="仅作为脱敏演示基线使用。",
+                    status=KnowledgeStatus.EFFECTIVE,
+                    product_version=BASELINE_VERSION,
+                    applicable_scope="演示",
+                    source_refs=["SRC-LLD-BASE"],
+                    authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+                    owner="产品经理",
+                    confidence=None,
+                    created_at=PUBLISHED_AT,
+                    updated_at=PUBLISHED_AT,
+                )
+            ],
+        )
+        manifest = BaselineManifest(
+            schema_version="1.0",
+            project_id=PROJECT_ID,
+            current_baseline_id=BASELINE_ID,
+            current_version=BASELINE_VERSION,
+            parent_baseline_id=None,
+            full_document_path=full_document_path,
+            card_snapshot_path=card_snapshot_path,
+            full_document_sha256=markdown_store.sha256_for(full_document_path),
+            card_snapshot_sha256=markdown_store.sha256_for(card_snapshot_path),
+            change_request_id=None,
+            approved_by="产品经理",
+            published_at=PUBLISHED_AT,
+        )
         manifest_store.atomic_replace(manifest)
 
     projects = SqliteProjectRepository(db_path)
@@ -107,7 +113,7 @@ def bootstrap(project_root: Path) -> BaselineManifest:
         )
     projects.update_current_baseline(PROJECT_ID, manifest.current_baseline_id)
     _validate_manifest_assets(project_root, manifest)
-    _validate_sqlite_mirror(db_path, manifest)
+    _validate_sqlite_mirror(db_path, manifest_path, manifest)
     return manifest
 
 
@@ -122,12 +128,30 @@ def _validate_manifest_assets(project_root: Path, manifest: BaselineManifest) ->
             raise ValueError(f"Manifest hash mismatch for {relative_path}")
 
 
-def _validate_sqlite_mirror(db_path: Path, manifest: BaselineManifest) -> None:
+def _validate_sqlite_mirror(db_path: Path, manifest_path: Path, manifest: BaselineManifest) -> None:
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
-            "SELECT current_baseline_id FROM projects WHERE id = ?", (manifest.project_id,)
+            """
+            SELECT
+                projects.current_baseline_id,
+                baselines.manifest_sha256,
+                baselines.version,
+                baselines.full_document_path,
+                baselines.card_snapshot_path
+            FROM projects
+            LEFT JOIN baselines ON baselines.id = projects.current_baseline_id
+            WHERE projects.id = ?
+            """,
+            (manifest.project_id,),
         ).fetchone()
-    if row is None or row[0] != manifest.current_baseline_id:
+    expected = (
+        manifest.current_baseline_id,
+        _sha256(manifest_path),
+        manifest.current_version,
+        manifest.full_document_path,
+        manifest.card_snapshot_path,
+    )
+    if row is None or tuple(row) != expected:
         raise ValueError("SQLite current baseline mirror does not match manifest")
 
 
