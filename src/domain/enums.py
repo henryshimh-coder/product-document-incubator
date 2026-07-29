@@ -41,6 +41,11 @@ class IssueStatus(StrEnum):
     CLOSED = "closed"
 
 
+class EvidenceSide(StrEnum):
+    CURRENT_BASELINE = "current_baseline"
+    CHALLENGING_SOURCE = "challenging_source"
+
+
 class DecisionAction(StrEnum):
     ACCEPT_CHANGE = "accept_change"
     KEEP_CURRENT = "keep_current"

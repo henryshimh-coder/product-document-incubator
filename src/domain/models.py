@@ -12,6 +12,7 @@ from src.domain.enums import (
     ChangeReviewAction,
     ChangeStatus,
     DecisionAction,
+    EvidenceSide,
     IssueSeverity,
     IssueStatus,
     KnowledgeStatus,
@@ -19,6 +20,10 @@ from src.domain.enums import (
 )
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+ReviewCommentStr = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=10, max_length=200),
+]
 Sha256Str = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 
@@ -128,6 +133,7 @@ class IssueEvidence(DomainModel):
     excerpt: NonEmptyStr
     document_version: NonEmptyStr
     page_or_section: NonEmptyStr
+    side: EvidenceSide
 
 
 class IssueCard(DomainModel):
@@ -158,6 +164,12 @@ class IssueCard(DomainModel):
             unique_sources = {item.source_id for item in self.evidence}
             if len(unique_sources) < 2:
                 raise ValueError("evidence must come from two distinct sources for a major issue")
+            evidence_sides = {item.side for item in self.evidence}
+            if evidence_sides != {
+                EvidenceSide.CURRENT_BASELINE,
+                EvidenceSide.CHALLENGING_SOURCE,
+            }:
+                raise ValueError("a major issue must contain both evidence sides")
         if self.severity == IssueSeverity.PENDING_INFO and self.uncertainty is None:
             raise ValueError("uncertainty must describe the missing content")
         return self
@@ -207,7 +219,7 @@ class ChangeRequest(DomainModel):
     status: ChangeStatus
     review_action: ChangeReviewAction | None
     reviewed_by: NonEmptyStr | None
-    review_comment: NonEmptyStr | None
+    review_comment: ReviewCommentStr | None
     review_idempotency_key: NonEmptyStr | None
     reviewed_at: datetime | None
     target_version: NonEmptyStr

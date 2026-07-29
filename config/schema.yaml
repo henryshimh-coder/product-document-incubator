@@ -51,6 +51,10 @@ relation_types:
   - impacts
   - to_be_verified_by
 
+evidence_sides:
+  - current_baseline
+  - challenging_source
+
 id_prefixes:
   project: PRJ
   source: SRC

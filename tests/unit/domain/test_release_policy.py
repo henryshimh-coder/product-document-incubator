@@ -109,6 +109,14 @@ def test_release_rejects_forged_approved_status_without_review_audit():
         _validate(ReleaseCommand(), manifest(), forged)
 
 
+def test_release_rejects_forged_approval_with_short_review_comment():
+    """Catches unchecked persistence data bypassing the 10-character audit minimum."""
+    forged = change().model_copy(update={"review_comment": "已批"})
+
+    with pytest.raises(DomainError, match="CHANGE_REVIEW_INVALID"):
+        _validate(ReleaseCommand(), manifest(), forged)
+
+
 def test_release_requires_impact_review_for_approved_change():
     """Catches publishing an approved change before its impact is checked."""
     with pytest.raises(DomainError, match="IMPACT_REVIEW_REQUIRED"):

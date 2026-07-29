@@ -12,6 +12,7 @@ from src.domain.enums import (
     AuthorityLevel,
     ChangeReviewAction,
     ChangeStatus,
+    EvidenceSide,
     IssueSeverity,
     IssueStatus,
     KnowledgeStatus,
@@ -163,6 +164,7 @@ def test_major_issue_requires_two_distinct_evidence_items():
         excerpt="当前方案原文",
         document_version="LLD-724_1",
         page_or_section="目标客群",
+        side=EvidenceSide.CURRENT_BASELINE,
     )
 
     with pytest.raises(ValidationError, match="evidence"):
@@ -197,6 +199,7 @@ def test_major_issue_requires_evidence_from_two_distinct_sources():
             excerpt=f"风险意见片段 {index}",
             document_version="v1.0",
             page_or_section=f"第 {index} 节",
+            side=(EvidenceSide.CURRENT_BASELINE if index == 1 else EvidenceSide.CHALLENGING_SOURCE),
         )
         for index in (1, 2)
     ]
@@ -210,6 +213,43 @@ def test_major_issue_requires_evidence_from_two_distinct_sources():
             status=IssueStatus.OPEN,
             title="客群边界不一致",
             description="需要会议确认当前执行口径",
+            evidence=evidence,
+            impacted_domains=["产品", "风险"],
+            options=[],
+            ai_recommendation=None,
+            ai_confidence=None,
+            uncertainty=None,
+            owner=None,
+            due_at=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+
+def test_major_issue_requires_evidence_from_both_sides():
+    """Catches two different sources from the same side being presented as a conflict."""
+    models = _models()
+    evidence = [
+        models.IssueEvidence(
+            source_id=f"SRC-RISK-{index}",
+            citation_id=f"CIT-RISK-{index}",
+            excerpt=f"风险意见片段 {index}",
+            document_version="v1.0",
+            page_or_section=f"第 {index} 节",
+            side=EvidenceSide.CHALLENGING_SOURCE,
+        )
+        for index in (1, 2)
+    ]
+
+    with pytest.raises(ValidationError, match="both evidence sides"):
+        models.IssueCard(
+            id="ISSUE-LLD-003",
+            project_id="LLD",
+            issue_type="conflict",
+            severity=IssueSeverity.PENDING_DECISION,
+            status=IssueStatus.OPEN,
+            title="风险意见存在分歧",
+            description="两份风险意见均建议调整，但没有当前基线侧依据",
             evidence=evidence,
             impacted_domains=["产品", "风险"],
             options=[],
@@ -282,6 +322,33 @@ def test_change_transition_returns_a_new_fully_validated_instance():
     assert approved.review_action == ChangeReviewAction.APPROVE
 
 
+def test_publish_transition_preserves_existing_approval_audit():
+    """Catches the publish transition erasing the review record it depends on."""
+    models = _models()
+    transition = importlib.import_module("src.domain.policies.state_transition")
+    pending = _pending_change_request(models)
+    approved = transition.transition_change(
+        pending,
+        ChangeStatus.APPROVED,
+        review_action=ChangeReviewAction.APPROVE,
+        reviewed_by="产品经理",
+        review_comment="已核对修改前后、证据、影响对象和目标版本。",
+        review_idempotency_key="REVIEW-CHG-001",
+        reviewed_at=NOW,
+        updated_at=NOW,
+    )
+
+    published = transition.transition_change(
+        approved,
+        ChangeStatus.PUBLISHED,
+        updated_at=NOW,
+    )
+
+    assert published.status == ChangeStatus.PUBLISHED
+    assert published.review_action == ChangeReviewAction.APPROVE
+    assert published.reviewed_by == "产品经理"
+
+
 def test_approved_change_requires_complete_review_audit():
     """Catches an approved state without reviewer, comment, idempotency key, and time."""
     models = _models()
@@ -311,6 +378,25 @@ def test_approved_change_requires_complete_review_audit():
             effective_condition="发布后生效",
             created_at=NOW,
             updated_at=NOW,
+        )
+
+
+@pytest.mark.parametrize("review_comment", ["已批", "批" * 201])
+def test_review_comment_must_be_between_10_and_200_characters(review_comment):
+    """Catches an unauditable or oversized approval comment entering reviewed state."""
+    models = _models()
+
+    with pytest.raises(ValidationError, match="review_comment"):
+        models.ChangeRequest(
+            **{
+                **_pending_change_request(models).model_dump(),
+                "status": ChangeStatus.APPROVED,
+                "review_action": ChangeReviewAction.APPROVE,
+                "reviewed_by": "产品经理",
+                "review_comment": review_comment,
+                "review_idempotency_key": "REVIEW-CHG-001",
+                "reviewed_at": NOW,
+            }
         )
 
 
@@ -381,6 +467,13 @@ def test_schema_relation_types_construct_valid_relations():
             created_at=NOW,
         )
         assert relation.relation_type == relation_type
+
+
+def test_schema_evidence_sides_match_domain_enum():
+    """Catches workflow configuration drifting from the two-sided evidence contract."""
+    schema = yaml.safe_load(Path("config/schema.yaml").read_text(encoding="utf-8"))
+
+    assert schema["evidence_sides"] == [side.value for side in EvidenceSide]
 
 
 def test_baseline_manifest_rejects_invalid_content_hash():

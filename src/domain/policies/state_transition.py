@@ -49,6 +49,12 @@ def transition_change(
 ) -> ChangeRequest:
     ensure_change_transition(change.status, target)
     data = change.model_dump()
+    if target == ChangeStatus.PUBLISHED:
+        review_action = change.review_action
+        reviewed_by = change.reviewed_by
+        review_comment = change.review_comment
+        review_idempotency_key = change.review_idempotency_key
+        reviewed_at = change.reviewed_at
     data.update(
         {
             "status": target,

@@ -37,6 +37,8 @@ class ReleasePolicy:
             item is None for item in review_fields
         ):
             raise DomainError(ErrorCode.CHANGE_REVIEW_INVALID)
+        if not 10 <= len(change.review_comment.strip()) <= 200:
+            raise DomainError(ErrorCode.CHANGE_REVIEW_INVALID)
         if command.change_request_id != change.id:
             raise DomainError(ErrorCode.RELEASE_CHANGE_MISMATCH)
         if len({command.project_id, manifest.project_id, change.project_id}) != 1:
