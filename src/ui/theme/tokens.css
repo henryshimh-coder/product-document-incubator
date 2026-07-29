@@ -1,0 +1,53 @@
+:root {
+  --pi-blue-700: #1256B8;
+  --pi-blue-600: #1769E0;
+  --pi-blue-100: #DCEAFF;
+  --pi-blue-050: #EEF5FF;
+  --pi-text-900: #243B53;
+  --pi-text-600: #52677D;
+  --pi-text-400: #829AB1;
+  --pi-border: #D9E2EC;
+  --pi-surface: #FFFFFF;
+  --pi-surface-muted: #F7FAFC;
+  --pi-success: #16865C;
+  --pi-warning: #B7791F;
+  --pi-danger: #C43D3D;
+  --pi-radius-sm: 6px;
+  --pi-radius: 8px;
+  --pi-radius-lg: 12px;
+  --pi-shadow: 0 4px 16px rgb(28 53 84 / 8%);
+}
+
+.stApp {
+  color: var(--pi-text-900);
+  background: var(--pi-surface);
+}
+
+[data-testid="stSidebar"] {
+  border-right: 1px solid var(--pi-border);
+  background: var(--pi-surface-muted);
+}
+
+[data-testid="stHeader"] {
+  background: rgb(255 255 255 / 92%);
+}
+
+.stButton > button[kind="primary"] {
+  min-height: 40px;
+  border-radius: var(--pi-radius);
+  background: var(--pi-blue-600);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+.stButton > button[kind="primary"]:hover {
+  background: var(--pi-blue-700);
+}
+
+.stButton > button:not([kind="primary"]) {
+  min-height: 40px;
+  border-color: var(--pi-border);
+  border-radius: var(--pi-radius);
+  color: var(--pi-text-900);
+  background: var(--pi-surface);
+}

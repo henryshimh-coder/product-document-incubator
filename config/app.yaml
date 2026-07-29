@@ -1,0 +1,24 @@
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions:
+    - pdf
+    - docx
+    - txt
+    - md
+  demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
+
+cache:
+  enabled: true
+  require_exact_key_match: true
+
+release:
+  require_human_approval: true
+  require_impact_review: true

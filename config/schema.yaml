@@ -1,0 +1,61 @@
+schema_version: "1.0"
+dify_output_version: "1.0"
+
+objects:
+  - project
+  - source_record
+  - knowledge_card
+  - relation
+  - baseline
+  - issue_card
+  - decision
+  - change_request
+  - model_call_log
+
+statuses:
+  knowledge:
+    - ai_inferred
+    - human_confirmed
+    - candidate
+    - conflict
+    - effective
+    - superseded
+    - rejected
+  issue:
+    - open
+    - decided
+    - deferred
+    - false_positive
+    - closed
+  change:
+    - draft
+    - pending_approval
+    - approved
+    - rejected
+    - deferred
+    - needs_info
+    - published
+  baseline:
+    - draft
+    - effective
+    - superseded
+    - failed
+
+relation_types:
+  - derived_from
+  - conflicts_with
+  - supports
+  - decided_by
+  - changes
+  - released_as
+
+id_prefixes:
+  project: PRJ
+  source: SRC
+  card: CARD
+  relation: REL
+  baseline: BASE
+  issue: ISSUE
+  decision: DEC
+  change: CHG
+  model_call: CALL
