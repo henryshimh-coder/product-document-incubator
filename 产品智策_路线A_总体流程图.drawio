@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="路线A总体流程">
+    <mxGraphModel dx="2100" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="2" value="产品智策｜路线 A 总体流程：先交付、再强化、最后稳定汇报" style="text;html=1;align=center;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1f2937;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="2020" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="10" value="一、交付节奏" style="swimlane;startSize=38;container=1;pointerEvents=0;rounded=1;html=1;fillColor=#f0fdf4;strokeColor=#82b366;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="2020" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="11" value="8 月 24 日｜轻量交付版&#xa;&#xa;• 六个工作区可运行&#xa;• 核心闭环真实贯通&#xa;• 固定样例＋缓存兜底&#xa;• 提交材料形成初版" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;align=left;spacingLeft=18;" vertex="1" parent="10">
+          <mxGeometry x="40" y="55" width="560" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="12" value="8 月 25—30 日｜强化期&#xa;&#xa;• 接通实时外部模型&#xa;• 完成实测与引用核验&#xa;• 优化现场节奏和视觉&#xa;• 补齐备用视频与故障预案" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=15;align=left;spacingLeft=18;" vertex="1" parent="10">
+          <mxGeometry x="730" y="55" width="560" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="13" value="8 月 30 日｜正式演示版冻结&#xa;&#xa;9 月现场汇报&#xa;• 5—8 分钟实时完整演示&#xa;• 只彩排和修复阻断问题&#xa;• 不再增加新功能" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=15;align=left;spacingLeft=18;" vertex="1" parent="10">
+          <mxGeometry x="1420" y="55" width="560" height="125" as="geometry" />
+        </mxCell>
+        <mxCell id="14" value="可交付" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="10" source="11" target="12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="15" value="强化并冻结" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="10" source="12" target="13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="20" value="二、平台实际使用流程（六个工作区）" style="swimlane;startSize=40;container=1;pointerEvents=0;rounded=1;html=1;fillColor=#eff6ff;strokeColor=#6c8ebf;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="320" width="2020" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="21" value="真实脱敏材料&#xa;&#xa;• 当前产品方案&#xa;• 风险意见&#xa;• 会议纪要&#xa;• 技术方案" style="shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;fontStyle=1;" vertex="1" parent="20">
+          <mxGeometry x="30" y="125" width="230" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="22" value="① 项目首页与当前基线&#xa;&#xa;先看清：&#xa;“现在生效的产品是什么”&#xa;版本、冲突、候选变化一屏掌握" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;" vertex="1" parent="20">
+          <mxGeometry x="290" y="70" width="250" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="23" value="② 资料导入&#xa;&#xa;人工确认材料类型、权威和安全标签&#xa;AI 完成抽取、比较与知识编译" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;" vertex="1" parent="20">
+          <mxGeometry x="590" y="70" width="250" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="24" value="③ 当前产品查询&#xa;&#xa;直接答案＋当前规则&#xa;原文引用＋版本&#xa;候选／冲突提醒" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontStyle=1;" vertex="1" parent="20">
+          <mxGeometry x="890" y="40" width="250" height="135" as="geometry" />
+        </mxCell>
+        <mxCell id="25" value="④ 一键自检与会议决策&#xa;&#xa;发现跨材料、跨版本冲突&#xa;产品经理选择：接受／维持／暂缓／误报" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;" vertex="1" parent="20">
+          <mxGeometry x="890" y="245" width="280" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="26" value="⑤ 变更发布&#xa;&#xa;自动生成变更单&#xa;人工检查并批准&#xa;任何 AI 建议不能自动生效" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;fontStyle=1;" vertex="1" parent="20">
+          <mxGeometry x="1230" y="245" width="250" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="27" value="新产品基线&#xa;&#xa;完整方案与规则卡同步更新&#xa;保留父版本、修改前后和批准记录" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;" vertex="1" parent="20">
+          <mxGeometry x="1540" y="245" width="250" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="28" value="⑥ 追溯与价值证明&#xa;&#xa;资料→规则→冲突→决策→版本&#xa;市场证据缺口｜轻量成本联动&#xa;调用审计｜人工对照成效" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;" vertex="1" parent="20">
+          <mxGeometry x="1510" y="40" width="410" height="135" as="geometry" />
+        </mxCell>
+
+        <mxCell id="30" value="打开当前项目" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=12;labelBackgroundColor=#ffffff;exitX=1;exitY=0.35;entryX=0;entryY=0.5;" edge="1" parent="20" source="22" target="23">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="31" value="上传并确认" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=12;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.65;" edge="1" parent="20" source="21" target="23">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="32" value="查询当前规则" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=12;labelBackgroundColor=#ffffff;exitX=1;exitY=0.25;entryX=0;entryY=0.5;" edge="1" parent="20" source="23" target="24">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="33" value="启动 Lint" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=12;labelBackgroundColor=#ffffff;exitX=1;exitY=0.75;entryX=0;entryY=0.5;" edge="1" parent="20" source="23" target="25">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="34" value="形成正式决定" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=12;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="20" source="25" target="26">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="35" value="人工批准发布" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=12;labelBackgroundColor=#ffffff;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="20" source="26" target="27">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="36" value="全过程留痕" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=12;labelBackgroundColor=#ffffff;exitX=0.5;exitY=0;entryX=0.75;entryY=1;" edge="1" parent="20" source="27" target="28">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="37" value="成为新的“当前产品”" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=12;labelBackgroundColor=#ffffff;exitX=0.5;exitY=1;entryX=0.5;entryY=1;" edge="1" parent="1" source="27" target="22">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1705" y="790" />
+              <mxPoint x="455" y="790" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="40" value="三、现场保障与二期边界" style="swimlane;startSize=38;container=1;pointerEvents=0;rounded=1;html=1;fillColor=#fafafa;strokeColor=#666666;fontSize=16;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="850" width="2020" height="220" as="geometry" />
+        </mxCell>
+        <mxCell id="41" value="一期必须守住&#xa;&#xa;当前生效优先｜原文可追溯&#xa;人工审批｜资料分级与脱敏" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;fontStyle=1;" vertex="1" parent="40">
+          <mxGeometry x="40" y="60" width="560" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="42" value="现场三层保障&#xa;&#xa;正常：实时 AI 完整流程&#xa;异常：缓存结果继续操作&#xa;中断：备用视频接管演示" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;fontStyle=1;" vertex="1" parent="40">
+          <mxGeometry x="730" y="60" width="560" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="43" value="二期再建设&#xa;&#xa;完整市场／财务／会计能力｜多角色会签&#xa;内网模型｜生产系统集成｜上线后持续运营" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=14;fontStyle=1;" vertex="1" parent="40">
+          <mxGeometry x="1420" y="60" width="560" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="50" value="图例：蓝色＝一期平台功能　黄色＝人工决策门　绿色＝交付／生效结果　紫色＝治理与价值证明　灰色＝二期能力" style="text;html=1;align=center;verticalAlign=middle;fontSize=12;fontColor=#4b5563;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1090" width="2020" height="30" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
