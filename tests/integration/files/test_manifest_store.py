@@ -190,6 +190,28 @@ def test_bootstrap_rejects_sqlite_baseline_mirror_mismatch(
         bootstrap(tmp_path)
 
 
+def test_bootstrap_rejects_existing_project_baseline_id_mismatch_without_repair(
+    tmp_path: Path,
+) -> None:
+    """Protects mirror corruption from being silently normalized on repeat bootstrap."""
+    manifest = bootstrap(tmp_path)
+    db_path = tmp_path / "data/local_state/product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE projects SET current_baseline_id = ? WHERE id = ?",
+            ("BASE-LLD-stale", manifest.project_id),
+        )
+
+    with pytest.raises(ValueError, match="baseline mirror"):
+        bootstrap(tmp_path)
+
+    with sqlite3.connect(db_path) as connection:
+        current_baseline_id = connection.execute(
+            "SELECT current_baseline_id FROM projects WHERE id = ?", (manifest.project_id,)
+        ).fetchone()[0]
+    assert current_baseline_id == "BASE-LLD-stale"
+
+
 def test_bootstrap_cli_honors_explicit_root_without_touching_repository_data(
     tmp_path: Path,
 ) -> None:

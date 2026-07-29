@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -45,6 +45,12 @@ def _require(row: sqlite3.Row | None, entity: str, entity_id: str) -> sqlite3.Ro
     if row is None:
         raise KeyError(f"{entity} not found: {entity_id}")
     return row
+
+
+def _require_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise ValueError("updated_at must be an aware UTC datetime")
+    return value
 
 
 class SqliteProjectRepository:
@@ -354,6 +360,7 @@ class SqliteIssueRepository:
         return [self._to_model(row) for row in rows]
 
     def update_status(self, issue_id: str, status: IssueStatus, updated_at: datetime) -> None:
+        updated_at = _require_utc(updated_at)
         with connect(self.db_path) as connection:
             result = connection.execute(
                 "UPDATE issue_cards SET status = ?, updated_at = ? WHERE id = ?",
@@ -485,6 +492,7 @@ class SqliteChangeRepository:
         return self.get(change_id)
 
     def update_status(self, change_id: str, status: ChangeStatus, updated_at: datetime) -> None:
+        updated_at = _require_utc(updated_at)
         with connect(self.db_path) as connection:
             result = connection.execute(
                 "UPDATE change_requests SET status = ?, updated_at = ? WHERE id = ?",

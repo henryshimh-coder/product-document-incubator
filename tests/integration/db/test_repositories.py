@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from src.domain.enums import (
     AuthorityLevel,
@@ -244,6 +246,19 @@ def test_knowledge_issue_decision_and_change_repositories_restore_validated_mode
     change_updated_at = NOW + timedelta(minutes=2)
     issues.update_status(issue.id, IssueStatus.DECIDED, issue_updated_at)
     changes.update_status(change.id, ChangeStatus.PUBLISHED, change_updated_at)
+
+    assert issues.get(issue.id).updated_at == issue_updated_at
+    assert changes.get(change.id).updated_at == change_updated_at
+
+    invalid_timestamps = (
+        datetime(2026, 7, 29, 8, 0),
+        datetime(2026, 7, 29, 8, 0, tzinfo=timezone(timedelta(hours=8))),
+    )
+    for invalid_timestamp in invalid_timestamps:
+        with pytest.raises(ValueError, match="UTC"):
+            issues.update_status(issue.id, IssueStatus.CLOSED, invalid_timestamp)
+        with pytest.raises(ValueError, match="UTC"):
+            changes.update_status(change.id, ChangeStatus.PUBLISHED, invalid_timestamp)
 
     assert issues.get(issue.id).updated_at == issue_updated_at
     assert changes.get(change.id).updated_at == change_updated_at

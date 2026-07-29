@@ -79,6 +79,7 @@ def bootstrap(project_root: Path) -> BaselineManifest:
     try:
         projects.get(PROJECT_ID)
     except KeyError:
+        project_created = True
         projects.add(
             Project(
                 id=PROJECT_ID,
@@ -91,27 +92,32 @@ def bootstrap(project_root: Path) -> BaselineManifest:
                 updated_at=PUBLISHED_AT,
             )
         )
+    else:
+        project_created = False
     baselines = SqliteBaselineRepository(db_path)
-    try:
-        baselines.get(manifest.current_baseline_id)
-    except KeyError:
-        baselines.add(
-            Baseline(
-                id=manifest.current_baseline_id,
-                project_id=manifest.project_id,
-                version=manifest.current_version,
-                parent_baseline_id=manifest.parent_baseline_id,
-                status=BaselineStatus.EFFECTIVE,
-                full_document_path=manifest.full_document_path,
-                card_snapshot_path=manifest.card_snapshot_path,
-                manifest_sha256=_sha256(manifest_path),
-                change_request_id=manifest.change_request_id,
-                approved_by=manifest.approved_by,
-                effective_at=manifest.published_at,
-                created_at=manifest.published_at,
+    if project_created:
+        try:
+            baselines.get(manifest.current_baseline_id)
+        except KeyError:
+            baselines.add(
+                Baseline(
+                    id=manifest.current_baseline_id,
+                    project_id=manifest.project_id,
+                    version=manifest.current_version,
+                    parent_baseline_id=manifest.parent_baseline_id,
+                    status=BaselineStatus.EFFECTIVE,
+                    full_document_path=manifest.full_document_path,
+                    card_snapshot_path=manifest.card_snapshot_path,
+                    manifest_sha256=_sha256(manifest_path),
+                    change_request_id=manifest.change_request_id,
+                    approved_by=manifest.approved_by,
+                    effective_at=manifest.published_at,
+                    created_at=manifest.published_at,
+                )
             )
-        )
-    projects.update_current_baseline(PROJECT_ID, manifest.current_baseline_id)
+        projects.update_current_baseline(PROJECT_ID, manifest.current_baseline_id)
+    else:
+        _validate_sqlite_mirror(db_path, manifest_path, manifest)
     _validate_manifest_assets(project_root, manifest)
     _validate_sqlite_mirror(db_path, manifest_path, manifest)
     return manifest
