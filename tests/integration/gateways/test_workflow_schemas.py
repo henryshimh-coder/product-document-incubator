@@ -9,7 +9,7 @@ import pytest
 
 from src.domain.enums import SecurityLevel
 from src.domain.errors import GatewayError, OutputValidationError
-from src.infrastructure.files.redactor import redact_text
+from src.infrastructure.files.redactor import RedactionResult
 
 
 def _gateway(name: str, client: Any):
@@ -46,31 +46,24 @@ def _outbound_proof(
     name: str,
     inputs: dict[str, Any],
     *,
-    outbound_coverage: float = 0.25,
+    source_total_chars: int = 100_000,
     security_level: SecurityLevel = SecurityLevel.L2_INTERNAL,
-    complete_dictionary_profile: bool = True,
     dictionary_terms: dict[str, list[str]] | None = None,
 ):
-    canonical = _canonical_payload(name, inputs)
-    redaction_kwargs: dict[str, Any] = {}
-    if complete_dictionary_profile:
-        terms = dictionary_terms or {}
-        redaction_kwargs = {
-            "customer_names": terms.get("customer_names", []),
-            "strategy_terms": terms.get("strategy_terms", []),
-            "financial_terms": terms.get("financial_terms", []),
-            "leader_names": terms.get("leader_names", []),
-            "unpublished_decisions": terms.get("unpublished_decisions", []),
-        }
-    redaction_result = redact_text(
-        canonical,
-        security_level=security_level,
-        **redaction_kwargs,
-    )
+    terms = dictionary_terms or {}
     common = importlib.import_module("src.infrastructure.gateways._common")
-    return common.OutboundSafetyProof(
-        redaction_result=redaction_result,
-        outbound_coverage=outbound_coverage,
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
+    schema = getattr(schemas, f"{name.title()}WorkflowInput")
+    return common.create_outbound_safety_proof(
+        schema,
+        inputs,
+        security_level=security_level,
+        customer_names=terms.get("customer_names", []),
+        strategy_terms=terms.get("strategy_terms", []),
+        financial_terms=terms.get("financial_terms", []),
+        leader_names=terms.get("leader_names", []),
+        unpublished_decisions=terms.get("unpublished_decisions", []),
+        source_total_chars=source_total_chars,
     )
 
 
@@ -311,6 +304,65 @@ def test_gateway_requires_local_outbound_safety_proof_before_external_call():
     assert client.calls == 0
 
 
+def test_gateway_rejects_manually_constructed_safe_redaction_probe():
+    """Catches a caller forging T04 fields instead of using the trusted proof factory."""
+    inputs = _query_input()
+    canonical = _canonical_payload("query", inputs)
+    common = importlib.import_module("src.infrastructure.gateways._common")
+    client = FakeDifyClient(_query_output())
+
+    with pytest.raises((TypeError, GatewayError)):
+        forged_proof = common.OutboundSafetyProof(
+            redaction_result=RedactionResult(
+                redacted_text=canonical,
+                findings=[],
+                original_chars=len(canonical),
+                redacted_chars=len(canonical),
+                safe_for_external_model=True,
+            ),
+            outbound_coverage=0.0,
+        )
+        _gateway("query", client).run(inputs, safety_proof=forged_proof)
+
+    assert client.calls == 0
+
+
+def test_gateway_rejects_thousand_chunks_with_forged_zero_coverage_probe():
+    """Catches unbounded list payloads bypassing actual coverage and absolute size limits."""
+    inputs = _ingest_input()
+    inputs["source_chunks"] = [
+        {
+            "chunk_id": f"CHUNK-{index:03d}",
+            "locator": "第2页/客群要求" if index == 1 else f"第{index}节",
+            "text": "风险意见要求收紧目标客群。",
+        }
+        for index in range(1, 1001)
+    ]
+    canonical = json.dumps(
+        inputs,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    common = importlib.import_module("src.infrastructure.gateways._common")
+    client = FakeDifyClient(_ingest_output())
+
+    with pytest.raises((TypeError, GatewayError)):
+        forged_proof = common.OutboundSafetyProof(
+            redaction_result=RedactionResult(
+                redacted_text=canonical,
+                findings=[],
+                original_chars=len(canonical),
+                redacted_chars=len(canonical),
+                safe_for_external_model=True,
+            ),
+            outbound_coverage=0.0,
+        )
+        _gateway("ingest", client).run(inputs, safety_proof=forged_proof)
+
+    assert client.calls == 0
+
+
 @pytest.mark.parametrize(
     "security_level",
     [SecurityLevel.L3_CONFIDENTIAL, SecurityLevel.L4_RESTRICTED],
@@ -321,9 +373,9 @@ def test_gateway_rejects_non_exportable_security_level_before_external_call(
     """Catches an L3/L4 payload crossing the external-model boundary."""
     inputs = _query_input()
     client = FakeDifyClient(_query_output())
-    proof = _outbound_proof("query", inputs, security_level=security_level)
 
     with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        proof = _outbound_proof("query", inputs, security_level=security_level)
         _gateway("query", client).run(inputs, safety_proof=proof)
 
     assert client.calls == 0
@@ -333,14 +385,20 @@ def test_gateway_rejects_incomplete_redaction_dictionary_profile_before_external
     """Catches a proof that skipped T04's five required local dictionaries."""
     inputs = _query_input()
     client = FakeDifyClient(_query_output())
-    proof = _outbound_proof(
-        "query",
-        inputs,
-        complete_dictionary_profile=False,
-    )
+    common = importlib.import_module("src.infrastructure.gateways._common")
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
 
-    with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
-        _gateway("query", client).run(inputs, safety_proof=proof)
+    with pytest.raises(TypeError, match="unpublished_decisions"):
+        common.create_outbound_safety_proof(
+            schemas.QueryWorkflowInput,
+            inputs,
+            security_level=SecurityLevel.L2_INTERNAL,
+            customer_names=[],
+            strategy_terms=[],
+            financial_terms=[],
+            leader_names=[],
+            source_total_chars=100_000,
+        )
 
     assert client.calls == 0
 
@@ -363,13 +421,13 @@ def test_gateway_rejects_payload_still_requiring_dictionary_redaction(
     inputs = _query_input()
     inputs["question"] = f"请解释{sensitive_term}相关规则"
     client = FakeDifyClient(_query_output())
-    proof = _outbound_proof(
-        "query",
-        inputs,
-        dictionary_terms={dictionary_name: [sensitive_term]},
-    )
 
     with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        proof = _outbound_proof(
+            "query",
+            inputs,
+            dictionary_terms={dictionary_name: [sensitive_term]},
+        )
         _gateway("query", client).run(inputs, safety_proof=proof)
 
     assert client.calls == 0
@@ -388,44 +446,67 @@ def test_gateway_rejects_proof_bound_to_an_earlier_payload_before_external_call(
     assert client.calls == 0
 
 
-@pytest.mark.parametrize("outbound_coverage", [-0.01, 0.2501])
-def test_gateway_rejects_outbound_coverage_outside_minimum_necessary_boundary(
-    outbound_coverage: float,
+@pytest.mark.parametrize("source_total_chars", [-1, 0, 1])
+def test_proof_factory_rejects_invalid_source_total_or_derived_excess_coverage(
+    source_total_chars: int,
 ):
-    """Catches a full or invalid document share escaping the 25% cumulative boundary."""
+    """Catches non-positive totals or actual payload coverage above 25%."""
     inputs = _query_input()
     client = FakeDifyClient(_query_output())
-    proof = _outbound_proof(
-        "query",
-        inputs,
-        outbound_coverage=outbound_coverage,
-    )
 
     with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        proof = _outbound_proof(
+            "query",
+            inputs,
+            source_total_chars=source_total_chars,
+        )
         _gateway("query", client).run(inputs, safety_proof=proof)
 
     assert client.calls == 0
 
 
-@pytest.mark.parametrize("length_field", ["original_chars", "redacted_chars"])
-def test_gateway_rejects_tampered_redaction_length_binding(
-    length_field: str,
+@pytest.mark.parametrize(
+    "tampered_field",
+    ["_outbound_chars", "_source_total_chars", "_coverage", "_signature"],
+)
+def test_gateway_rejects_tampered_or_fake_signed_proof(
+    tampered_field: str,
 ):
-    """Catches a real T04 proof whose payload-length binding was modified afterward."""
+    """Catches post-factory metadata changes and fake signatures before invocation."""
     inputs = _query_input()
     client = FakeDifyClient(_query_output())
     proof = _outbound_proof("query", inputs)
-    redaction_result = proof.redaction_result.model_copy(
-        update={
-            length_field: getattr(proof.redaction_result, length_field) + 1,
-        }
+    tampered_proof = object.__new__(type(proof))
+    proof_fields = (
+        "_payload_digest",
+        "_outbound_chars",
+        "_source_total_chars",
+        "_coverage",
+        "_signature",
     )
-    tampered_proof = proof.model_copy(update={"redaction_result": redaction_result})
+    for field in proof_fields:
+        object.__setattr__(tampered_proof, field, getattr(proof, field))
+    if tampered_field == "_signature":
+        tampered_value: Any = b"fake-signature"
+    elif tampered_field == "_coverage":
+        tampered_value = 0.0
+    else:
+        tampered_value = getattr(proof, tampered_field) + 1
+    object.__setattr__(tampered_proof, tampered_field, tampered_value)
 
     with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
         _gateway("query", client).run(inputs, safety_proof=tampered_proof)
 
     assert client.calls == 0
+
+
+def test_outbound_safety_proof_is_opaque_and_repr_hides_integrity_signature():
+    """Catches raw payload/T04 results or the HMAC signature leaking through the proof."""
+    proof = _outbound_proof("query", _query_input())
+
+    assert not hasattr(proof, "redaction_result")
+    assert _canonical_payload("query", _query_input()) not in repr(proof)
+    assert proof._signature.hex() not in repr(proof)
 
 
 @pytest.mark.parametrize(
@@ -458,6 +539,139 @@ def test_gateway_rejects_oversized_free_text_before_external_call(
 
     with pytest.raises(GatewayError, match=f"{name.upper()}_INPUT_INVALID"):
         _gateway(name, client).run(inputs, safety_proof=proof)
+
+    assert client.calls == 0
+
+
+def test_proof_factory_rejects_payload_above_absolute_canonical_ceiling():
+    """Catches bounded individual fields aggregating into an oversized external payload."""
+    inputs = _query_input()
+    inputs["effective_cards"] = [
+        {
+            **deepcopy(inputs["effective_cards"][0]),
+            "id": f"RULE-{index:03d}",
+            "content": "文" * 2000,
+        }
+        for index in range(1, 11)
+    ]
+    client = FakeDifyClient(_query_output())
+
+    with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        proof = _outbound_proof(
+            "query",
+            inputs,
+            source_total_chars=1_000_000,
+        )
+        _gateway("query", client).run(inputs, safety_proof=proof)
+
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("name", "input_factory", "field_path", "max_length"),
+    [
+        ("query", _query_input, ("project_id",), 128),
+        ("query", _query_input, ("baseline_version",), 128),
+        ("query", _query_input, ("task_id",), 128),
+        ("ingest", _ingest_input, ("source", "id"), 128),
+        ("ingest", _ingest_input, ("source", "type"), 256),
+        ("ingest", _ingest_input, ("source", "document_version"), 256),
+        ("ingest", _ingest_input, ("source", "applicable_scope"), 500),
+        ("ingest", _ingest_input, ("baseline_rules", 0, "id"), 128),
+        ("ingest", _ingest_input, ("baseline_rules", 0, "title"), 256),
+        ("ingest", _ingest_input, ("source_chunks", 0, "chunk_id"), 128),
+        ("ingest", _ingest_input, ("source_chunks", 0, "locator"), 500),
+        ("query", _query_input, ("effective_cards", 0, "id"), 128),
+        ("query", _query_input, ("effective_cards", 0, "title"), 256),
+        ("query", _query_input, ("effective_cards", 0, "source_citations", 0), 128),
+        ("query", _query_input, ("notices", 0, "id"), 128),
+        ("query", _query_input, ("citations", 0, "id"), 128),
+        ("query", _query_input, ("citations", 0, "source_id"), 128),
+        ("query", _query_input, ("citations", 0, "filename"), 256),
+        ("query", _query_input, ("citations", 0, "document_version"), 256),
+        ("query", _query_input, ("citations", 0, "section"), 500),
+        ("lint", _lint_input, ("baseline_rules", 0, "id"), 128),
+        ("lint", _lint_input, ("baseline_rules", 0, "source_id"), 128),
+        ("lint", _lint_input, ("baseline_rules", 0, "citation_id"), 128),
+        ("lint", _lint_input, ("baseline_rules", 0, "document_version"), 256),
+        ("lint", _lint_input, ("baseline_rules", 0, "page_or_section"), 500),
+    ],
+)
+def test_gateway_rejects_overlong_identifier_or_metadata_before_external_call(
+    name: str,
+    input_factory,
+    field_path: tuple[Any, ...],
+    max_length: int,
+):
+    """Catches unlimited identifiers or metadata expanding the outbound payload."""
+    inputs = input_factory()
+    proof = _outbound_proof(name, inputs)
+    target: Any = inputs
+    for part in field_path[:-1]:
+        target = target[part]
+    target[field_path[-1]] = "元" * (max_length + 1)
+    client = FakeDifyClient(
+        {"ingest": _ingest_output, "query": _query_output, "lint": _lint_output}[name]()
+    )
+
+    with pytest.raises(GatewayError, match=f"{name.upper()}_INPUT_INVALID"):
+        _gateway(name, client).run(inputs, safety_proof=proof)
+
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("name", "input_factory", "collection", "max_length"),
+    [
+        ("ingest", _ingest_input, "baseline_rules", 20),
+        ("ingest", _ingest_input, "source_chunks", 20),
+        ("query", _query_input, "effective_cards", 20),
+        ("query", _query_input, "notices", 20),
+        ("query", _query_input, "citations", 50),
+        ("lint", _lint_input, "baseline_rules", 50),
+        ("lint", _lint_input, "comparison_items", 50),
+        ("lint", _lint_input, "deterministic_findings", 50),
+        ("lint", _lint_input, "allowed_issue_types", 5),
+    ],
+)
+def test_gateway_rejects_overlong_input_collection_before_external_call(
+    name: str,
+    input_factory,
+    collection: str,
+    max_length: int,
+):
+    """Catches individually valid entries accumulating in an unbounded input list."""
+    inputs = input_factory()
+    proof = _outbound_proof(name, inputs)
+    if collection == "deterministic_findings":
+        item = {
+            **deepcopy(inputs["comparison_items"][0]),
+            "side": "challenging_source",
+        }
+    elif collection == "allowed_issue_types":
+        item = "conflict"
+    else:
+        item = deepcopy(inputs[collection][0])
+    inputs[collection] = [deepcopy(item) for _ in range(max_length + 1)]
+    client = FakeDifyClient(
+        {"ingest": _ingest_output, "query": _query_output, "lint": _lint_output}[name]()
+    )
+
+    with pytest.raises(GatewayError, match=f"{name.upper()}_INPUT_INVALID"):
+        _gateway(name, client).run(inputs, safety_proof=proof)
+
+    assert client.calls == 0
+
+
+def test_gateway_rejects_overlong_nested_citation_list_before_external_call():
+    """Catches a nested effective-card citation list bypassing collection limits."""
+    inputs = _query_input()
+    proof = _outbound_proof("query", inputs)
+    inputs["effective_cards"][0]["source_citations"] = [f"CIT-{index:03d}" for index in range(51)]
+    client = FakeDifyClient(_query_output())
+
+    with pytest.raises(GatewayError, match="QUERY_INPUT_INVALID"):
+        _gateway("query", client).run(inputs, safety_proof=proof)
 
     assert client.calls == 0
 
@@ -729,9 +943,9 @@ def test_gateway_rejects_known_sensitive_residue_before_external_call(
     inputs = _query_input()
     inputs["question"] = sensitive_question
     client = FakeDifyClient(_query_output())
-    proof = _outbound_proof("query", inputs)
 
     with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID") as caught:
+        proof = _outbound_proof("query", inputs)
         _gateway("query", client).run(inputs, safety_proof=proof)
 
     assert caught.value.code == "REDACTION_REQUIRED"

@@ -7,14 +7,55 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from src.domain.enums import AuthorityLevel, CallResultMode, EvidenceSide, IssueSeverity
 
+MAX_IDENTIFIER_CHARS = 128
+MAX_METADATA_CHARS = 256
+MAX_SCOPE_CHARS = 500
+MAX_MATERIAL_CHARS = 2000
+MAX_QUESTION_CHARS = 500
+MAX_SMALL_COLLECTION_ITEMS = 20
+MAX_CITATION_COLLECTION_ITEMS = 50
+MAX_ALLOWED_ISSUE_TYPES = 5
+
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+IdentifierStr = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_IDENTIFIER_CHARS,
+    ),
+]
+MetadataStr = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_METADATA_CHARS,
+    ),
+]
+ScopeStr = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_SCOPE_CHARS,
+    ),
+]
 MaterialFragment = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_MATERIAL_CHARS,
+    ),
 ]
 QuestionStr = Annotated[
     str,
-    StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=MAX_QUESTION_CHARS,
+    ),
 ]
 
 
@@ -24,59 +65,62 @@ class WorkflowOutput(BaseModel):
 
 class CommonWorkflowInput(WorkflowOutput):
     schema_version: Literal["1.0"]
-    project_id: NonEmptyStr
-    baseline_version: NonEmptyStr
-    task_id: NonEmptyStr
+    project_id: IdentifierStr
+    baseline_version: IdentifierStr
+    task_id: IdentifierStr
     language: Literal["zh-CN"]
 
 
 class IngestSourceInput(WorkflowOutput):
-    id: NonEmptyStr
-    type: NonEmptyStr
+    id: IdentifierStr
+    type: MetadataStr
     authority_level: AuthorityLevel
-    document_version: NonEmptyStr
+    document_version: MetadataStr
     document_date: date
-    applicable_scope: NonEmptyStr
+    applicable_scope: ScopeStr
 
 
 class IngestBaselineRuleInput(WorkflowOutput):
-    id: NonEmptyStr
-    title: NonEmptyStr
+    id: IdentifierStr
+    title: MetadataStr
     content: MaterialFragment
     status: Literal["effective"]
 
 
 class IngestSourceChunkInput(WorkflowOutput):
-    chunk_id: NonEmptyStr
-    locator: NonEmptyStr
+    chunk_id: IdentifierStr
+    locator: ScopeStr
     text: MaterialFragment
 
 
 class IngestWorkflowInput(CommonWorkflowInput):
     source: IngestSourceInput
-    baseline_rules: list[IngestBaselineRuleInput]
-    source_chunks: list[IngestSourceChunkInput] = Field(min_length=1)
+    baseline_rules: list[IngestBaselineRuleInput] = Field(max_length=MAX_SMALL_COLLECTION_ITEMS)
+    source_chunks: list[IngestSourceChunkInput] = Field(
+        min_length=1,
+        max_length=MAX_SMALL_COLLECTION_ITEMS,
+    )
 
 
 class QueryEffectiveCardInput(WorkflowOutput):
-    id: NonEmptyStr
-    title: NonEmptyStr
+    id: IdentifierStr
+    title: MetadataStr
     content: MaterialFragment
-    source_citations: list[NonEmptyStr]
+    source_citations: list[IdentifierStr] = Field(max_length=MAX_CITATION_COLLECTION_ITEMS)
 
 
 class QueryNoticeInput(WorkflowOutput):
     type: Literal["candidate", "conflict"]
-    id: NonEmptyStr
+    id: IdentifierStr
     summary: MaterialFragment
 
 
 class QueryCitationInput(WorkflowOutput):
-    id: NonEmptyStr
-    source_id: NonEmptyStr
-    filename: NonEmptyStr
-    document_version: NonEmptyStr
-    section: NonEmptyStr
+    id: IdentifierStr
+    source_id: IdentifierStr
+    filename: MetadataStr
+    document_version: MetadataStr
+    section: ScopeStr
     excerpt: MaterialFragment
     authority_level: AuthorityLevel
 
@@ -84,17 +128,17 @@ class QueryCitationInput(WorkflowOutput):
 class QueryWorkflowInput(CommonWorkflowInput):
     scope: Literal["effective", "effective_with_notices", "historical"]
     question: QuestionStr
-    effective_cards: list[QueryEffectiveCardInput]
-    notices: list[QueryNoticeInput]
-    citations: list[QueryCitationInput]
+    effective_cards: list[QueryEffectiveCardInput] = Field(max_length=MAX_SMALL_COLLECTION_ITEMS)
+    notices: list[QueryNoticeInput] = Field(max_length=MAX_SMALL_COLLECTION_ITEMS)
+    citations: list[QueryCitationInput] = Field(max_length=MAX_CITATION_COLLECTION_ITEMS)
 
 
 class LintCitationInput(WorkflowOutput):
-    id: NonEmptyStr
-    source_id: NonEmptyStr
-    citation_id: NonEmptyStr
-    document_version: NonEmptyStr
-    page_or_section: NonEmptyStr
+    id: IdentifierStr
+    source_id: IdentifierStr
+    citation_id: IdentifierStr
+    document_version: MetadataStr
+    page_or_section: ScopeStr
     excerpt: MaterialFragment
 
 
@@ -103,9 +147,11 @@ class LintDeterministicFindingInput(LintCitationInput):
 
 
 class LintWorkflowInput(CommonWorkflowInput):
-    baseline_rules: list[LintCitationInput]
-    comparison_items: list[LintCitationInput]
-    deterministic_findings: list[LintDeterministicFindingInput]
+    baseline_rules: list[LintCitationInput] = Field(max_length=MAX_CITATION_COLLECTION_ITEMS)
+    comparison_items: list[LintCitationInput] = Field(max_length=MAX_CITATION_COLLECTION_ITEMS)
+    deterministic_findings: list[LintDeterministicFindingInput] = Field(
+        max_length=MAX_CITATION_COLLECTION_ITEMS
+    )
     allowed_issue_types: list[
         Literal[
             "conflict",
@@ -114,7 +160,7 @@ class LintWorkflowInput(CommonWorkflowInput):
             "not_synchronized",
             "insufficient_evidence",
         ]
-    ]
+    ] = Field(max_length=MAX_ALLOWED_ISSUE_TYPES)
 
 
 class IngestCitationOutput(WorkflowOutput):

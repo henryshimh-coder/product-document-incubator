@@ -1,26 +1,163 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
-from collections.abc import Mapping
+import math
+import secrets
+from collections.abc import Iterable, Mapping
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from src.application.ports.workflow_gateway import WorkflowGateway
+from src.domain.enums import SecurityLevel
 from src.domain.errors import GatewayError, OutputValidationError
-from src.infrastructure.files.redactor import REDACTION_PATTERNS, RedactionResult
+from src.infrastructure.files.redactor import REDACTION_PATTERNS, redact_text
 
 InputModel = TypeVar("InputModel", bound=BaseModel)
 MAX_OUTBOUND_COVERAGE = 0.25
+MAX_CANONICAL_PAYLOAD_CHARS = 20_000
+_PROOF_HMAC_KEY = secrets.token_bytes(32)
+_PROOF_ISSUER = object()
 
 
-class OutboundSafetyProof(BaseModel):
-    """Local-only evidence binding T04 redaction to the exact outbound payload."""
+class OutboundSafetyProof:
+    """Opaque, process-local integrity proof issued only by the local factory."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    __slots__ = (
+        "_payload_digest",
+        "_outbound_chars",
+        "_source_total_chars",
+        "_coverage",
+        "_signature",
+    )
 
-    redaction_result: RedactionResult
-    outbound_coverage: float = Field(allow_inf_nan=False)
+    def __init__(
+        self,
+        issuer: object,
+        *,
+        payload_digest: bytes,
+        outbound_chars: int,
+        source_total_chars: int,
+        coverage: float,
+        signature: bytes,
+    ) -> None:
+        if issuer is not _PROOF_ISSUER:
+            raise TypeError("OutboundSafetyProof must be created by the local factory")
+        object.__setattr__(self, "_payload_digest", payload_digest)
+        object.__setattr__(self, "_outbound_chars", outbound_chars)
+        object.__setattr__(self, "_source_total_chars", source_total_chars)
+        object.__setattr__(self, "_coverage", coverage)
+        object.__setattr__(self, "_signature", signature)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("OutboundSafetyProof is immutable")
+
+    def __repr__(self) -> str:
+        return "OutboundSafetyProof(<opaque>)"
+
+
+def _canonical_payload(serialized: Mapping[str, Any]) -> str:
+    return json.dumps(
+        serialized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _proof_message(
+    payload_digest: bytes,
+    outbound_chars: int,
+    source_total_chars: int,
+    coverage: float,
+) -> bytes:
+    return "\n".join(
+        (
+            payload_digest.hex(),
+            str(outbound_chars),
+            str(source_total_chars),
+            coverage.hex(),
+        )
+    ).encode("ascii")
+
+
+def _sign_proof(
+    payload_digest: bytes,
+    outbound_chars: int,
+    source_total_chars: int,
+    coverage: float,
+) -> bytes:
+    return hmac.digest(
+        _PROOF_HMAC_KEY,
+        _proof_message(
+            payload_digest,
+            outbound_chars,
+            source_total_chars,
+            coverage,
+        ),
+        "sha256",
+    )
+
+
+def create_outbound_safety_proof(
+    schema: type[InputModel],
+    inputs: Mapping[str, Any],
+    *,
+    security_level: SecurityLevel,
+    customer_names: Iterable[str],
+    strategy_terms: Iterable[str],
+    financial_terms: Iterable[str],
+    leader_names: Iterable[str],
+    unpublished_decisions: Iterable[str],
+    source_total_chars: int,
+) -> OutboundSafetyProof:
+    """Validate, redact, size, and sign the exact canonical outbound payload."""
+
+    if not isinstance(source_total_chars, int) or source_total_chars <= 0:
+        raise GatewayError.outbound_safety_proof_invalid()
+    try:
+        validated = schema.model_validate(inputs)
+    except ValidationError:
+        raise GatewayError.outbound_safety_proof_invalid() from None
+    serialized = validated.model_dump(mode="json")
+    canonical_payload = _canonical_payload(serialized)
+    outbound_chars = len(canonical_payload)
+    coverage = outbound_chars / source_total_chars
+    if outbound_chars > MAX_CANONICAL_PAYLOAD_CHARS or coverage > MAX_OUTBOUND_COVERAGE:
+        raise GatewayError.outbound_safety_proof_invalid()
+    redaction = redact_text(
+        canonical_payload,
+        security_level=security_level,
+        customer_names=customer_names,
+        strategy_terms=strategy_terms,
+        financial_terms=financial_terms,
+        leader_names=leader_names,
+        unpublished_decisions=unpublished_decisions,
+    )
+    if (
+        not redaction.safe_for_external_model
+        or redaction.redacted_text != canonical_payload
+        or redaction.original_chars != outbound_chars
+        or redaction.redacted_chars != outbound_chars
+    ):
+        raise GatewayError.outbound_safety_proof_invalid()
+    payload_digest = hashlib.sha256(canonical_payload.encode("utf-8")).digest()
+    signature = _sign_proof(
+        payload_digest,
+        outbound_chars,
+        source_total_chars,
+        coverage,
+    )
+    return OutboundSafetyProof(
+        _PROOF_ISSUER,
+        payload_digest=payload_digest,
+        outbound_chars=outbound_chars,
+        source_total_chars=source_total_chars,
+        coverage=coverage,
+        signature=signature,
+    )
 
 
 def _contains_sensitive_residue(value: Any) -> bool:
@@ -49,22 +186,42 @@ def validate_input(
     if validation_failed or validated is None:
         raise GatewayError.workflow_input_invalid(invalid_detail)
     serialized = validated.model_dump(mode="json")
-    canonical_payload = json.dumps(
-        serialized,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    canonical_payload = _canonical_payload(serialized)
     if not isinstance(safety_proof, OutboundSafetyProof):
         raise GatewayError.outbound_safety_proof_invalid()
-    redaction = safety_proof.redaction_result
-    if (
-        not redaction.safe_for_external_model
-        or redaction.redacted_text != canonical_payload
-        or redaction.original_chars != len(canonical_payload)
-        or redaction.redacted_chars != len(canonical_payload)
-        or not 0 <= safety_proof.outbound_coverage <= MAX_OUTBOUND_COVERAGE
-    ):
+    proof_valid = False
+    try:
+        outbound_chars = len(canonical_payload)
+        source_total_chars = safety_proof._source_total_chars
+        coverage = outbound_chars / source_total_chars
+        payload_digest = hashlib.sha256(canonical_payload.encode("utf-8")).digest()
+        expected_signature = _sign_proof(
+            payload_digest,
+            outbound_chars,
+            source_total_chars,
+            coverage,
+        )
+        proof_valid = all(
+            (
+                outbound_chars <= MAX_CANONICAL_PAYLOAD_CHARS,
+                source_total_chars > 0,
+                math.isfinite(coverage),
+                coverage <= MAX_OUTBOUND_COVERAGE,
+                hmac.compare_digest(
+                    payload_digest,
+                    safety_proof._payload_digest,
+                ),
+                outbound_chars == safety_proof._outbound_chars,
+                coverage == safety_proof._coverage,
+                hmac.compare_digest(
+                    expected_signature,
+                    safety_proof._signature,
+                ),
+            )
+        )
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        proof_valid = False
+    if not proof_valid:
         raise GatewayError.outbound_safety_proof_invalid()
     if _contains_sensitive_residue(serialized):
         raise GatewayError.sensitive_input_detected()
