@@ -8,6 +8,14 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from src.domain.enums import AuthorityLevel, CallResultMode, EvidenceSide, IssueSeverity
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+MaterialFragment = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
+]
+QuestionStr = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+]
 
 
 class WorkflowOutput(BaseModel):
@@ -34,14 +42,14 @@ class IngestSourceInput(WorkflowOutput):
 class IngestBaselineRuleInput(WorkflowOutput):
     id: NonEmptyStr
     title: NonEmptyStr
-    content: NonEmptyStr
+    content: MaterialFragment
     status: Literal["effective"]
 
 
 class IngestSourceChunkInput(WorkflowOutput):
     chunk_id: NonEmptyStr
     locator: NonEmptyStr
-    text: NonEmptyStr
+    text: MaterialFragment
 
 
 class IngestWorkflowInput(CommonWorkflowInput):
@@ -53,14 +61,14 @@ class IngestWorkflowInput(CommonWorkflowInput):
 class QueryEffectiveCardInput(WorkflowOutput):
     id: NonEmptyStr
     title: NonEmptyStr
-    content: NonEmptyStr
+    content: MaterialFragment
     source_citations: list[NonEmptyStr]
 
 
 class QueryNoticeInput(WorkflowOutput):
     type: Literal["candidate", "conflict"]
     id: NonEmptyStr
-    summary: NonEmptyStr
+    summary: MaterialFragment
 
 
 class QueryCitationInput(WorkflowOutput):
@@ -69,13 +77,13 @@ class QueryCitationInput(WorkflowOutput):
     filename: NonEmptyStr
     document_version: NonEmptyStr
     section: NonEmptyStr
-    excerpt: NonEmptyStr
+    excerpt: MaterialFragment
     authority_level: AuthorityLevel
 
 
 class QueryWorkflowInput(CommonWorkflowInput):
     scope: Literal["effective", "effective_with_notices", "historical"]
-    question: NonEmptyStr
+    question: QuestionStr
     effective_cards: list[QueryEffectiveCardInput]
     notices: list[QueryNoticeInput]
     citations: list[QueryCitationInput]
@@ -87,7 +95,7 @@ class LintCitationInput(WorkflowOutput):
     citation_id: NonEmptyStr
     document_version: NonEmptyStr
     page_or_section: NonEmptyStr
-    excerpt: NonEmptyStr
+    excerpt: MaterialFragment
 
 
 class LintDeterministicFindingInput(LintCitationInput):

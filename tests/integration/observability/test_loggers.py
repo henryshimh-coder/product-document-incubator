@@ -208,6 +208,9 @@ def test_event_logger_rejects_sensitive_top_level_fields_before_any_write(
     [
         {"api_key": "dify-secret"},
         {"nested": {"full_prompt": "全部外调提示"}},
+        {"dify_api_key": "plain-token"},
+        {"nested": {"customer_secret": "plain-value"}},
+        {"request_prompt": "完整请求提示"},
         {"content": "未脱敏完整原文"},
         {"status": "Bearer secret-value"},
     ],
@@ -240,6 +243,21 @@ def test_event_logger_rejects_sensitive_keys_and_values_before_any_write(
     assert not (tmp_path / "data" / "local_state" / "app.log.jsonl").exists()
     with sqlite3.connect(db_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM event_logs").fetchone()[0] == 0
+
+
+def test_model_call_logger_allows_safe_prompt_version_metadata(tmp_path: Path):
+    """Catches substring matching from blocking the explicitly safe prompt version field."""
+    db_path = _prepare_db(tmp_path)
+    module = importlib.import_module("src.infrastructure.observability.model_call_logger")
+    logger = module.ModelCallLogger(db_path)
+
+    logger.record(_model_log("started", finished=False))
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT prompt_version FROM model_call_logs WHERE id = 'CALL-001'"
+        ).fetchone()
+    assert row == ("query-v1",)
 
 
 @pytest.mark.parametrize(

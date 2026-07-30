@@ -4,7 +4,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-SENSITIVE_KEYS = frozenset(
+SAFE_METADATA_KEYS = frozenset({"prompt_version"})
+SENSITIVE_KEY_PARTS = frozenset(
     {
         "api_key",
         "apikey",
@@ -12,8 +13,6 @@ SENSITIVE_KEYS = frozenset(
         "password",
         "secret",
         "prompt",
-        "full_prompt",
-        "raw_prompt",
         "full_text",
         "raw_text",
         "customer_identity",
@@ -21,6 +20,10 @@ SENSITIVE_KEYS = frozenset(
         "local_key",
         "access_token",
         "refresh_token",
+    }
+)
+SENSITIVE_EXACT_KEYS = frozenset(
+    {
         "content",
         "text",
         "excerpt",
@@ -39,7 +42,10 @@ def reject_sensitive(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, nested in value.items():
             normalized_key = str(key).casefold().replace("-", "_")
-            if normalized_key in SENSITIVE_KEYS:
+            if normalized_key not in SAFE_METADATA_KEYS and (
+                normalized_key in SENSITIVE_EXACT_KEYS
+                or any(part in normalized_key for part in SENSITIVE_KEY_PARTS)
+            ):
                 raise ValueError("sensitive audit field is prohibited")
             reject_sensitive(nested)
         return

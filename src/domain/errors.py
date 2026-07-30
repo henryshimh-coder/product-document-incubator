@@ -112,6 +112,10 @@ class GatewayError(AppError):
         return cls(ErrorCode.REDACTION_REQUIRED, "SENSITIVE_INPUT_DETECTED")
 
     @classmethod
+    def outbound_safety_proof_invalid(cls) -> GatewayError:
+        return cls(ErrorCode.REDACTION_REQUIRED, "OUTBOUND_SAFETY_PROOF_INVALID")
+
+    @classmethod
     def timeout(cls) -> GatewayError:
         return cls(ErrorCode.MODEL_TIMEOUT, "DIFY_TIMEOUT")
 

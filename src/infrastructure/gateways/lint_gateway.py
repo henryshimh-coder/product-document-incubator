@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from src.application.ports.workflow_gateway import WorkflowGateway
 from src.domain.errors import OutputValidationError
 from src.domain.services.citation_validator import CitationValidator
-from src.infrastructure.gateways._common import invoke, validate_input
+from src.infrastructure.gateways._common import OutboundSafetyProof, invoke, validate_input
 from src.infrastructure.gateways.schemas import LintWorkflowInput, LintWorkflowOutput
 
 
@@ -20,6 +20,7 @@ class LintGateway:
         self,
         inputs: Mapping[str, Any],
         *,
+        safety_proof: OutboundSafetyProof,
         user: str | None = None,
         timeout_seconds: int = 30,
     ) -> dict[str, Any]:
@@ -27,6 +28,7 @@ class LintGateway:
             LintWorkflowInput,
             inputs,
             invalid_detail="LINT_INPUT_INVALID",
+            safety_proof=safety_proof,
         )
         workflow_run_id, raw_output = invoke(self.client, validated_inputs, user, timeout_seconds)
         try:
