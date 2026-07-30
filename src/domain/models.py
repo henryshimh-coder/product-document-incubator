@@ -1,9 +1,16 @@
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import Annotated, Literal, Self
+from datetime import date, datetime, timedelta
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from src.domain.enums import (
     AuthorityLevel,
@@ -323,6 +330,8 @@ class ModelCallLog(DomainModel):
     id: NonEmptyStr
     project_id: NonEmptyStr
     task_type: Literal["ingest", "query", "lint"]
+    workflow_run_id: NonEmptyStr | None
+    correlation_id: NonEmptyStr
     source_ids: list[NonEmptyStr]
     baseline_version: NonEmptyStr
     model_label: NonEmptyStr
@@ -338,3 +347,49 @@ class ModelCallLog(DomainModel):
     finished_at: datetime | None
     elapsed_ms: NonNegativeInt | None
     error_code: NonEmptyStr | None
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def require_utc_timestamps(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() != timedelta(0)):
+            raise ValueError("model call timestamps must be aware UTC datetimes")
+        return value
+
+    @model_validator(mode="after")
+    def require_consistent_lifecycle(self) -> Self:
+        if self.status == "started":
+            if (
+                self.finished_at is not None
+                or self.elapsed_ms is not None
+                or self.error_code is not None
+            ):
+                raise ValueError("started model calls cannot contain completion fields")
+            return self
+        if self.finished_at is None or self.elapsed_ms is None:
+            raise ValueError("finished_at and elapsed_ms are required after model call completion")
+        if self.finished_at < self.started_at:
+            raise ValueError("finished_at cannot precede started_at")
+        if self.status == "succeeded" and self.error_code is not None:
+            raise ValueError("succeeded model calls cannot contain error_code")
+        if self.status in {"failed", "timeout"} and self.error_code is None:
+            raise ValueError("failed model calls require error_code")
+        return self
+
+
+class EventLog(DomainModel):
+    id: NonEmptyStr
+    project_id: NonEmptyStr
+    event_type: NonEmptyStr
+    entity_type: NonEmptyStr
+    entity_id: NonEmptyStr
+    actor: NonEmptyStr
+    correlation_id: NonEmptyStr
+    payload: dict[str, Any]
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def require_utc_created_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise ValueError("event created_at must be an aware UTC datetime")
+        return value

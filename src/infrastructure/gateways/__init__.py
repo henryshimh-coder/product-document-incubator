@@ -1,0 +1,1 @@
+"""Validated external workflow adapters."""

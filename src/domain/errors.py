@@ -86,3 +86,38 @@ class AppError(Exception):
 
 class DomainError(AppError):
     pass
+
+
+class GatewayError(AppError):
+    """Safe external-workflow failure using the public application error catalog."""
+
+    @classmethod
+    def authorization_failed(cls) -> GatewayError:
+        return cls(ErrorCode.EXTERNAL_CALL_DENIED, "DIFY_AUTH_FAILED")
+
+    @classmethod
+    def request_invalid(cls) -> GatewayError:
+        return cls(ErrorCode.EXTERNAL_CALL_DENIED, "DIFY_REQUEST_INVALID")
+
+    @classmethod
+    def input_rejected(cls) -> GatewayError:
+        return cls(ErrorCode.EXTERNAL_CALL_DENIED, "DIFY_INPUT_REJECTED")
+
+    @classmethod
+    def timeout(cls) -> GatewayError:
+        return cls(ErrorCode.MODEL_TIMEOUT, "DIFY_TIMEOUT")
+
+    @classmethod
+    def temporarily_unavailable(cls) -> GatewayError:
+        return cls(ErrorCode.MODEL_TIMEOUT, "DIFY_TEMPORARILY_UNAVAILABLE")
+
+    @classmethod
+    def transport_failed(cls) -> GatewayError:
+        return cls(ErrorCode.EXTERNAL_CALL_DENIED, "DIFY_TRANSPORT_FAILED")
+
+
+class OutputValidationError(AppError):
+    """A model response that failed the trusted local output contract."""
+
+    def __init__(self, detail: str = "MODEL_OUTPUT_INVALID") -> None:
+        super().__init__(ErrorCode.MODEL_OUTPUT_INVALID, detail)

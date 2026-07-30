@@ -495,3 +495,53 @@ def test_baseline_manifest_rejects_invalid_content_hash():
             approved_by="产品经理",
             published_at=NOW,
         )
+
+
+def test_model_call_log_requires_correlation_id_and_accepts_workflow_run_id():
+    """Catches model calls that cannot be correlated with their Dify workflow run."""
+    models = _models()
+
+    call = models.ModelCallLog(
+        id="CALL-001",
+        project_id="LLD",
+        task_type="query",
+        workflow_run_id="WF-001",
+        correlation_id="CORR-001",
+        source_ids=["SRC-001"],
+        baseline_version="LLD-724_1",
+        model_label="dify-query",
+        prompt_version="query-v1",
+        schema_version="1.0",
+        authorized=True,
+        redacted=True,
+        outbound_chars=120,
+        outbound_coverage=0.2,
+        result_mode="realtime",
+        status="succeeded",
+        started_at=NOW,
+        finished_at=NOW,
+        elapsed_ms=12,
+        error_code=None,
+    )
+
+    assert call.correlation_id == "CORR-001"
+    assert call.workflow_run_id == "WF-001"
+
+
+def test_event_log_requires_top_level_correlation_id():
+    """Catches events whose correlation ID is buried in unqueryable payload data."""
+    models = _models()
+
+    event = models.EventLog(
+        id="EVENT-001",
+        project_id="LLD",
+        event_type="model_call_completed",
+        entity_type="model_call",
+        entity_id="CALL-001",
+        actor="system",
+        correlation_id="CORR-001",
+        payload={"status": "succeeded"},
+        created_at=NOW,
+    )
+
+    assert event.correlation_id == "CORR-001"

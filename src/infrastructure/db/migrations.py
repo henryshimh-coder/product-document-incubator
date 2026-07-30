@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 from src.infrastructure.db.connection import connect
@@ -152,6 +153,8 @@ CREATE TABLE IF NOT EXISTS model_call_logs (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
     task_type TEXT NOT NULL,
+    workflow_run_id TEXT,
+    correlation_id TEXT NOT NULL,
     source_ids_json TEXT NOT NULL,
     baseline_version TEXT NOT NULL,
     model_label TEXT NOT NULL,
@@ -189,6 +192,7 @@ CREATE TABLE IF NOT EXISTS event_logs (
     entity_type TEXT NOT NULL,
     entity_id TEXT NOT NULL,
     actor TEXT NOT NULL,
+    correlation_id TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -206,9 +210,32 @@ CREATE INDEX IF NOT EXISTS idx_event_entity
 """
 
 
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def migrate(db_path: Path) -> None:
     """Create or update the local SQLite schema safely and repeatedly."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect(db_path) as connection:
         connection.executescript(INITIAL_SCHEMA_SQL)
+        _add_column_if_missing(connection, "model_call_logs", "workflow_run_id", "TEXT")
+        _add_column_if_missing(connection, "model_call_logs", "correlation_id", "TEXT")
+        _add_column_if_missing(connection, "event_logs", "correlation_id", "TEXT")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_call_correlation "
+            "ON model_call_logs(project_id, correlation_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_event_correlation "
+            "ON event_logs(project_id, correlation_id, created_at)"
+        )
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.0",))
+        connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.1",))
