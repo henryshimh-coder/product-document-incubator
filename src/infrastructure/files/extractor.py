@@ -9,7 +9,11 @@ from pydantic import BaseModel, ConfigDict
 from pypdf import PdfReader
 
 from src.domain.errors import DomainError, ErrorCode
-from src.domain.services.file_safety import validate_upload
+from src.domain.services.file_safety import (
+    resolve_source_archive_root,
+    validate_business_id,
+    validate_upload,
+)
 
 MAX_PDF_PAGES = 200
 MAX_DOCX_PARAGRAPH_CHARS = 100_000
@@ -44,6 +48,8 @@ class _Section:
 
 
 def _read_text(content: bytes) -> str:
+    if content.startswith(b"\xef\xbb\xbf"):
+        return content.decode("utf-8-sig")
     try:
         return content.decode("utf-8")
     except UnicodeDecodeError:
@@ -143,23 +149,41 @@ def _chunk_sections(source_id: str, sections: list[_Section]) -> tuple[str, list
     return text, chunks
 
 
-def extract_document(path: Path, *, source_id: str | None = None) -> ExtractedDocument:
+def extract_document(
+    path: Path,
+    *,
+    source_id: str | None = None,
+    archive_root: Path | None = None,
+) -> ExtractedDocument:
     """Extract locally, preserving page, paragraph, or heading citation context."""
     try:
-        content = path.read_bytes()
-        safe_filename = validate_upload(path.name, content)
+        if source_id is None:
+            raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="SOURCE_ID_REQUIRED")
+        resolved_source_id = validate_business_id(source_id, "source_id")
+        root = resolve_source_archive_root(archive_root)
+        resolved_path = path.resolve()
+        if not resolved_path.is_relative_to(root):
+            raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_PATH")
+        relative_path = resolved_path.relative_to(root)
+        if len(relative_path.parts) != 3:
+            raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_PATH")
+        validate_business_id(relative_path.parts[0], "project_id")
+        if relative_path.parts[1] != resolved_source_id:
+            raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_PATH")
+
+        content = resolved_path.read_bytes()
+        safe_filename = validate_upload(resolved_path.name, content)
         suffix = Path(safe_filename).suffix.lower()
         if suffix == ".pdf":
-            sections = _extract_pdf(path)
+            sections = _extract_pdf(resolved_path)
         elif suffix == ".docx":
-            sections = _extract_docx(path)
+            sections = _extract_docx(resolved_path)
         else:
             raw_text = _read_text(content)
             if suffix == ".md":
                 sections = _extract_markdown(raw_text)
             else:
                 sections = [_Section("text:1", raw_text)]
-        resolved_source_id = source_id or path.stem
         text, chunks = _chunk_sections(resolved_source_id, sections)
         if not text.strip() or not chunks:
             raise DomainError(ErrorCode.EXTRACTION_FAILED, detail="EMPTY_EXTRACTED_TEXT")

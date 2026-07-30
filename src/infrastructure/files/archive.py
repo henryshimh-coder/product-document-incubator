@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from src.domain.errors import DomainError, ErrorCode
-from src.domain.services.file_safety import sanitize_filename, validate_upload
+from filelock import FileLock
 
-_SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+from src.domain.errors import DomainError, ErrorCode
+from src.domain.services.file_safety import (
+    resolve_source_archive_root,
+    sanitize_filename,
+    validate_business_id,
+    validate_upload,
+)
 
 
 @dataclass(frozen=True)
@@ -22,25 +26,26 @@ class ArchiveResult:
 class SourceArchive:
     """Append-only source archive rooted at one project and source identifier."""
 
-    def __init__(self, root: Path, *, project_id: str, source_id: str) -> None:
-        self.root = root
-        self.project_id = self._validate_id(project_id, "project_id")
-        self.source_id = self._validate_id(source_id, "source_id")
-
-    @staticmethod
-    def _validate_id(value: str, field_name: str) -> str:
-        if not _SAFE_ID.fullmatch(value):
-            raise DomainError(
-                ErrorCode.FILE_TYPE_NOT_ALLOWED, detail=f"UNSAFE_{field_name.upper()}"
-            )
-        return value
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        project_id: str,
+        source_id: str,
+    ) -> None:
+        self.root = resolve_source_archive_root(root)
+        self.project_id = validate_business_id(project_id, "project_id")
+        self.source_id = validate_business_id(source_id, "source_id")
 
     def _project_root(self) -> Path:
-        root = self.root.resolve()
-        project_root = (root / self.project_id).resolve()
-        if not project_root.is_relative_to(root):
+        project_root = (self.root / self.project_id).resolve()
+        if not project_root.is_relative_to(self.root):
             raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_PATH")
         return project_root
+
+    def _digest_lock(self, digest: str) -> FileLock:
+        lock_path = self.root / ".locks" / f"{self.project_id}-{digest}.lock"
+        return FileLock(str(lock_path))
 
     def _find_existing(self, digest: str) -> Path | None:
         project_root = self._project_root()
@@ -60,21 +65,24 @@ class SourceArchive:
         """Store bytes exactly once and return the existing record for an equal hash."""
         safe_filename = validate_upload(filename, content)
         digest = sha256(content).hexdigest()
-        existing = self._find_existing(digest)
-        if existing is not None:
-            return ArchiveResult(existing, digest, len(content), duplicate=True)
+        with self._digest_lock(digest):
+            existing = self._find_existing(digest)
+            if existing is not None:
+                return ArchiveResult(existing, digest, len(content), duplicate=True)
 
-        project_root = self._project_root()
-        target = (project_root / self.source_id / sanitize_filename(safe_filename)).resolve()
-        if not target.is_relative_to(project_root):
-            raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_PATH")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with target.open("xb") as archive_file:
-                archive_file.write(content)
-        except FileExistsError:
-            existing_digest = sha256(target.read_bytes()).hexdigest()
-            if existing_digest == digest:
-                return ArchiveResult(target, digest, len(content), duplicate=True)
-            raise DomainError(ErrorCode.DUPLICATE_SOURCE, detail="ARCHIVE_PATH_EXISTS") from None
-        return ArchiveResult(target, digest, len(content), duplicate=False)
+            project_root = self._project_root()
+            target = (project_root / self.source_id / sanitize_filename(safe_filename)).resolve()
+            if not target.is_relative_to(project_root):
+                raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_PATH")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with target.open("xb") as archive_file:
+                    archive_file.write(content)
+            except FileExistsError:
+                existing_digest = sha256(target.read_bytes()).hexdigest()
+                if existing_digest == digest:
+                    return ArchiveResult(target, digest, len(content), duplicate=True)
+                raise DomainError(
+                    ErrorCode.DUPLICATE_SOURCE, detail="ARCHIVE_PATH_EXISTS"
+                ) from None
+            return ArchiveResult(target, digest, len(content), duplicate=False)

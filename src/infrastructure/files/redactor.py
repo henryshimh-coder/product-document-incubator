@@ -13,6 +13,7 @@ REDACTION_PATTERNS = {
     "bank_card": re.compile(r"(?<!\d)\d{16,19}(?!\d)"),
     "email": re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"),
 }
+_UNSET = object()
 
 
 class RedactionResult(BaseModel):
@@ -36,23 +37,26 @@ def redact_text(
     text: str,
     *,
     security_level: SecurityLevel = SecurityLevel.L2_INTERNAL,
-    customer_names: Iterable[str] = (),
-    strategy_terms: Iterable[str] = (),
-    financial_terms: Iterable[str] = (),
-    leader_names: Iterable[str] = (),
-    unpublished_decisions: Iterable[str] = (),
+    customer_names: Iterable[str] | object = _UNSET,
+    strategy_terms: Iterable[str] | object = _UNSET,
+    financial_terms: Iterable[str] | object = _UNSET,
+    leader_names: Iterable[str] | object = _UNSET,
+    unpublished_decisions: Iterable[str] | object = _UNSET,
 ) -> RedactionResult:
     """Apply deterministic local redaction without allowing L3/L4 material to leave."""
     redacted = text
     findings: list[dict[str, str]] = []
     patterns: list[tuple[str, re.Pattern[str]]] = list(REDACTION_PATTERNS.items())
-    for finding_type, terms in (
+    dictionary_inputs = (
         ("customer_name", customer_names),
         ("strategy_term", strategy_terms),
         ("financial_term", financial_terms),
         ("leader_name", leader_names),
         ("unpublished_decision", unpublished_decisions),
-    ):
+    )
+    for finding_type, terms in dictionary_inputs:
+        if terms is _UNSET:
+            continue
         pattern = _dictionary_pattern(terms)
         if pattern is not None:
             patterns.append((finding_type, pattern))
@@ -63,6 +67,7 @@ def redact_text(
             findings.append({"type": finding_type, "count": str(count)})
 
     has_sensitive_residue = any(pattern.search(redacted) for _, pattern in patterns)
+    has_complete_dictionary_profile = all(terms is not _UNSET for _, terms in dictionary_inputs)
     return RedactionResult(
         redacted_text=redacted,
         findings=findings,
@@ -70,6 +75,7 @@ def redact_text(
         redacted_chars=len(redacted),
         safe_for_external_model=(
             not has_sensitive_residue
+            and has_complete_dictionary_profile
             and security_level not in {SecurityLevel.L3_CONFIDENTIAL, SecurityLevel.L4_RESTRICTED}
         ),
     )

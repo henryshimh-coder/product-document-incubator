@@ -9,7 +9,24 @@ from src.domain.errors import DomainError, ErrorCode
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+DEFAULT_SOURCE_ARCHIVE_ROOT = Path("data/source_archive")
 _SAFE_FILENAME = re.compile(r"^[A-Za-z0-9\u4e00-\u9fff._-]+$")
+_SAFE_BUSINESS_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def validate_business_id(value: str, field_name: str) -> str:
+    """Validate a path-safe business identifier used by archive adapters."""
+    if not _SAFE_BUSINESS_ID.fullmatch(value):
+        raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail=f"UNSAFE_{field_name.upper()}")
+    return value
+
+
+def resolve_source_archive_root(root: Path | None = None) -> Path:
+    """Resolve only a real source_archive root, including injected test roots."""
+    resolved = (root or DEFAULT_SOURCE_ARCHIVE_ROOT).resolve()
+    if resolved.name != DEFAULT_SOURCE_ARCHIVE_ROOT.name:
+        raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_ROOT")
+    return resolved
 
 
 def sanitize_filename(filename: str) -> str:

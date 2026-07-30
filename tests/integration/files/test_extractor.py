@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import importlib
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 from docx import Document
+from pypdf import PdfWriter
+
+from src.domain.errors import DomainError, ErrorCode
 
 
 def extractor_module():
@@ -44,20 +49,26 @@ def _write_pdf(path: Path) -> None:
 
 @pytest.fixture
 def fixture_dir(tmp_path: Path) -> Path:
-    _write_pdf(tmp_path / "sample.pdf")
+    archive_dir = tmp_path / "source_archive" / "LLD" / "SRC-001"
+    archive_dir.mkdir(parents=True)
+    _write_pdf(archive_dir / "sample.pdf")
     document = Document()
     document.add_heading("DOCX 标题", level=1)
     document.add_paragraph("DOCX 提取内容")
-    document.save(tmp_path / "sample.docx")
-    (tmp_path / "sample.txt").write_text("TXT 提取内容", encoding="utf-8")
-    (tmp_path / "sample.md").write_text("# 一级标题\n\nMD 提取内容", encoding="utf-8")
-    return tmp_path
+    document.save(archive_dir / "sample.docx")
+    (archive_dir / "sample.txt").write_text("TXT 提取内容", encoding="utf-8")
+    (archive_dir / "sample.md").write_text("# 一级标题\n\nMD 提取内容", encoding="utf-8")
+    return archive_dir
 
 
 @pytest.mark.parametrize("fixture_name", ["sample.pdf", "sample.docx", "sample.txt", "sample.md"])
 def test_extract_supported_document(fixture_dir: Path, fixture_name: str) -> None:
     """Catches an allowed archive format reaching Ingest without extractable cited text."""
-    result = extractor_module().extract_document(fixture_dir / fixture_name, source_id="SRC-001")
+    result = extractor_module().extract_document(
+        fixture_dir / fixture_name,
+        source_id="SRC-001",
+        archive_root=fixture_dir.parents[1],
+    )
 
     assert result.text.strip()
     assert result.chunks
@@ -67,10 +78,16 @@ def test_extract_supported_document(fixture_dir: Path, fixture_name: str) -> Non
 def test_document_chunks_cap_length_and_overlap(tmp_path: Path) -> None:
     """Catches out-of-bound chunks or a missing overlap losing adjacent source context."""
     source_text = "a" * 2200
-    path = tmp_path / "long.txt"
+    archive_root = tmp_path / "source_archive"
+    path = archive_root / "LLD" / "SRC-001" / "long.txt"
+    path.parent.mkdir(parents=True)
     path.write_text(source_text, encoding="utf-8")
 
-    result = extractor_module().extract_document(path, source_id="SRC-001")
+    result = extractor_module().extract_document(
+        path,
+        source_id="SRC-001",
+        archive_root=archive_root,
+    )
 
     assert [(chunk.char_start, chunk.char_end) for chunk in result.chunks] == [
         (0, 2000),
@@ -84,7 +101,111 @@ def test_document_chunks_cap_length_and_overlap(tmp_path: Path) -> None:
 
 def test_docx_locator_retains_heading_and_paragraph_number(fixture_dir: Path) -> None:
     """Catches DOCX citations losing the title context needed to locate a paragraph."""
-    result = extractor_module().extract_document(fixture_dir / "sample.docx", source_id="SRC-001")
+    result = extractor_module().extract_document(
+        fixture_dir / "sample.docx",
+        source_id="SRC-001",
+        archive_root=fixture_dir.parents[1],
+    )
 
     assert any("title:DOCX 标题" in chunk.locator for chunk in result.chunks)
     assert any("paragraph:" in chunk.locator for chunk in result.chunks)
+
+
+def test_extractor_rejects_a_valid_named_file_outside_the_archive_root(tmp_path: Path) -> None:
+    """Catches arbitrary local files being parsed simply because their name is allowed."""
+    source_archive = tmp_path / "source_archive"
+    outside = tmp_path / "outside.txt"
+    outside.write_text("不可信材料", encoding="utf-8")
+
+    with pytest.raises(DomainError, match="UNSAFE_ARCHIVE_PATH") as error:
+        extractor_module().extract_document(
+            outside,
+            source_id="SRC-001",
+            archive_root=source_archive,
+        )
+
+    assert error.value.code == ErrorCode.FILE_TYPE_NOT_ALLOWED
+
+
+def test_extractor_requires_an_explicit_source_id(fixture_dir: Path) -> None:
+    """Catches deriving a business ID from a filename rather than trusted archive metadata."""
+    with pytest.raises(DomainError, match="SOURCE_ID_REQUIRED"):
+        extractor_module().extract_document(fixture_dir / "sample.txt")
+
+
+def test_bom_prefixed_text_and_markdown_keep_clean_text_and_heading_locator(
+    fixture_dir: Path,
+) -> None:
+    """Catches a BOM leaking into text or blocking the first Markdown heading locator."""
+    (fixture_dir / "bom.txt").write_bytes(b"\xef\xbb\xbf" + "TXT 内容".encode())
+    (fixture_dir / "bom.md").write_bytes(b"\xef\xbb\xbf" + "# 一级标题\n正文".encode())
+
+    text_result = extractor_module().extract_document(
+        fixture_dir / "bom.txt",
+        source_id="SRC-001",
+        archive_root=fixture_dir.parents[1],
+    )
+    markdown_result = extractor_module().extract_document(
+        fixture_dir / "bom.md",
+        source_id="SRC-001",
+        archive_root=fixture_dir.parents[1],
+    )
+
+    assert text_result.text == "TXT 内容"
+    assert markdown_result.chunks[0].locator == "heading:一级标题; line:1"
+
+
+def test_extractor_enforces_pdf_page_limit(fixture_dir: Path) -> None:
+    """Catches PDF documents above the 200-page safety limit reaching text extraction."""
+    path = fixture_dir / "over-limit.pdf"
+    writer = PdfWriter()
+    for _ in range(201):
+        writer.add_blank_page(width=72, height=72)
+    with path.open("wb") as output:
+        writer.write(output)
+
+    with pytest.raises(DomainError) as error:
+        extractor_module().extract_document(
+            path,
+            source_id="SRC-001",
+            archive_root=fixture_dir.parents[1],
+        )
+
+    assert error.value.code == ErrorCode.FILE_TOO_LARGE
+
+
+def test_extractor_enforces_docx_paragraph_character_limit(fixture_dir: Path) -> None:
+    """Catches DOCX documents above the 100,000 paragraph-character safety limit."""
+    path = fixture_dir / "over-limit.docx"
+    document = Document()
+    document.add_paragraph("a" * 100_001)
+    document.save(path)
+
+    with pytest.raises(DomainError) as error:
+        extractor_module().extract_document(
+            path,
+            source_id="SRC-001",
+            archive_root=fixture_dir.parents[1],
+        )
+
+    assert error.value.code == ErrorCode.FILE_TOO_LARGE
+
+
+def test_upload_rejects_macro_bearing_docx_and_zip_payload(tmp_path: Path) -> None:
+    """Catches macro-bearing OOXML and generic ZIP containers passing upload validation."""
+    document = Document()
+    document.add_paragraph("safe text")
+    docx_path = tmp_path / "safe.docx"
+    document.save(docx_path)
+    buffer = BytesIO(docx_path.read_bytes())
+    with zipfile.ZipFile(buffer, "a") as package:
+        package.writestr("word/vbaProject.bin", b"macro")
+
+    with pytest.raises(DomainError, match="MIME_MISMATCH"):
+        importlib.import_module("src.domain.services.file_safety").validate_upload(
+            "macro.docx", buffer.getvalue()
+        )
+    with pytest.raises(DomainError, match="UNSAFE_FILENAME"):
+        importlib.import_module("src.domain.services.file_safety").validate_upload(
+            "payload.zip", b"PK\x03\x04"
+        )
