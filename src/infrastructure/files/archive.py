@@ -26,14 +26,8 @@ class ArchiveResult:
 class SourceArchive:
     """Append-only source archive rooted at one project and source identifier."""
 
-    def __init__(
-        self,
-        root: Path | None = None,
-        *,
-        project_id: str,
-        source_id: str,
-    ) -> None:
-        self.root = resolve_source_archive_root(root)
+    def __init__(self, *, project_id: str, source_id: str) -> None:
+        self.root = resolve_source_archive_root()
         self.project_id = validate_business_id(project_id, "project_id")
         self.source_id = validate_business_id(source_id, "source_id")
 

@@ -21,12 +21,9 @@ def validate_business_id(value: str, field_name: str) -> str:
     return value
 
 
-def resolve_source_archive_root(root: Path | None = None) -> Path:
-    """Resolve only a real source_archive root, including injected test roots."""
-    resolved = (root or DEFAULT_SOURCE_ARCHIVE_ROOT).resolve()
-    if resolved.name != DEFAULT_SOURCE_ARCHIVE_ROOT.name:
-        raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_ROOT")
-    return resolved
+def resolve_source_archive_root() -> Path:
+    """Resolve the fixed repository-relative source archive root."""
+    return DEFAULT_SOURCE_ARCHIVE_ROOT.resolve()
 
 
 def sanitize_filename(filename: str) -> str:

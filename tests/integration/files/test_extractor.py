@@ -48,8 +48,9 @@ def _write_pdf(path: Path) -> None:
 
 
 @pytest.fixture
-def fixture_dir(tmp_path: Path) -> Path:
-    archive_dir = tmp_path / "source_archive" / "LLD" / "SRC-001"
+def fixture_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
+    archive_dir = tmp_path / "data" / "source_archive" / "LLD" / "SRC-001"
     archive_dir.mkdir(parents=True)
     _write_pdf(archive_dir / "sample.pdf")
     document = Document()
@@ -67,7 +68,6 @@ def test_extract_supported_document(fixture_dir: Path, fixture_name: str) -> Non
     result = extractor_module().extract_document(
         fixture_dir / fixture_name,
         source_id="SRC-001",
-        archive_root=fixture_dir.parents[1],
     )
 
     assert result.text.strip()
@@ -75,10 +75,14 @@ def test_extract_supported_document(fixture_dir: Path, fixture_name: str) -> Non
     assert all(chunk.locator for chunk in result.chunks)
 
 
-def test_document_chunks_cap_length_and_overlap(tmp_path: Path) -> None:
+def test_document_chunks_cap_length_and_overlap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Catches out-of-bound chunks or a missing overlap losing adjacent source context."""
+    monkeypatch.chdir(tmp_path)
     source_text = "a" * 2200
-    archive_root = tmp_path / "source_archive"
+    archive_root = tmp_path / "data" / "source_archive"
     path = archive_root / "LLD" / "SRC-001" / "long.txt"
     path.parent.mkdir(parents=True)
     path.write_text(source_text, encoding="utf-8")
@@ -86,7 +90,6 @@ def test_document_chunks_cap_length_and_overlap(tmp_path: Path) -> None:
     result = extractor_module().extract_document(
         path,
         source_id="SRC-001",
-        archive_root=archive_root,
     )
 
     assert [(chunk.char_start, chunk.char_end) for chunk in result.chunks] == [
@@ -104,27 +107,41 @@ def test_docx_locator_retains_heading_and_paragraph_number(fixture_dir: Path) ->
     result = extractor_module().extract_document(
         fixture_dir / "sample.docx",
         source_id="SRC-001",
-        archive_root=fixture_dir.parents[1],
     )
 
     assert any("title:DOCX 标题" in chunk.locator for chunk in result.chunks)
     assert any("paragraph:" in chunk.locator for chunk in result.chunks)
 
 
-def test_extractor_rejects_a_valid_named_file_outside_the_archive_root(tmp_path: Path) -> None:
-    """Catches arbitrary local files being parsed simply because their name is allowed."""
-    source_archive = tmp_path / "source_archive"
-    outside = tmp_path / "outside.txt"
+def test_extractor_rejects_a_lookalike_source_archive_and_reads_the_fixed_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches parsing a valid-looking file from a caller-selected source_archive tree."""
+    monkeypatch.chdir(tmp_path)
+    fixed = tmp_path / "data" / "source_archive" / "LLD" / "SRC-001" / "fixed.txt"
+    outside = tmp_path / "untrusted" / "source_archive" / "LLD" / "SRC-001" / "outside.txt"
+    fixed.parent.mkdir(parents=True)
+    outside.parent.mkdir(parents=True)
+    fixed.write_text("受信材料", encoding="utf-8")
     outside.write_text("不可信材料", encoding="utf-8")
 
-    with pytest.raises(DomainError, match="UNSAFE_ARCHIVE_PATH") as error:
-        extractor_module().extract_document(
-            outside,
-            source_id="SRC-001",
-            archive_root=source_archive,
-        )
+    assert extractor_module().extract_document(fixed, source_id="SRC-001").text == "受信材料"
+    with pytest.raises(DomainError, match="UNSAFE_ARCHIVE_PATH"):
+        extractor_module().extract_document(outside, source_id="SRC-001")
 
-    assert error.value.code == ErrorCode.FILE_TYPE_NOT_ALLOWED
+
+def test_extractor_does_not_accept_a_caller_selected_root(tmp_path: Path) -> None:
+    """Catches a public archive_root parameter reintroducing a filesystem trust boundary."""
+    path = tmp_path / "untrusted" / "source_archive" / "LLD" / "SRC-001" / "outside.txt"
+    path.parent.mkdir(parents=True)
+    path.write_text("不可信材料", encoding="utf-8")
+    with pytest.raises(TypeError):
+        extractor_module().extract_document(
+            path,
+            source_id="SRC-001",
+            archive_root=tmp_path / "untrusted" / "source_archive",
+        )
 
 
 def test_extractor_requires_an_explicit_source_id(fixture_dir: Path) -> None:
@@ -143,12 +160,10 @@ def test_bom_prefixed_text_and_markdown_keep_clean_text_and_heading_locator(
     text_result = extractor_module().extract_document(
         fixture_dir / "bom.txt",
         source_id="SRC-001",
-        archive_root=fixture_dir.parents[1],
     )
     markdown_result = extractor_module().extract_document(
         fixture_dir / "bom.md",
         source_id="SRC-001",
-        archive_root=fixture_dir.parents[1],
     )
 
     assert text_result.text == "TXT 内容"
@@ -168,7 +183,6 @@ def test_extractor_enforces_pdf_page_limit(fixture_dir: Path) -> None:
         extractor_module().extract_document(
             path,
             source_id="SRC-001",
-            archive_root=fixture_dir.parents[1],
         )
 
     assert error.value.code == ErrorCode.FILE_TOO_LARGE
@@ -185,7 +199,6 @@ def test_extractor_enforces_docx_paragraph_character_limit(fixture_dir: Path) ->
         extractor_module().extract_document(
             path,
             source_id="SRC-001",
-            archive_root=fixture_dir.parents[1],
         )
 
     assert error.value.code == ErrorCode.FILE_TOO_LARGE

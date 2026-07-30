@@ -76,6 +76,6 @@ def redact_text(
         safe_for_external_model=(
             not has_sensitive_residue
             and has_complete_dictionary_profile
-            and security_level not in {SecurityLevel.L3_CONFIDENTIAL, SecurityLevel.L4_RESTRICTED}
+            and security_level in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL}
         ),
     )

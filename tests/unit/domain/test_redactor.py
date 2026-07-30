@@ -88,3 +88,18 @@ def test_l2_requires_all_dictionary_categories_to_be_explicitly_loaded(
     result = redactor_module().redact_text("无敏感字段", **kwargs)
 
     assert result.safe_for_external_model is False
+
+
+def test_unknown_security_level_fails_closed_after_complete_redaction_profile() -> None:
+    """Catches runtime security values outside L1/L2 being treated as safe for external use."""
+    result = redactor_module().redact_text(
+        "无敏感字段",
+        security_level="unexpected",  # type: ignore[arg-type]
+        customer_names=(),
+        strategy_terms=(),
+        financial_terms=(),
+        leader_names=(),
+        unpublished_decisions=(),
+    )
+
+    assert result.safe_for_external_model is False

@@ -153,14 +153,13 @@ def extract_document(
     path: Path,
     *,
     source_id: str | None = None,
-    archive_root: Path | None = None,
 ) -> ExtractedDocument:
     """Extract locally, preserving page, paragraph, or heading citation context."""
     try:
         if source_id is None:
             raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="SOURCE_ID_REQUIRED")
         resolved_source_id = validate_business_id(source_id, "source_id")
-        root = resolve_source_archive_root(archive_root)
+        root = resolve_source_archive_root()
         resolved_path = path.resolve()
         if not resolved_path.is_relative_to(root):
             raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_PATH")
