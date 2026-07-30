@@ -13,8 +13,18 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from src.infrastructure.db.connection import connect
+from src.infrastructure.gateways.schemas import (
+    IngestWorkflowOutput,
+    LintWorkflowOutput,
+    QueryWorkflowOutput,
+)
 
 CACHE_ROOT = Path("data/local_state/cache")
+CURRENT_OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
+    "ingest": IngestWorkflowOutput,
+    "query": QueryWorkflowOutput,
+    "lint": LintWorkflowOutput,
+}
 
 
 def build_cache_key(
@@ -137,12 +147,10 @@ class AiCache:
                 ),
             )
 
-    def get(
-        self,
-        identity: CacheIdentity,
-        *,
-        schema: type[BaseModel] | None = None,
-    ) -> dict[str, Any] | None:
+    def get(self, identity: CacheIdentity) -> dict[str, Any] | None:
+        schema = CURRENT_OUTPUT_SCHEMAS.get(identity.task_type)
+        if schema is None:
+            return None
         with connect(self.db_path) as connection:
             row = connection.execute(
                 "SELECT * FROM cache_entries WHERE cache_key = ?",
@@ -184,8 +192,7 @@ class AiCache:
                 return None
             if _canonical_json(value) != response_json:
                 return None
-            if schema is not None:
-                schema.model_validate(value)
+            schema.model_validate(value)
             return value
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValidationError):
             return None

@@ -5,16 +5,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel, ConfigDict
 
 from src.infrastructure.db.migrations import migrate
-
-
-class CurrentSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    answer: str
-    evidence_sufficiency: str
 
 
 def _cache_module():
@@ -39,6 +31,30 @@ def _cache(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "state.db"
     migrate(db_path)
     return _cache_module().AiCache(db_path), db_path
+
+
+def _query_result() -> dict:
+    return {
+        "answer": "当前目标客群为符合准入要求的存量客户。",
+        "effective_rules": ["RULE-001"],
+        "citations": [
+            {
+                "id": "CIT-001",
+                "source_id": "SRC-001",
+                "filename": "当前方案.md",
+                "document_version": "LLD-724_1",
+                "section": "目标客群",
+                "excerpt": "当前目标客群为符合准入要求的存量客户。",
+                "authority_level": "formal_effective",
+            }
+        ],
+        "candidate_notice": None,
+        "conflict_notice": None,
+        "baseline_version": "LLD-724_1",
+        "evidence_sufficiency": "sufficient",
+        "result_mode": "realtime",
+        "model_call_id": None,
+    }
 
 
 def test_build_cache_key_uses_exact_canonical_fields_and_normalized_question():
@@ -92,9 +108,21 @@ def test_cache_persists_canonical_utf8_file_and_sqlite_index(tmp_path: Path, mon
 def test_cache_does_not_cross_baseline(tmp_path: Path, monkeypatch):
     """Catches cached analysis being reused for a different effective baseline."""
     cache, _ = _cache(tmp_path, monkeypatch)
-    cache.put(_identity("LLD-724_1"), {"answer": "旧规则", "evidence_sufficiency": "sufficient"})
+    cache.put(_identity("LLD-724_1"), _query_result())
 
     assert cache.get(_identity("LLD-724_2")) is None
+
+
+def test_cache_reuses_only_output_valid_under_registered_current_schema(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catches integrity-valid cache bytes being returned without task schema validation."""
+    cache, _ = _cache(tmp_path, monkeypatch)
+    identity = _identity()
+    cache.put(identity, _query_result())
+
+    assert cache.get(identity) == _query_result()
 
 
 def test_cache_production_path_cannot_be_overridden(tmp_path: Path):
@@ -109,13 +137,13 @@ def test_cache_rejects_tampered_file_or_index(tmp_path: Path, monkeypatch):
     """Catches file or SQLite tampering bypassing exact hash and metadata checks."""
     cache, db_path = _cache(tmp_path, monkeypatch)
     identity = _identity()
-    cache.put(identity, {"answer": "可信结果", "evidence_sufficiency": "sufficient"})
+    cache.put(identity, _query_result())
     cache_file = tmp_path / "data" / "local_state" / "cache" / f"{identity.cache_key}.json"
     cache_file.write_text('{"answer":"篡改结果"}', encoding="utf-8")
 
     assert cache.get(identity) is None
 
-    cache.put(identity, {"answer": "可信结果", "evidence_sufficiency": "sufficient"})
+    cache.put(identity, _query_result())
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             "UPDATE cache_entries SET baseline_version = 'LLD-INVENTED' WHERE cache_key = ?",
@@ -128,16 +156,39 @@ def test_cache_revalidates_bytes_against_current_schema(tmp_path: Path, monkeypa
     """Catches stale cached JSON bypassing the caller's current strict output schema."""
     cache, _ = _cache(tmp_path, monkeypatch)
     identity = _identity()
-    cache.put(
-        identity,
-        {
-            "answer": "旧结构",
-            "evidence_sufficiency": "sufficient",
-            "removed_field": True,
-        },
-    )
+    stale = _query_result()
+    stale["removed_field"] = True
+    cache.put(identity, stale)
 
-    assert cache.get(identity, schema=CurrentSchema) is None
+    assert cache.get(identity) is None
+
+
+def test_cache_rejects_unknown_task_type_without_schema_registry_entry(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catches an unregistered workflow bypassing mandatory current-schema validation."""
+    cache, _ = _cache(tmp_path, monkeypatch)
+    module = _cache_module()
+    identity = module.CacheIdentity(
+        task_type="unregistered",
+        source_sha256="a" * 64,
+        baseline_version="LLD-724_1",
+        prompt_version="v1",
+        model_label="unknown",
+        schema_version="1.0",
+    )
+    cache.put(identity, {"answer": "unchecked"})
+
+    assert cache.get(identity) is None
+
+
+def test_cache_get_does_not_accept_caller_selected_schema(tmp_path: Path, monkeypatch):
+    """Catches callers restoring the schema=None or permissive-schema bypass."""
+    cache, _ = _cache(tmp_path, monkeypatch)
+
+    with pytest.raises(TypeError):
+        cache.get(_identity(), schema=None)
 
 
 def test_cache_rejects_invalid_json_even_if_file_and_index_are_tampered_together(
@@ -147,7 +198,7 @@ def test_cache_rejects_invalid_json_even_if_file_and_index_are_tampered_together
     """Catches coordinated stale bytes being trusted without JSON parsing."""
     cache, db_path = _cache(tmp_path, monkeypatch)
     identity = _identity()
-    cache.put(identity, {"answer": "可信结果", "evidence_sufficiency": "sufficient"})
+    cache.put(identity, _query_result())
     invalid = b"{invalid-json"
     cache_file = tmp_path / "data" / "local_state" / "cache" / f"{identity.cache_key}.json"
     cache_file.write_bytes(invalid)

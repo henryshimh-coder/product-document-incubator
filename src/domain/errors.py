@@ -104,6 +104,14 @@ class GatewayError(AppError):
         return cls(ErrorCode.EXTERNAL_CALL_DENIED, "DIFY_INPUT_REJECTED")
 
     @classmethod
+    def workflow_input_invalid(cls, detail: str) -> GatewayError:
+        return cls(ErrorCode.EXTERNAL_CALL_DENIED, detail)
+
+    @classmethod
+    def sensitive_input_detected(cls) -> GatewayError:
+        return cls(ErrorCode.REDACTION_REQUIRED, "SENSITIVE_INPUT_DETECTED")
+
+    @classmethod
     def timeout(cls) -> GatewayError:
         return cls(ErrorCode.MODEL_TIMEOUT, "DIFY_TIMEOUT")
 

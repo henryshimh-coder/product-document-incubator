@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -13,6 +14,101 @@ class WorkflowOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class CommonWorkflowInput(WorkflowOutput):
+    schema_version: Literal["1.0"]
+    project_id: NonEmptyStr
+    baseline_version: NonEmptyStr
+    task_id: NonEmptyStr
+    language: Literal["zh-CN"]
+
+
+class IngestSourceInput(WorkflowOutput):
+    id: NonEmptyStr
+    type: NonEmptyStr
+    authority_level: AuthorityLevel
+    document_version: NonEmptyStr
+    document_date: date
+    applicable_scope: NonEmptyStr
+
+
+class IngestBaselineRuleInput(WorkflowOutput):
+    id: NonEmptyStr
+    title: NonEmptyStr
+    content: NonEmptyStr
+    status: Literal["effective"]
+
+
+class IngestSourceChunkInput(WorkflowOutput):
+    chunk_id: NonEmptyStr
+    locator: NonEmptyStr
+    text: NonEmptyStr
+
+
+class IngestWorkflowInput(CommonWorkflowInput):
+    source: IngestSourceInput
+    baseline_rules: list[IngestBaselineRuleInput]
+    source_chunks: list[IngestSourceChunkInput] = Field(min_length=1)
+
+
+class QueryEffectiveCardInput(WorkflowOutput):
+    id: NonEmptyStr
+    title: NonEmptyStr
+    content: NonEmptyStr
+    source_citations: list[NonEmptyStr]
+
+
+class QueryNoticeInput(WorkflowOutput):
+    type: Literal["candidate", "conflict"]
+    id: NonEmptyStr
+    summary: NonEmptyStr
+
+
+class QueryCitationInput(WorkflowOutput):
+    id: NonEmptyStr
+    source_id: NonEmptyStr
+    filename: NonEmptyStr
+    document_version: NonEmptyStr
+    section: NonEmptyStr
+    excerpt: NonEmptyStr
+    authority_level: AuthorityLevel
+
+
+class QueryWorkflowInput(CommonWorkflowInput):
+    scope: Literal["effective", "effective_with_notices", "historical"]
+    question: NonEmptyStr
+    effective_cards: list[QueryEffectiveCardInput]
+    notices: list[QueryNoticeInput]
+    citations: list[QueryCitationInput]
+
+
+class LintCitationInput(WorkflowOutput):
+    id: NonEmptyStr
+    source_id: NonEmptyStr
+    citation_id: NonEmptyStr
+    document_version: NonEmptyStr
+    page_or_section: NonEmptyStr
+    excerpt: NonEmptyStr
+
+
+class LintDeterministicFindingInput(LintCitationInput):
+    side: EvidenceSide
+
+
+class LintWorkflowInput(CommonWorkflowInput):
+    baseline_rules: list[LintCitationInput]
+    comparison_items: list[LintCitationInput]
+    deterministic_findings: list[LintDeterministicFindingInput]
+    allowed_issue_types: list[
+        Literal[
+            "conflict",
+            "omission",
+            "stale",
+            "not_synchronized",
+            "insufficient_evidence",
+        ]
+    ]
+
+
 class IngestCitationOutput(WorkflowOutput):
     source_id: NonEmptyStr
     chunk_id: NonEmptyStr
@@ -22,11 +118,11 @@ class IngestCitationOutput(WorkflowOutput):
 
 class IngestItemOutput(WorkflowOutput):
     item_id: NonEmptyStr
-    item_type: NonEmptyStr
+    item_type: Literal["professional_opinion", "discussion_reference"]
     title: NonEmptyStr
     content: NonEmptyStr
     target_card_id: NonEmptyStr | None
-    result_type: NonEmptyStr
+    result_type: Literal["candidate", "conflict_discussion", "information_gap"]
     status: Literal["ai_inferred", "candidate", "conflict"]
     source_citations: list[IngestCitationOutput] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
@@ -56,14 +152,8 @@ class IngestWorkflowOutput(WorkflowOutput):
     relations: list[IngestRelationOutput]
 
 
-class QueryCitationOutput(WorkflowOutput):
-    id: NonEmptyStr
-    source_id: NonEmptyStr
-    filename: NonEmptyStr
-    document_version: NonEmptyStr
-    section: NonEmptyStr
-    excerpt: NonEmptyStr
-    authority_level: AuthorityLevel
+class QueryCitationOutput(QueryCitationInput):
+    pass
 
 
 class QueryWorkflowOutput(WorkflowOutput):

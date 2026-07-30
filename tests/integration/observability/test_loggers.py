@@ -163,6 +163,47 @@ def test_event_log_production_path_cannot_be_overridden(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
+    ("field", "secret_value"),
+    [
+        ("actor", "Bearer EVENT-TOP-SECRET"),
+        ("entity_id", "app-1234567890abcdef1234567890abcdef"),
+        ("event_type", "sk-abcdefghijklmnopqrstuvwxyz123456"),
+    ],
+)
+def test_event_logger_rejects_sensitive_top_level_fields_before_any_write(
+    tmp_path: Path,
+    monkeypatch,
+    field: str,
+    secret_value: str,
+):
+    """Catches top-level event metadata bypassing the hard audit secret boundary."""
+    monkeypatch.chdir(tmp_path)
+    db_path = _prepare_db(tmp_path)
+    module = importlib.import_module("src.infrastructure.observability.event_logger")
+    logger = module.EventLogger(db_path)
+    data = {
+        "id": "EVENT-SECRET",
+        "project_id": "LLD",
+        "event_type": "safe_event",
+        "entity_type": "source",
+        "entity_id": "SRC-001",
+        "actor": "system",
+        "correlation_id": "CORR-SECRET",
+        "payload": {"status": "failed"},
+        "created_at": NOW,
+    }
+    data[field] = secret_value
+    event = EventLog.model_validate(data)
+
+    with pytest.raises(ValueError, match="sensitive"):
+        logger.record(event)
+
+    assert not (tmp_path / "data" / "local_state" / "app.log.jsonl").exists()
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM event_logs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {"api_key": "dify-secret"},
@@ -199,3 +240,34 @@ def test_event_logger_rejects_sensitive_keys_and_values_before_any_write(
     assert not (tmp_path / "data" / "local_state" / "app.log.jsonl").exists()
     with sqlite3.connect(db_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM event_logs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "secret_value"),
+    [
+        ("source_ids", ["Bearer MODEL-CALL-SECRET"]),
+        ("model_label", "app-1234567890abcdef1234567890abcdef"),
+        ("error_code", "sk-abcdefghijklmnopqrstuvwxyz123456"),
+    ],
+)
+def test_model_call_logger_rejects_sensitive_record_fields_before_sqlite_write(
+    tmp_path: Path,
+    field: str,
+    secret_value,
+):
+    """Catches model-call metadata bypassing the hard audit secret boundary."""
+    db_path = _prepare_db(tmp_path)
+    module = importlib.import_module("src.infrastructure.observability.model_call_logger")
+    logger = module.ModelCallLogger(db_path)
+    if field == "error_code":
+        record = _model_log("succeeded", finished=True).model_copy(
+            update={"status": "failed", field: secret_value}
+        )
+    else:
+        record = _model_log("started", finished=False).model_copy(update={field: secret_value})
+
+    with pytest.raises(ValueError, match="sensitive"):
+        logger.record(record)
+
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM model_call_logs").fetchone()[0] == 0

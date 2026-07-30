@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import traceback
 from collections.abc import Iterator
 from typing import Any
 
@@ -27,6 +28,23 @@ def _success(result: str | dict = "{}") -> httpx.Response:
             "data": {"outputs": {"result": result}},
         },
     )
+
+
+def _exception_graph_text(error: BaseException) -> str:
+    graph: list[str] = ["".join(traceback.format_exception(error))]
+    pending = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        graph.extend((str(current), repr(current)))
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return "\n".join(graph)
 
 
 @pytest.mark.parametrize("status_code", [429, 502, 503, 504])
@@ -108,7 +126,31 @@ def test_dify_maps_timeout_without_exposing_secret():
     assert caught.value.code == "MODEL_TIMEOUT"
     assert caught.value.detail == "DIFY_TIMEOUT"
     assert "test-secret-key" not in str(caught.value)
+    assert "test-secret-key" not in _exception_graph_text(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
     assert "test-secret-key" not in repr(client)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500, json={"body": "TRACE-SECRET-MARKER"}),
+        httpx.Response(200, content=b"TRACE-SECRET-MARKER"),
+    ],
+)
+def test_dify_mapped_errors_discard_secret_bearing_exception_graph(
+    response: httpx.Response,
+):
+    """Catches requests, responses, and parse exceptions surviving in audit tracebacks."""
+    client = _client(lambda request: response, api_key="TRACE-SECRET-MARKER")
+
+    with pytest.raises((errors.GatewayError, errors.OutputValidationError)) as caught:
+        client.run(inputs={}, user="LLD", timeout_seconds=30)
+
+    assert "TRACE-SECRET-MARKER" not in _exception_graph_text(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 @pytest.mark.parametrize(

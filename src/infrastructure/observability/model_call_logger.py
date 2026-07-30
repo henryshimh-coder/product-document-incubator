@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.domain.models import ModelCallLog
 from src.infrastructure.db.connection import connect
+from src.infrastructure.observability.sensitive_data import reject_sensitive
 
 
 def _json_dumps(value: object) -> str:
@@ -17,6 +18,7 @@ class ModelCallLogger:
 
     def record(self, record: ModelCallLog) -> None:
         validated = ModelCallLog.model_validate(record.model_dump())
+        reject_sensitive(validated.model_dump(mode="json"))
         with connect(self.db_path) as connection:
             connection.execute(
                 """

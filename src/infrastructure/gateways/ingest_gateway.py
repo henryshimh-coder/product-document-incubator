@@ -8,8 +8,8 @@ from pydantic import ValidationError
 from src.application.ports.workflow_gateway import WorkflowGateway
 from src.domain.errors import OutputValidationError
 from src.domain.services.citation_validator import CitationValidator
-from src.infrastructure.gateways._common import invoke
-from src.infrastructure.gateways.schemas import IngestWorkflowOutput
+from src.infrastructure.gateways._common import invoke, validate_input
+from src.infrastructure.gateways.schemas import IngestWorkflowInput, IngestWorkflowOutput
 
 
 class IngestGateway:
@@ -23,27 +23,34 @@ class IngestGateway:
         user: str | None = None,
         timeout_seconds: int = 30,
     ) -> dict[str, Any]:
-        workflow_run_id, raw_output = invoke(self.client, inputs, user, timeout_seconds)
+        validated_inputs = validate_input(
+            IngestWorkflowInput,
+            inputs,
+            invalid_detail="INGEST_INPUT_INVALID",
+        )
+        workflow_run_id, raw_output = invoke(self.client, validated_inputs, user, timeout_seconds)
         try:
             output = IngestWorkflowOutput.model_validate(raw_output)
         except ValidationError as error:
             raise OutputValidationError("INGEST_OUTPUT_INVALID") from error
-        if output.schema_version != inputs.get("schema_version"):
+        if output.schema_version != validated_inputs["schema_version"]:
             raise OutputValidationError("SCHEMA_VERSION_MISMATCH")
-        if inputs.get("task_id") is not None and output.task_id != inputs.get("task_id"):
+        if output.task_id != validated_inputs["task_id"]:
             raise OutputValidationError("TASK_ID_MISMATCH")
 
-        source = inputs.get("source")
+        source = validated_inputs.get("source")
         if not isinstance(source, Mapping):
             raise OutputValidationError("INGEST_INPUT_INVALID")
         source_id = source.get("id")
         chunks = {
             chunk.get("chunk_id"): chunk
-            for chunk in inputs.get("source_chunks", [])
+            for chunk in validated_inputs.get("source_chunks", [])
             if isinstance(chunk, Mapping)
         }
         baseline_ids = {
-            rule.get("id") for rule in inputs.get("baseline_rules", []) if isinstance(rule, Mapping)
+            rule.get("id")
+            for rule in validated_inputs.get("baseline_rules", [])
+            if isinstance(rule, Mapping)
         }
         item_ids = {item.item_id for item in output.items}
         for item in output.items:

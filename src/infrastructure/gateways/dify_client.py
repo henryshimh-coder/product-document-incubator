@@ -67,6 +67,7 @@ class DifyClient:
             "user": user,
         }
         for attempt in range(2):
+            mapped_error: GatewayError | None = None
             try:
                 response = self.http.post(
                     f"{self.base_url}/workflows/run",
@@ -74,10 +75,12 @@ class DifyClient:
                     json=request_body,
                     timeout=timeout_seconds,
                 )
-            except httpx.TimeoutException as error:
-                raise GatewayError.timeout() from error
-            except httpx.RequestError as error:
-                raise GatewayError.transport_failed() from error
+            except httpx.TimeoutException:
+                mapped_error = GatewayError.timeout()
+            except httpx.RequestError:
+                mapped_error = GatewayError.transport_failed()
+            if mapped_error is not None:
+                raise mapped_error
 
             if response.status_code in RETRYABLE_STATUSES:
                 if attempt == 0:
@@ -87,15 +90,20 @@ class DifyClient:
                 raise GatewayError.request_invalid()
             if response.status_code in DENIED_STATUSES:
                 raise GatewayError.authorization_failed()
+            status_failed = False
             try:
                 response.raise_for_status()
-            except httpx.HTTPStatusError as error:
-                raise GatewayError.transport_failed() from error
+            except httpx.HTTPStatusError:
+                status_failed = True
+            if status_failed:
+                raise GatewayError.transport_failed()
             return self._parse_response(response)
         raise GatewayError.temporarily_unavailable()
 
     @staticmethod
     def _parse_response(response: httpx.Response) -> dict[str, Any]:
+        invalid_response = False
+        parsed: dict[str, Any] | None = None
         try:
             envelope = response.json()
             workflow_run_id = envelope["workflow_run_id"]
@@ -106,9 +114,12 @@ class DifyClient:
                 raw_result = json.loads(raw_result)
             if not isinstance(raw_result, Mapping):
                 raise TypeError("result must be a mapping")
-            return {
+            parsed = {
                 "workflow_run_id": workflow_run_id,
                 "result": dict(raw_result),
             }
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise OutputValidationError("DIFY_RESPONSE_INVALID") from error
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            invalid_response = True
+        if invalid_response or parsed is None:
+            raise OutputValidationError("DIFY_RESPONSE_INVALID")
+        return parsed

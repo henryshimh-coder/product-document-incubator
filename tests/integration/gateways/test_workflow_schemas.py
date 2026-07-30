@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from src.domain.errors import OutputValidationError
+from src.domain.errors import GatewayError, OutputValidationError
 
 
 def _gateway(name: str, client: Any):
@@ -18,8 +18,10 @@ def _gateway(name: str, client: Any):
 class FakeDifyClient:
     def __init__(self, result: dict[str, Any]) -> None:
         self.result = result
+        self.calls = 0
 
     def run(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
         return {"workflow_run_id": "WF-001", "result": deepcopy(self.result)}
 
 
@@ -41,6 +43,7 @@ def _query_input() -> dict[str, Any]:
         "project_id": "LLD",
         "baseline_version": "LLD-724_1",
         "task_id": "TASK-001",
+        "language": "zh-CN",
         "scope": "effective_with_notices",
         "question": "当前目标客群是什么？",
         "effective_cards": [
@@ -51,7 +54,18 @@ def _query_input() -> dict[str, Any]:
                 "source_citations": ["CIT-BASE-001"],
             }
         ],
-        "notices": [],
+        "notices": [
+            {
+                "type": "candidate",
+                "id": "ITEM-CANDIDATE-001",
+                "summary": "候选意见尚未生效。",
+            },
+            {
+                "type": "conflict",
+                "id": "ITEM-CONFLICT-001",
+                "summary": "存在待裁决冲突。",
+            },
+        ],
         "citations": [_citation()],
     }
 
@@ -76,6 +90,7 @@ def _ingest_input() -> dict[str, Any]:
         "project_id": "LLD",
         "baseline_version": "LLD-724_1",
         "task_id": "TASK-001",
+        "language": "zh-CN",
         "source": {
             "id": "SRC-RISK-001",
             "type": "risk_opinion",
@@ -143,6 +158,8 @@ def _lint_input() -> dict[str, Any]:
         "schema_version": "1.0",
         "project_id": "LLD",
         "baseline_version": "LLD-724_1",
+        "task_id": "TASK-001",
+        "language": "zh-CN",
         "baseline_rules": [
             {
                 "id": "RULE-001",
@@ -220,14 +237,33 @@ def test_query_gateway_returns_validated_output_and_workflow_run_id():
     assert result["result"]["evidence_sufficiency"] == "sufficient"
 
 
-def test_query_gateway_accepts_effective_rule_text_from_trusted_card_content():
-    """Catches valid QueryResponse rule strings being mistaken for card identifiers."""
+def test_query_gateway_rejects_effective_rule_text_that_is_not_a_trusted_card_id():
+    """Catches candidate or invented text being presented as a trusted effective rule."""
     output = _query_output()
     output["effective_rules"] = ["当前目标客群为符合准入要求的存量客户。"]
 
-    result = _gateway("query", FakeDifyClient(output)).run(_query_input())
+    with pytest.raises(OutputValidationError, match="UNKNOWN_EFFECTIVE_RULE"):
+        _gateway("query", FakeDifyClient(output)).run(_query_input())
 
-    assert result["result"]["effective_rules"] == ["当前目标客群为符合准入要求的存量客户。"]
+
+@pytest.mark.parametrize(
+    ("field", "value", "detail"),
+    [
+        ("candidate_notice", "模型虚构的候选通知。", "UNKNOWN_CANDIDATE_NOTICE"),
+        ("conflict_notice", "模型虚构的冲突通知。", "UNKNOWN_CONFLICT_NOTICE"),
+        ("candidate_notice", "存在待裁决冲突。", "UNKNOWN_CANDIDATE_NOTICE"),
+        ("conflict_notice", "候选意见尚未生效。", "UNKNOWN_CONFLICT_NOTICE"),
+    ],
+)
+def test_query_gateway_rejects_untrusted_or_cross_typed_notices(
+    field: str, value: str, detail: str
+):
+    """Catches Query inventing notices or relabeling a trusted notice across types."""
+    output = _query_output()
+    output[field] = value
+
+    with pytest.raises(OutputValidationError, match=detail):
+        _gateway("query", FakeDifyClient(output)).run(_query_input())
 
 
 def test_query_gateway_rejects_unknown_citation():
@@ -239,13 +275,31 @@ def test_query_gateway_rejects_unknown_citation():
         _gateway("query", FakeDifyClient(output)).run(_query_input())
 
 
+@pytest.mark.parametrize("reported_sufficiency", ["sufficient", "insufficient"])
+def test_query_gateway_replaces_unsupported_answer_with_insufficient_evidence_notice(
+    reported_sufficiency: str,
+):
+    """Catches an unsupported definite company fact surviving evidence degradation."""
+    output = _query_output()
+    output["answer"] = "当前目标客群包括所有从未合作的新客户。"
+    output["evidence_sufficiency"] = reported_sufficiency
+
+    result = _gateway("query", FakeDifyClient(output)).run(_query_input())
+
+    assert result["result"]["evidence_sufficiency"] == "insufficient"
+    assert result["result"]["answer"] == "现有证据不足，无法给出确定性结论。"
+
+
 def test_query_gateway_rejects_unsupported_input_schema_version():
-    """Catches Query validating output against a schema version it does not implement."""
+    """Catches Query calling the external workflow with an unsupported input contract."""
     inputs = _query_input()
     inputs["schema_version"] = "2.0"
+    client = FakeDifyClient(_query_output())
 
-    with pytest.raises(OutputValidationError, match="SCHEMA_VERSION_MISMATCH"):
-        _gateway("query", FakeDifyClient(_query_output())).run(inputs)
+    with pytest.raises(GatewayError, match="QUERY_INPUT_INVALID"):
+        _gateway("query", client).run(inputs)
+
+    assert client.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -270,6 +324,25 @@ def test_ingest_gateway_rejects_effective_status():
     """Catches an external model directly creating effective knowledge."""
     output = _ingest_output()
     output["items"][0]["status"] = "effective"
+
+    with pytest.raises(OutputValidationError, match="INGEST_OUTPUT_INVALID"):
+        _gateway("ingest", FakeDifyClient(output)).run(_ingest_input())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("item_type", "Decision"),
+        ("item_type", "ChangeRequest"),
+        ("item_type", "arbitrary"),
+        ("result_type", "Decision"),
+        ("result_type", "arbitrary"),
+    ],
+)
+def test_ingest_gateway_rejects_ungoverned_item_and_result_types(field: str, value: str):
+    """Catches model-created classifications outside the governed ingest taxonomy."""
+    output = _ingest_output()
+    output["items"][0][field] = value
 
     with pytest.raises(OutputValidationError, match="INGEST_OUTPUT_INVALID"):
         _gateway("ingest", FakeDifyClient(output)).run(_ingest_input())
@@ -318,6 +391,16 @@ def test_lint_gateway_rejects_major_issue_without_both_sides():
         _gateway("lint", FakeDifyClient(output)).run(_lint_input())
 
 
+def test_lint_gateway_rejects_evidence_with_swapped_source_sides():
+    """Catches baseline and comparison citations mislabeled as the opposite evidence side."""
+    output = _lint_output()
+    output["issues"][0]["evidence"][0]["side"] = "challenging_source"
+    output["issues"][0]["evidence"][1]["side"] = "current_baseline"
+
+    with pytest.raises(OutputValidationError, match="CITATION_SIDE_MISMATCH"):
+        _gateway("lint", FakeDifyClient(output)).run(_lint_input())
+
+
 def test_lint_gateway_rejects_disallowed_issue_type_and_decision_fields():
     """Catches Lint escaping the requested taxonomy or creating governance decisions."""
     output = _lint_output()
@@ -326,3 +409,100 @@ def test_lint_gateway_rejects_disallowed_issue_type_and_decision_fields():
 
     with pytest.raises(OutputValidationError, match="LINT_OUTPUT_INVALID"):
         _gateway("lint", FakeDifyClient(output)).run(_lint_input())
+
+
+@pytest.mark.parametrize(
+    ("name", "input_factory", "output_factory"),
+    [
+        ("ingest", _ingest_input, _ingest_output),
+        ("query", _query_input, _query_output),
+        ("lint", _lint_input, _lint_output),
+    ],
+)
+def test_gateway_rejects_extra_input_before_external_call(
+    name: str,
+    input_factory,
+    output_factory,
+):
+    """Catches raw documents or other non-minimum fields crossing the Dify boundary."""
+    inputs = input_factory()
+    inputs["raw_document"] = "完整未脱敏文档"
+    client = FakeDifyClient(output_factory())
+
+    with pytest.raises(GatewayError, match=f"{name.upper()}_INPUT_INVALID"):
+        _gateway(name, client).run(inputs)
+
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("name", "input_factory", "output_factory"),
+    [
+        ("ingest", _ingest_input, _ingest_output),
+        ("query", _query_input, _query_output),
+        ("lint", _lint_input, _lint_output),
+    ],
+)
+def test_gateway_requires_language_before_external_call(
+    name: str,
+    input_factory,
+    output_factory,
+):
+    """Catches a task bypassing the required common workflow input contract."""
+    inputs = input_factory()
+    inputs.pop("language")
+    client = FakeDifyClient(output_factory())
+
+    with pytest.raises(GatewayError, match=f"{name.upper()}_INPUT_INVALID"):
+        _gateway(name, client).run(inputs)
+
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("name", "input_factory", "output_factory", "nested_collection"),
+    [
+        ("ingest", _ingest_input, _ingest_output, "source_chunks"),
+        ("query", _query_input, _query_output, "effective_cards"),
+        ("lint", _lint_input, _lint_output, "comparison_items"),
+    ],
+)
+def test_gateway_rejects_extra_nested_input_before_external_call(
+    name: str,
+    input_factory,
+    output_factory,
+    nested_collection: str,
+):
+    """Catches full text or customer fields hidden inside an allowed input collection."""
+    inputs = input_factory()
+    inputs[nested_collection][0]["customer_data"] = "不属于工作流契约"
+    client = FakeDifyClient(output_factory())
+
+    with pytest.raises(GatewayError, match=f"{name.upper()}_INPUT_INVALID"):
+        _gateway(name, client).run(inputs)
+
+    assert client.calls == 0
+
+
+@pytest.mark.parametrize(
+    "sensitive_question",
+    [
+        "请查询客户 13812345678 的规则",
+        "请查询身份证 11010519491231002X",
+        "请查询银行卡 6222021234567890123",
+        "请查询 someone@example.com 的规则",
+    ],
+)
+def test_gateway_rejects_known_sensitive_residue_before_external_call(
+    sensitive_question: str,
+):
+    """Catches known T04 redaction residues leaving through an otherwise valid input."""
+    inputs = _query_input()
+    inputs["question"] = sensitive_question
+    client = FakeDifyClient(_query_output())
+
+    with pytest.raises(GatewayError, match="SENSITIVE_INPUT_DETECTED") as caught:
+        _gateway("query", client).run(inputs)
+
+    assert caught.value.code == "REDACTION_REQUIRED"
+    assert client.calls == 0

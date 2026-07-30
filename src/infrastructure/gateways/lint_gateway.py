@@ -8,8 +8,8 @@ from pydantic import ValidationError
 from src.application.ports.workflow_gateway import WorkflowGateway
 from src.domain.errors import OutputValidationError
 from src.domain.services.citation_validator import CitationValidator
-from src.infrastructure.gateways._common import invoke
-from src.infrastructure.gateways.schemas import LintWorkflowOutput
+from src.infrastructure.gateways._common import invoke, validate_input
+from src.infrastructure.gateways.schemas import LintWorkflowInput, LintWorkflowOutput
 
 
 class LintGateway:
@@ -23,27 +23,40 @@ class LintGateway:
         user: str | None = None,
         timeout_seconds: int = 30,
     ) -> dict[str, Any]:
-        workflow_run_id, raw_output = invoke(self.client, inputs, user, timeout_seconds)
+        validated_inputs = validate_input(
+            LintWorkflowInput,
+            inputs,
+            invalid_detail="LINT_INPUT_INVALID",
+        )
+        workflow_run_id, raw_output = invoke(self.client, validated_inputs, user, timeout_seconds)
         try:
             output = LintWorkflowOutput.model_validate(raw_output)
         except ValidationError as error:
             raise OutputValidationError("LINT_OUTPUT_INVALID") from error
-        if output.schema_version != inputs.get("schema_version"):
+        if output.schema_version != validated_inputs["schema_version"]:
             raise OutputValidationError("SCHEMA_VERSION_MISMATCH")
-        allowed_types = set(inputs.get("allowed_issue_types", []))
+        allowed_types = set(validated_inputs["allowed_issue_types"])
         if any(issue.issue_type not in allowed_types for issue in output.issues):
             raise OutputValidationError("LINT_OUTPUT_INVALID")
 
-        trusted = {}
-        for collection_name in ("baseline_rules", "comparison_items", "deterministic_findings"):
-            for item in inputs.get(collection_name, []):
+        trusted: dict[str, tuple[Mapping[str, Any], str]] = {}
+        for collection_name, expected_side in (
+            ("baseline_rules", "current_baseline"),
+            ("comparison_items", "challenging_source"),
+        ):
+            for item in validated_inputs.get(collection_name, []):
                 if isinstance(item, Mapping) and item.get("citation_id"):
-                    trusted[item["citation_id"]] = item
+                    trusted[item["citation_id"]] = (item, expected_side)
+        for item in validated_inputs["deterministic_findings"]:
+            trusted[item["citation_id"]] = (item, item["side"])
         for issue in output.issues:
             for evidence in issue.evidence:
-                source = trusted.get(evidence.citation_id)
-                if source is None:
+                trusted_evidence = trusted.get(evidence.citation_id)
+                if trusted_evidence is None:
                     raise OutputValidationError("UNKNOWN_CITATION")
+                source, expected_side = trusted_evidence
+                if evidence.side.value != expected_side:
+                    raise OutputValidationError("CITATION_SIDE_MISMATCH")
                 if (
                     evidence.source_id != source.get("source_id")
                     or evidence.document_version != source.get("document_version")
