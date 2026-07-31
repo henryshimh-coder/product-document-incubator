@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from src.application.dto.ingest import ImportSourceInput
+from src.domain.models import IngestReport
+
+
+class ImportSourceService(Protocol):
+    def execute(self, command: ImportSourceInput) -> IngestReport: ...
 
 
 class ConfigurationError(ValueError):
@@ -27,6 +34,7 @@ class AppSettings(BaseModel):
 @dataclass(frozen=True)
 class AppContainer:
     settings: AppSettings
+    import_source: ImportSourceService | None = None
 
 
 def load_settings(app_path: Path, schema_path: Path) -> AppSettings:

@@ -8,9 +8,12 @@ from src.domain.models import (
     Baseline,
     ChangeRequest,
     Decision,
+    EventLog,
+    IngestReport,
     IssueCard,
     KnowledgeCard,
     Project,
+    Relation,
     SourceRecord,
 )
 
@@ -29,6 +32,10 @@ class SourceRepository(Protocol):
     def find_by_sha256(self, project_id: str, sha256: str) -> SourceRecord | None: ...
 
     def list_for_project(self, project_id: str) -> list[SourceRecord]: ...
+
+    def update(self, source: SourceRecord) -> None: ...
+
+    def update_ingest_status(self, source_id: str, ingest_status: str) -> None: ...
 
 
 class KnowledgeRepository(Protocol):
@@ -84,3 +91,16 @@ class BaselineRepository(Protocol):
     def get(self, baseline_id: str) -> Baseline: ...
 
     def mark_superseded(self, baseline_id: str) -> None: ...
+
+
+class IngestUnitOfWork(Protocol):
+    def complete(
+        self,
+        source: SourceRecord,
+        cards: list[KnowledgeCard],
+        relations: list[Relation],
+        issues: list[IssueCard],
+        event: EventLog,
+    ) -> None: ...
+
+    def duplicate_report(self, source: SourceRecord) -> IngestReport: ...

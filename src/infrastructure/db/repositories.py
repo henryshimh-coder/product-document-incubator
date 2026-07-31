@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from src.domain.enums import (
     BaselineStatus,
+    CallResultMode,
     ChangeReviewAction,
     ChangeStatus,
     IssueStatus,
@@ -19,9 +20,12 @@ from src.domain.models import (
     Baseline,
     ChangeRequest,
     Decision,
+    EventLog,
+    IngestReport,
     IssueCard,
     KnowledgeCard,
     Project,
+    Relation,
     SourceRecord,
 )
 from src.infrastructure.db.connection import connect
@@ -165,6 +169,54 @@ class SqliteSourceRepository:
                 (project_id,),
             ).fetchall()
         return [self._to_model(row) for row in rows]
+
+    def update(self, source: SourceRecord) -> None:
+        with connect(self.db_path) as connection:
+            result = connection.execute(
+                """
+                UPDATE source_records
+                SET original_filename = ?, archive_path = ?, mime_type = ?, size_bytes = ?,
+                    source_type = ?, authority_level = ?, source_department = ?, provider = ?,
+                    document_date = ?, document_version = ?, applicable_baseline_version = ?,
+                    security_level = ?, is_redacted = ?, allow_external_model = ?,
+                    is_sandbox = ?, ingest_status = ?
+                WHERE id = ? AND project_id = ? AND sha256 = ?
+                """,
+                (
+                    source.original_filename,
+                    source.archive_path,
+                    source.mime_type,
+                    source.size_bytes,
+                    source.source_type,
+                    source.authority_level.value,
+                    source.source_department,
+                    source.provider,
+                    source.document_date.isoformat(),
+                    source.document_version,
+                    source.applicable_baseline_version,
+                    source.security_level.value,
+                    int(source.is_redacted),
+                    int(source.allow_external_model),
+                    int(source.is_sandbox),
+                    source.ingest_status,
+                    source.id,
+                    source.project_id,
+                    source.sha256,
+                ),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"source not found: {source.id}")
+
+    def update_ingest_status(self, source_id: str, ingest_status: str) -> None:
+        if not ingest_status.strip():
+            raise ValueError("ingest_status cannot be empty")
+        with connect(self.db_path) as connection:
+            result = connection.execute(
+                "UPDATE source_records SET ingest_status = ? WHERE id = ?",
+                (ingest_status, source_id),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"source not found: {source_id}")
 
     @staticmethod
     def _to_model(row: sqlite3.Row) -> SourceRecord:
@@ -547,3 +599,158 @@ class SqliteChangeRepository:
         data["evidence_refs"] = _json_loads(data.pop("evidence_refs_json"))
         data["impacted_objects"] = _json_loads(data.pop("impacted_objects_json"))
         return ChangeRequest.model_validate(data)
+
+
+class SqliteIngestUnitOfWork:
+    """Own one SQLite transaction for every authoritative ingest result write."""
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def complete(
+        self,
+        source: SourceRecord,
+        cards: list[KnowledgeCard],
+        relations: list[Relation],
+        issues: list[IssueCard],
+        event: EventLog,
+    ) -> None:
+        with connect(self.db_path) as connection:
+            for card in cards:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_cards (
+                        id, project_id, card_type, title, content, status, product_version,
+                        applicable_scope, source_refs_json, authority_level, owner, confidence,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        card_type = excluded.card_type,
+                        title = excluded.title,
+                        content = excluded.content,
+                        status = excluded.status,
+                        product_version = excluded.product_version,
+                        applicable_scope = excluded.applicable_scope,
+                        source_refs_json = excluded.source_refs_json,
+                        authority_level = excluded.authority_level,
+                        owner = excluded.owner,
+                        confidence = excluded.confidence,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        card.id,
+                        card.project_id,
+                        card.card_type,
+                        card.title,
+                        card.content,
+                        card.status.value,
+                        card.product_version,
+                        card.applicable_scope,
+                        _json_dumps(card.source_refs),
+                        card.authority_level.value,
+                        card.owner,
+                        card.confidence,
+                        card.created_at.isoformat(),
+                        card.updated_at.isoformat(),
+                    ),
+                )
+            for relation in relations:
+                connection.execute(
+                    """
+                    INSERT INTO relations (
+                        id, project_id, source_id, relation_type, target_id, source_ref, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        relation.id,
+                        relation.project_id,
+                        relation.source_id,
+                        relation.relation_type,
+                        relation.target_id,
+                        relation.source_ref,
+                        relation.created_at.isoformat(),
+                    ),
+                )
+            for issue in issues:
+                connection.execute(
+                    """
+                    INSERT INTO issue_cards (
+                        id, project_id, issue_type, severity, status, title, description,
+                        evidence_json, impacted_domains_json, options_json, ai_recommendation,
+                        ai_confidence, uncertainty, owner, due_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        issue.id,
+                        issue.project_id,
+                        issue.issue_type,
+                        issue.severity.value,
+                        issue.status.value,
+                        issue.title,
+                        issue.description,
+                        _json_dumps([item.model_dump(mode="json") for item in issue.evidence]),
+                        _json_dumps(issue.impacted_domains),
+                        _json_dumps(issue.options),
+                        issue.ai_recommendation,
+                        issue.ai_confidence,
+                        issue.uncertainty,
+                        issue.owner,
+                        _iso_or_none(issue.due_at),
+                        issue.created_at.isoformat(),
+                        issue.updated_at.isoformat(),
+                    ),
+                )
+            result = connection.execute(
+                "UPDATE source_records SET ingest_status = 'completed' WHERE id = ?",
+                (source.id,),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"source not found: {source.id}")
+            connection.execute(
+                """
+                INSERT INTO event_logs (
+                    id, project_id, event_type, entity_type, entity_id,
+                    actor, correlation_id, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.id,
+                    event.project_id,
+                    event.event_type,
+                    event.entity_type,
+                    event.entity_id,
+                    event.actor,
+                    event.correlation_id,
+                    _json_dumps(event.payload),
+                    event.created_at.isoformat(),
+                ),
+            )
+
+    def duplicate_report(self, source: SourceRecord) -> IngestReport:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json
+                FROM event_logs
+                WHERE project_id = ? AND entity_type = 'source' AND entity_id = ?
+                  AND event_type = 'source_ingest_completed'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (source.project_id, source.id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"completed ingest event not found: {source.id}")
+        payload = _json_loads(row["payload_json"])
+        return IngestReport(
+            source_id=source.id,
+            duplicate=True,
+            summary="该材料已完成导入，未重复写入。",
+            created_card_ids=payload["created_card_ids"],
+            created_relation_ids=payload["created_relation_ids"],
+            created_issue_ids=payload["created_issue_ids"],
+            candidate_count=payload["candidate_count"],
+            conflict_count=payload["conflict_count"],
+            result_mode=CallResultMode(payload["result_mode"]),
+            model_call_id=payload.get("model_call_id"),
+        )
