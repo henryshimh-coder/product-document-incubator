@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ from src.domain.enums import (
     SecurityLevel,
 )
 from src.domain.models import (
+    Baseline,
     ChangeRequest,
     Decision,
     EventLog,
@@ -307,8 +309,11 @@ def test_integrity_failure_is_reported_without_repairing_authoritative_or_mirror
 
     assert view.integrity_ok is False
     assert view.current_baseline is not None
+    assert isinstance(view.current_baseline, Baseline)
     assert view.current_baseline.id == manifest.current_baseline_id
     assert view.current_baseline.version == manifest.current_version
+    assert view.current_baseline.manifest_sha256 == hashlib.sha256(manifest_before).hexdigest()
+    assert view.current_baseline.created_at == manifest.published_at
     assert manifest_path.read_bytes() == manifest_before
     with sqlite3.connect(db_path) as connection:
         assert (

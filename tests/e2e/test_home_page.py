@@ -4,9 +4,9 @@ from datetime import UTC, datetime, timedelta
 
 from streamlit.testing.v1 import AppTest
 
-from src.application.dto.dashboard import DashboardBaselineView, DashboardView
+from src.application.dto.dashboard import DashboardView
 from src.domain.enums import BaselineStatus
-from src.domain.models import Project
+from src.domain.models import Baseline, Project
 
 NOW = datetime(2026, 7, 29, 7, 0, tzinfo=UTC)
 
@@ -62,6 +62,8 @@ def _render_empty_page() -> None:
 def _view(*, integrity_ok: bool = True, malicious: bool = False) -> DashboardView:
     project_name = '<img src=x onerror="alert(1)">' if malicious else "推荐官链客计划"
     version = '<script>alert("baseline")</script>' if malicious else "LLD-724_1"
+    baseline_id = '<object data="javascript:alert(4)">' if malicious else "BASE-LLD-724_1"
+    approved_by = '<a href="javascript:alert(5)">x</a>' if malicious else "产品经理"
     events = []
     for index in range(6):
         events.append(
@@ -92,17 +94,19 @@ def _view(*, integrity_ok: bool = True, malicious: bool = False) -> DashboardVie
             created_at=NOW,
             updated_at=NOW,
         ),
-        current_baseline=DashboardBaselineView(
-            id="BASE-LLD-724_1",
+        current_baseline=Baseline(
+            id=baseline_id,
             project_id="LLD",
             version=version,
             parent_baseline_id=None,
             status=BaselineStatus.EFFECTIVE,
             full_document_path="data/baseline/full.md",
             card_snapshot_path="data/baseline/cards.json",
+            manifest_sha256="a" * 64,
             change_request_id=None,
-            approved_by="产品经理",
+            approved_by=approved_by,
             effective_at=NOW,
+            created_at=NOW,
         ),
         open_issue_count=4,
         candidate_change_count=2,
@@ -135,7 +139,7 @@ def test_home_normal_state_has_baseline_first_hierarchy_one_primary_and_grouped_
     assert rendered.index('data-testid="project-metrics"') < rendered.index(
         'data-testid="recent-activity"'
     )
-    assert '<span class="pi-baseline-version">LLD-724_1</span>' in rendered
+    assert page.button(key="home_baseline_version").label == "LLD-724_1"
     assert "当前生效" in rendered
     assert rendered.count('class="pi-button pi-button--primary"') == 1
     assert "导入新资料" in rendered
@@ -168,8 +172,32 @@ def test_home_integrity_warning_keeps_manifest_baseline_and_explains_read_only()
     assert "查询仍按 Manifest 只读运行，变更发布已暂时禁用。" in page.error[0].value
     assert "BASELINE_INTEGRITY_FAILED" in page.error[0].value
     rendered = _html(page)
-    assert '<span class="pi-baseline-version">LLD-724_1</span>' in rendered
+    assert page.button(key="home_baseline_version").label == "LLD-724_1"
     assert rendered.count('class="pi-button pi-button--primary"') == 1
+
+
+def test_baseline_version_click_opens_read_only_details_panel() -> None:
+    """Catches rendering the current version as inert text instead of a detail control."""
+    page = AppTest.from_function(
+        _render_page,
+        args=(_view().model_dump_json(),),
+    ).run()
+
+    assert not page.exception
+    assert 'data-testid="baseline-details"' not in _html(page)
+    version_button = page.button(key="home_baseline_version")
+    assert version_button.label == "LLD-724_1"
+
+    page = version_button.click().run()
+
+    assert not page.exception
+    details = _html(page).split('data-testid="baseline-details"', 1)[1]
+    assert "LLD-724_1" in details
+    assert "当前生效" in details
+    assert "2026-07-29" in details
+    assert "产品经理" in details
+    assert "BASE-LLD-724_1" in details
+    assert _html(page).count('class="pi-button pi-button--primary"') == 1
 
 
 def test_home_escapes_user_controlled_project_baseline_and_event_text_in_html() -> None:
@@ -180,15 +208,21 @@ def test_home_escapes_user_controlled_project_baseline_and_event_text_in_html() 
     ).run()
 
     assert not page.exception
+    assert page.button(key="home_baseline_version").label == '<script>alert("baseline")</script>'
+    page = page.button(key="home_baseline_version").click().run()
+    assert not page.exception
     rendered = _html(page)
     assert '<img src=x onerror="alert(1)">' not in rendered
     assert '<script>alert("baseline")</script>' not in rendered
     assert '<svg onload="alert(2)">' not in rendered
     assert '<iframe src="javascript:alert(3)"></iframe>' not in rendered
+    assert '<object data="javascript:alert(4)">' not in rendered
+    assert '<a href="javascript:alert(5)">x</a>' not in rendered
     assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in rendered
-    assert "&lt;script&gt;alert(&quot;baseline&quot;)&lt;/script&gt;" in rendered
     assert "&lt;svg onload=&quot;alert(2)&quot;&gt;" in rendered
     assert "&lt;iframe src=&quot;javascript:alert(3)&quot;&gt;&lt;/iframe&gt;" in rendered
+    assert "&lt;object data=&quot;javascript:alert(4)&quot;&gt;" in rendered
+    assert "&lt;a href=&quot;javascript:alert(5)&quot;&gt;x&lt;/a&gt;" in rendered
 
 
 def test_home_without_local_baseline_has_one_bootstrap_action_and_escapes_settings() -> None:
