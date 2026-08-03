@@ -304,6 +304,51 @@ def test_event_logger_reconciles_committed_sqlite_event_after_jsonl_append_failu
     assert document["event_id"] == "EVENT-RECOVER"
 
 
+def test_event_logger_reconciles_t05_legacy_row_after_migrate_without_duplicates(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catches a migrated NULL correlation blocking startup audit reconciliation."""
+    monkeypatch.chdir(tmp_path)
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations (version TEXT PRIMARY KEY);
+            INSERT INTO schema_migrations(version) VALUES ('1.0');
+            CREATE TABLE event_logs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+                actor TEXT NOT NULL, payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO event_logs VALUES (
+                'EVENT-LEGACY', 'LLD', 'legacy_event', 'source',
+                'SRC-001', 'system', '{}', '2026-07-29T00:00:00+00:00'
+            );
+            """
+        )
+
+    migrate(db_path)
+    module = importlib.import_module("src.infrastructure.observability.event_logger")
+    logger = module.EventLogger(db_path)
+
+    assert logger.reconcile() == 1
+    assert logger.reconcile() == 0
+
+    documents = [
+        json.loads(line) for line in logger.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(documents) == 1
+    assert documents[0]["event_id"] == "EVENT-LEGACY"
+    assert documents[0]["correlation_id"] == "LEGACY-EVENT-LEGACY"
+    assert documents[0]["level"] == "INFO"
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute("SELECT id, correlation_id, level FROM event_logs").fetchone()
+    assert row == ("EVENT-LEGACY", "LEGACY-EVENT-LEGACY", "INFO")
+
+
 def test_event_logger_rewrites_partial_tail_to_canonical_unique_sqlite_events(
     tmp_path: Path,
     monkeypatch,

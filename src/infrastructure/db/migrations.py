@@ -238,6 +238,10 @@ def migrate(db_path: Path) -> None:
             "TEXT NOT NULL DEFAULT 'INFO' CHECK (level IN ('DEBUG', 'INFO', 'WARNING', 'ERROR'))",
         )
         connection.execute(
+            "UPDATE event_logs SET correlation_id = 'LEGACY-' || id "
+            "WHERE correlation_id IS NULL OR TRIM(correlation_id) = ''"
+        )
+        connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_call_correlation "
             "ON model_call_logs(project_id, correlation_id)"
         )

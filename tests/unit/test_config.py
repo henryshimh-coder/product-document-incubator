@@ -103,6 +103,83 @@ app:
     assert result.import_source.__class__.__name__ == "ImportSource"
 
 
+def test_build_container_repairs_legacy_null_event_before_startup_reconciliation(
+    tmp_path,
+    monkeypatch,
+):
+    """Catches the real composition root failing on a pre-1.2 audit row."""
+    import json
+    import sqlite3
+
+    from scripts.bootstrap_demo import bootstrap
+
+    container_module = importlib.import_module("src.application.container")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    app_yaml = config_dir / "app.yaml"
+    schema_yaml = config_dir / "schema.yaml"
+    app_yaml.write_text(
+        """
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions: [pdf, docx, txt, md]
+  demo_mode: true
+""".strip(),
+        encoding="utf-8",
+    )
+    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+    db_path = tmp_path / "data/local_state/product_intelligence.db"
+    db_path.parent.mkdir(parents=True)
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations (version TEXT PRIMARY KEY);
+            INSERT INTO schema_migrations(version) VALUES ('1.0'), ('1.1'), ('1.2');
+            CREATE TABLE event_logs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+                actor TEXT NOT NULL, payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO event_logs VALUES (
+                'EVENT-LEGACY', 'LLD', 'legacy_event', 'source',
+                'SRC-001', 'system', '{}', '2026-07-29T00:00:00+00:00'
+            );
+            """
+        )
+    bootstrap(tmp_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("UPDATE event_logs SET correlation_id = NULL WHERE id = 'EVENT-LEGACY'")
+
+    monkeypatch.chdir(tmp_path)
+    runtime = {
+        "DIFY_BASE_URL": "https://dify.example.test/v1",
+        "DIFY_INGEST_API_KEY": "app-ingest-secret",
+        "DIFY_QUERY_API_KEY": "app-query-secret",
+        "DIFY_LINT_API_KEY": "app-lint-secret",
+    }
+
+    first = container_module.build_container(app_yaml, schema_yaml, environ=runtime)
+    second = container_module.build_container(app_yaml, schema_yaml, environ=runtime)
+
+    assert first.import_source is not None
+    assert second.import_source is not None
+    documents = [
+        json.loads(line)
+        for line in (tmp_path / "data/local_state/app.log.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(documents) == 1
+    assert documents[0]["event_id"] == "EVENT-LEGACY"
+    assert documents[0]["correlation_id"] == "LEGACY-EVENT-LEGACY"
+    assert documents[0]["level"] == "INFO"
+
+
 def test_build_container_runs_real_ingest_vertical_slice_from_composition_root(
     tmp_path,
     monkeypatch,

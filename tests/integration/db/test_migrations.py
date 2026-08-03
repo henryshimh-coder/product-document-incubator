@@ -86,6 +86,18 @@ def test_migrate_creates_event_level_with_safe_info_default(tmp_path: Path) -> N
                 )
                 """
             )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO event_logs (
+                    id, project_id, event_type, entity_type, entity_id,
+                    actor, correlation_id, payload_json, created_at
+                ) VALUES (
+                    'EVENT-NULL-CORR', 'LLD', 'legacy_event', 'source', 'SRC-001',
+                    'system', NULL, '{}', '2026-07-29T00:00:00+00:00'
+                )
+                """
+            )
     assert level == "INFO"
 
 
@@ -145,4 +157,55 @@ def test_migrate_adds_audit_columns_to_existing_database_without_losing_rows(
     assert {"correlation_id", "workflow_run_id"} <= model_columns
     assert {"correlation_id", "level"} <= event_columns
     assert model_row == ("CALL-LEGACY", None, None)
-    assert event_row == ("EVENT-LEGACY", None, "INFO")
+    assert event_row == ("EVENT-LEGACY", "LEGACY-EVENT-LEGACY", "INFO")
+
+
+def test_migrate_repairs_null_and_blank_event_correlations_despite_1_2_marker(
+    tmp_path: Path,
+) -> None:
+    """Catches version-gated migration leaving invalid legacy audit data behind."""
+    db_path = tmp_path / "product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations (version TEXT PRIMARY KEY);
+            INSERT INTO schema_migrations(version) VALUES ('1.0'), ('1.1'), ('1.2');
+            CREATE TABLE event_logs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL, event_type TEXT NOT NULL,
+                entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+                actor TEXT NOT NULL, correlation_id TEXT,
+                level TEXT NOT NULL DEFAULT 'INFO',
+                payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            INSERT INTO event_logs VALUES (
+                'EVENT-NULL', 'LLD', 'legacy_event', 'source', 'SRC-NULL',
+                'system', NULL, 'INFO', '{}', '2026-07-29T00:00:00+00:00'
+            );
+            INSERT INTO event_logs VALUES (
+                'EVENT-BLANK', 'LLD', 'legacy_event', 'source', 'SRC-BLANK',
+                'system', '   ', 'INFO', '{}', '2026-07-29T00:00:01+00:00'
+            );
+            INSERT INTO event_logs VALUES (
+                'EVENT-VALID', 'LLD', 'legacy_event', 'source', 'SRC-VALID',
+                'system', 'CORR-VALID', 'INFO', '{}', '2026-07-29T00:00:02+00:00'
+            );
+            """
+        )
+
+    migrate(db_path)
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT id, correlation_id FROM event_logs ORDER BY id"
+        ).fetchall()
+        versions = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    assert rows == [
+        ("EVENT-BLANK", "LEGACY-EVENT-BLANK"),
+        ("EVENT-NULL", "LEGACY-EVENT-NULL"),
+        ("EVENT-VALID", "CORR-VALID"),
+    ]
+    assert versions == [("1.0",), ("1.1",), ("1.2",)]
