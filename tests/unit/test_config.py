@@ -101,6 +101,156 @@ app:
 
     assert result.import_source is not None
     assert result.import_source.__class__.__name__ == "ImportSource"
+    assert result.query is not None
+    assert result.query.__class__.__name__ == "RunQuery"
+
+
+def test_build_container_runs_real_query_vertical_slice_with_manifest_and_trusted_citations(
+    tmp_path,
+    monkeypatch,
+):
+    """Catches a page-only query implementation or a composition root bypassing safety proof."""
+    import json
+    from datetime import UTC, date, datetime
+
+    import httpx
+
+    from scripts.bootstrap_demo import bootstrap
+    from src.application.dto.query import RunQueryInput
+    from src.domain.enums import AuthorityLevel, KnowledgeStatus, SecurityLevel
+    from src.domain.models import KnowledgeCard, SourceRecord
+    from src.infrastructure.db.repositories import (
+        SqliteKnowledgeRepository,
+        SqliteSourceRepository,
+    )
+    from src.infrastructure.files.archive import SourceArchive
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    app_yaml = config_dir / "app.yaml"
+    schema_yaml = config_dir / "schema.yaml"
+    app_yaml.write_text(
+        """
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions: [pdf, docx, txt, md]
+  demo_mode: true
+""".strip(),
+        encoding="utf-8",
+    )
+    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+    bootstrap(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    now = datetime(2026, 7, 29, 7, 0, tzinfo=UTC)
+    body = "# 当前产品方案\n当前目标客群是符合准入要求的存量客户。\n" + "已脱敏基线资料。" * 2000
+    archived = SourceArchive(project_id="LLD", source_id="SRC-001").save(
+        "当前产品方案.md",
+        body.encode(),
+    )
+    db_path = tmp_path / "data/local_state/product_intelligence.db"
+    SqliteSourceRepository(db_path).add(
+        SourceRecord(
+            id="SRC-001",
+            project_id="LLD",
+            original_filename="当前产品方案.md",
+            archive_path=str(archived.path),
+            sha256=archived.sha256,
+            mime_type="text/markdown",
+            size_bytes=archived.size_bytes,
+            source_type="formal_document",
+            authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+            source_department="产品部",
+            provider=None,
+            document_date=date(2026, 7, 29),
+            document_version="v1.0",
+            applicable_baseline_version="LLD-724_1",
+            security_level=SecurityLevel.L2_INTERNAL,
+            is_redacted=True,
+            allow_external_model=True,
+            is_sandbox=False,
+            ingest_status="completed",
+            created_at=now,
+        )
+    )
+    SqliteKnowledgeRepository(db_path).upsert_cards(
+        [
+            KnowledgeCard(
+                id="RULE-LLD-001",
+                project_id="LLD",
+                card_type="rule",
+                title="目标客群",
+                content="当前目标客群是符合准入要求的存量客户。",
+                status=KnowledgeStatus.EFFECTIVE,
+                product_version="LLD-724_1",
+                applicable_scope="当前产品方案 > 目标客群",
+                source_refs=["SRC-001"],
+                authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+                owner="产品经理",
+                created_at=now,
+                updated_at=now,
+            )
+        ]
+    )
+
+    def http_factory():
+        def handler(request):
+            inputs = json.loads(request.content)["inputs"]
+            result = {
+                "answer": inputs["effective_cards"][0]["content"],
+                "effective_rules": [inputs["effective_cards"][0]["id"]],
+                "citations": [inputs["citations"][0]],
+                "candidate_notice": None,
+                "conflict_notice": None,
+                "baseline_version": inputs["baseline_version"],
+                "evidence_sufficiency": "sufficient",
+                "result_mode": "realtime",
+                "model_call_id": "CALL-QUERY-ROOT",
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "workflow_run_id": "WF-QUERY-ROOT",
+                    "data": {"outputs": {"result": result}},
+                },
+            )
+
+        return httpx.Client(transport=httpx.MockTransport(handler))
+
+    container_module = importlib.import_module("src.application.container")
+    container = container_module.build_container(
+        app_yaml,
+        schema_yaml,
+        environ={
+            "DIFY_BASE_URL": "https://dify.example.test/v1",
+            "DIFY_INGEST_API_KEY": "app-ingest-secret",
+            "DIFY_QUERY_API_KEY": "app-query-secret",
+            "DIFY_LINT_API_KEY": "app-lint-secret",
+            "REDACTION_CUSTOMER_NAMES": "某客户",
+            "REDACTION_STRATEGY_TERMS": "北极星计划",
+            "REDACTION_FINANCIAL_TERMS": "预算利润",
+            "REDACTION_LEADER_NAMES": "王总",
+            "REDACTION_UNPUBLISHED_DECISIONS": "未发布决定",
+        },
+        http_factory=http_factory,
+    )
+
+    assert container.query is not None
+    response = container.query.execute(
+        RunQueryInput(
+            project_id="LLD",
+            question="当前目标客群是什么？",
+            scope="effective",
+            historical_version=None,
+        )
+    )
+
+    assert response.answer == "当前目标客群是符合准入要求的存量客户。"
+    assert response.effective_rules == ["RULE-LLD-001"]
+    assert response.citations[0].id == "CIT-SRC-001-01"
+    assert response.citations[0].filename == "当前产品方案.md"
 
 
 def test_build_container_repairs_legacy_null_event_before_startup_reconciliation(

@@ -34,6 +34,7 @@ class ErrorCode(StrEnum):
     SOURCE_METADATA_MISMATCH = "SOURCE_METADATA_MISMATCH"
     OUTBOUND_COVERAGE_EXCEEDED = "OUTBOUND_COVERAGE_EXCEEDED"
     INGEST_PERSISTENCE_FAILED = "INGEST_PERSISTENCE_FAILED"
+    HISTORICAL_VERSION_REQUIRED = "HISTORICAL_VERSION_REQUIRED"
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
         "导入结果未能安全写入，当前基线不受影响",
         retryable=True,
     ),
+    ErrorCode.HISTORICAL_VERSION_REQUIRED: ErrorDefinition("历史查询必须指定产品版本"),
 }
 
 

@@ -272,6 +272,26 @@ class SqliteBaselineRepository:
             )
         return Baseline.model_validate(_row_data(row))
 
+    def get_by_version(self, project_id: str, version: str) -> Baseline:
+        with connect(self.db_path) as connection:
+            row = _require(
+                connection.execute(
+                    "SELECT * FROM baselines WHERE project_id = ? AND version = ?",
+                    (project_id, version),
+                ).fetchone(),
+                "baseline version",
+                f"{project_id}:{version}",
+            )
+        return Baseline.model_validate(_row_data(row))
+
+    def list_for_project(self, project_id: str) -> list[Baseline]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT * FROM baselines WHERE project_id = ? ORDER BY created_at DESC, id",
+                (project_id,),
+            ).fetchall()
+        return [Baseline.model_validate(_row_data(row)) for row in rows]
+
     def mark_superseded(self, baseline_id: str) -> None:
         with connect(self.db_path) as connection:
             result = connection.execute(
@@ -340,6 +360,24 @@ class SqliteKnowledgeRepository:
                 ORDER BY id
                 """,
                 (project_id, version, KnowledgeStatus.EFFECTIVE.value),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
+    def list_notices(self, project_id: str, version: str) -> list[KnowledgeCard]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM knowledge_cards
+                WHERE project_id = ? AND product_version = ? AND status IN (?, ?)
+                ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, id
+                """,
+                (
+                    project_id,
+                    version,
+                    KnowledgeStatus.CANDIDATE.value,
+                    KnowledgeStatus.CONFLICT.value,
+                    KnowledgeStatus.CANDIDATE.value,
+                ),
             ).fetchall()
         return [self._to_model(row) for row in rows]
 

@@ -368,6 +368,28 @@
   line-height: 32px;
 }
 
+.pi-query-answer {
+  max-width: 820px;
+  color: var(--pi-text-strong);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 30px;
+  overflow-wrap: anywhere;
+}
+
+.pi-query-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  color: var(--pi-text-600);
+  overflow-wrap: anywhere;
+}
+
+.pi-query-status {
+  color: var(--pi-text-strong);
+  font-weight: 600;
+}
+
 .pi-grouped-list {
   overflow: hidden;
   border: 1px solid var(--pi-border);

@@ -1,0 +1,93 @@
+[
+  {
+    "id": "Q-001",
+    "question": "当前目标客群是什么？",
+    "scope": "effective",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-001"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-001-01"]
+  },
+  {
+    "id": "Q-002",
+    "question": "当前产品的核心价值是什么？",
+    "scope": "effective",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-002"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-002-01"]
+  },
+  {
+    "id": "Q-003",
+    "question": "当前产品范围包含哪些内容？",
+    "scope": "effective",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-003"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-003-01"]
+  },
+  {
+    "id": "Q-004",
+    "question": "当前的主要使用场景是什么？",
+    "scope": "effective",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-004"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-004-01"]
+  },
+  {
+    "id": "Q-005",
+    "question": "当前规则的适用条件是什么？",
+    "scope": "effective",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-005"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-005-01"]
+  },
+  {
+    "id": "Q-006",
+    "question": "当前版本有哪些关键约束？",
+    "scope": "effective",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-006"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-006-01"]
+  },
+  {
+    "id": "Q-007",
+    "question": "当前版本的权威口径是什么？",
+    "scope": "effective",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-007"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-007-01"]
+  },
+  {
+    "id": "Q-008",
+    "question": "当前结论有候选变化吗？",
+    "scope": "effective_with_notices",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-008"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-008-01"]
+  },
+  {
+    "id": "Q-009",
+    "question": "当前结论的直接依据是什么？",
+    "scope": "effective_with_notices",
+    "expected_version": "LLD-724_1",
+    "required_card_ids": ["RULE-LLD-009"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001"],
+    "required_citation_ids": ["CIT-SRC-009-01"]
+  },
+  {
+    "id": "Q-010",
+    "question": "LLD-700_1 版本的历史规则是什么？",
+    "scope": "historical",
+    "historical_version": "LLD-700_1",
+    "expected_version": "LLD-700_1",
+    "required_card_ids": ["RULE-HISTORY-001"],
+    "forbidden_card_ids": ["RULE-CANDIDATE-001", "RULE-LLD-001"],
+    "required_citation_ids": ["CIT-SRC-HISTORY-01"]
+  }
+]

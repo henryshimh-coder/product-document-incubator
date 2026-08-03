@@ -119,6 +119,8 @@ def test_baseline_repository_round_trip_and_supersede(tmp_path: Path) -> None:
     repository.add(baseline)
 
     assert repository.get(baseline.id) == baseline
+    assert repository.get_by_version("LLD", "LLD-724_1") == baseline
+    assert repository.list_for_project("LLD") == [baseline]
     repository.mark_superseded(baseline.id)
     assert repository.get(baseline.id) == baseline.model_copy(
         update={"status": BaselineStatus.SUPERSEDED}
@@ -262,3 +264,56 @@ def test_knowledge_issue_decision_and_change_repositories_restore_validated_mode
 
     assert issues.get(issue.id).updated_at == issue_updated_at
     assert changes.get(change.id).updated_at == change_updated_at
+
+
+def test_knowledge_repository_lists_only_version_scoped_candidate_and_conflict_notices(
+    tmp_path: Path,
+) -> None:
+    """Catches effective, rejected, or cross-version cards leaking into query notices."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+    def card(card_id: str, status: KnowledgeStatus, version: str = "LLD-724_1"):
+        return KnowledgeCard(
+            id=card_id,
+            project_id="LLD",
+            card_type="rule",
+            title=card_id,
+            content=f"{card_id} 内容",
+            status=status,
+            product_version=version,
+            applicable_scope="演示",
+            source_refs=["SRC-BASE"],
+            authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+            owner="产品经理",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    repository = SqliteKnowledgeRepository(db_path)
+    repository.upsert_cards(
+        [
+            card("RULE-EFFECTIVE", KnowledgeStatus.EFFECTIVE),
+            card("RULE-CANDIDATE", KnowledgeStatus.CANDIDATE),
+            card("RULE-CONFLICT", KnowledgeStatus.CONFLICT),
+            card("RULE-REJECTED", KnowledgeStatus.REJECTED),
+            card("RULE-OLD-CANDIDATE", KnowledgeStatus.CANDIDATE, "LLD-700_1"),
+        ]
+    )
+
+    assert [item.id for item in repository.list_notices("LLD", "LLD-724_1")] == [
+        "RULE-CANDIDATE",
+        "RULE-CONFLICT",
+    ]
