@@ -8,6 +8,7 @@ from typing import Any
 import streamlit as st
 
 from src.application.container import AppContainer
+from src.ui.components.sidebar import render_sidebar_chrome
 from src.ui.pages import home, ingest, lint, query, release, trace
 
 PageRenderer = Callable[[AppContainer], None]
@@ -32,6 +33,7 @@ def get_page_definitions() -> list[PageDefinition]:
 
 
 def build_navigation(container: AppContainer) -> Any:
+    render_sidebar_chrome()
     pages = [
         st.Page(
             partial(definition.render, container),
