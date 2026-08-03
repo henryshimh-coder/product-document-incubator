@@ -48,21 +48,53 @@ def test_sidebar_chrome_renders_wordmark_safety_statement_and_keeps_six_routes()
     ]
 
 
-def test_navigation_composition_keeps_chrome_after_navigation_output_boundary(
+def test_every_real_page_callable_renders_chrome_inside_page_run_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catches rendering chrome before st.navigation clears prior sidebar output."""
+    """Catches emitting shared chrome outside the callable executed by page.run()."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from streamlit.navigation import page as streamlit_page_module
+
     from src.ui import navigation as navigation_module
 
+    container = _build_test_container()
     calls: list[str] = []
-    expected_navigation = object()
+    captured_pages: list[Any] = []
+
+    def page_renderer(_container: Any, *, route: str) -> None:
+        assert _container is container
+        calls.append(f"page:{route}")
+
+    definitions = [
+        navigation_module.PageDefinition(
+            title=title,
+            url_path=route,
+            render=lambda current, route=route: page_renderer(current, route=route),
+        )
+        for title, route in [
+            ("项目首页", "home"),
+            ("资料导入", "ingest"),
+            ("当前查询", "query"),
+            ("一键自检", "lint"),
+            ("变更发布", "release"),
+            ("追溯与价值", "trace"),
+        ]
+    ]
 
     def capture_navigation(pages: list[Any], *, position: str) -> object:
-        calls.append("navigation")
-        assert len(pages) == 6
         assert position == "sidebar"
-        return expected_navigation
+        captured_pages.extend(pages)
+        return object()
 
+    page_context = SimpleNamespace(pages_manager=SimpleNamespace(main_script_parent=Path.cwd()))
+    monkeypatch.setattr(
+        streamlit_page_module,
+        "get_script_run_ctx",
+        lambda: page_context,
+    )
+    monkeypatch.setattr(navigation_module, "get_page_definitions", lambda: definitions)
     monkeypatch.setattr(navigation_module.st, "navigation", capture_navigation)
     monkeypatch.setattr(
         navigation_module,
@@ -70,7 +102,15 @@ def test_navigation_composition_keeps_chrome_after_navigation_output_boundary(
         lambda: calls.append("chrome"),
     )
 
-    result = navigation_module.build_navigation(_build_test_container())
+    navigation_module.build_navigation(container)
+    calls.clear()
 
-    assert result is expected_navigation
-    assert calls == ["navigation", "chrome"]
+    assert len(captured_pages) == 6
+    for route, page in zip(
+        ["home", "ingest", "query", "lint", "release", "trace"],
+        captured_pages,
+        strict=True,
+    ):
+        page._page()
+        assert calls == ["chrome", f"page:{route}"]
+        calls.clear()
