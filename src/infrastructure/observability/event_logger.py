@@ -25,6 +25,7 @@ class AuditDurabilityUncertainError(RuntimeError):
 @dataclass(frozen=True)
 class PreparedEvent:
     event: EventLog
+    level: str
     payload_json: str
     line: str
 
@@ -55,6 +56,7 @@ class EventLogger:
         }
         return PreparedEvent(
             event=validated,
+            level=normalized_level,
             payload_json=payload_json,
             line=_json_dumps(document) + "\n",
         )
@@ -69,8 +71,8 @@ class EventLogger:
             """
             INSERT INTO event_logs (
                 id, project_id, event_type, entity_type, entity_id,
-                actor, correlation_id, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                actor, correlation_id, level, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event.id,
@@ -80,6 +82,7 @@ class EventLogger:
                 event.entity_id,
                 event.actor,
                 event.correlation_id,
+                prepared.level,
                 prepared.payload_json,
                 event.created_at.isoformat(),
             ),
@@ -108,10 +111,18 @@ class EventLogger:
         existing_ids: set[str] = set()
         rewrite_required = False
         if self.log_path.exists():
-            raw_text = self.log_path.read_text(encoding="utf-8")
-            if raw_text and not raw_text.endswith("\n"):
+            raw_bytes = self.log_path.read_bytes()
+            if raw_bytes and not raw_bytes.endswith(b"\n"):
                 rewrite_required = True
-            for line in raw_text.splitlines():
+            raw_lines = raw_bytes.split(b"\n") if raw_bytes else []
+            if raw_bytes.endswith(b"\n"):
+                raw_lines.pop()
+            for raw_line in raw_lines:
+                try:
+                    line = raw_line.decode("utf-8")
+                except UnicodeDecodeError:
+                    rewrite_required = True
+                    continue
                 try:
                     document = json.loads(line)
                 except json.JSONDecodeError:
@@ -138,9 +149,12 @@ class EventLogger:
         for row in rows:
             if row["id"] in existing_ids:
                 continue
-            self.append_prepared(self.prepare(self._event_from_row(row)))
+            self.append_prepared(self._prepare_from_row(row))
             appended += 1
         return appended
+
+    def _prepare_from_row(self, row: sqlite3.Row) -> PreparedEvent:
+        return self.prepare(self._event_from_row(row), level=row["level"])
 
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> EventLog:
@@ -170,7 +184,7 @@ class EventLogger:
             ) as temporary:
                 temporary_path = Path(temporary.name)
                 for row in rows:
-                    temporary.write(self.prepare(self._event_from_row(row)).line)
+                    temporary.write(self._prepare_from_row(row).line)
                 temporary.flush()
                 os.fsync(temporary.fileno())
             os.replace(temporary_path, self.log_path)

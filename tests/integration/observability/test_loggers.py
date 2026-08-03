@@ -148,11 +148,11 @@ def test_event_logger_writes_queryable_sqlite_index_and_safe_utf8_jsonl(
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
             """
-            SELECT correlation_id, payload_json
+            SELECT correlation_id, level, payload_json
             FROM event_logs WHERE project_id = 'LLD' AND correlation_id = 'CORR-001'
             """
         ).fetchone()
-    assert row == ("CORR-001", '{"duration_ms":12,"status":"succeeded"}')
+    assert row == ("CORR-001", "INFO", '{"duration_ms":12,"status":"succeeded"}')
 
 
 def test_event_log_production_path_cannot_be_overridden(tmp_path: Path):
@@ -359,6 +359,98 @@ def test_event_logger_rewrites_partial_tail_to_canonical_unique_sqlite_events(
     assert set(event_ids) == sqlite_ids
 
 
+def test_event_logger_rewrites_invalid_utf8_tail_from_sqlite(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catches a truncated multibyte tail blocking startup reconciliation."""
+    monkeypatch.chdir(tmp_path)
+    db_path = _prepare_db(tmp_path)
+    module = importlib.import_module("src.infrastructure.observability.event_logger")
+    logger = module.EventLogger(db_path)
+    event = EventLog(
+        id="EVENT-UTF8",
+        project_id="LLD",
+        event_type="source_ingest_failed",
+        entity_type="source",
+        entity_id="SRC-UTF8",
+        actor="system",
+        correlation_id="CORR-UTF8",
+        payload={"status": "failed"},
+        created_at=NOW,
+    )
+    prepared = logger.prepare(event)
+    with sqlite3.connect(db_path) as connection:
+        logger.insert_prepared(connection, prepared)
+    logger.log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.log_path.write_bytes(b'{"payload":"\xe4')
+
+    assert logger.reconcile() == 1
+
+    raw_line = logger.log_path.read_text(encoding="utf-8")
+    assert raw_line.endswith("\n")
+    assert json.loads(raw_line)["event_id"] == "EVENT-UTF8"
+
+
+def test_event_logger_preserves_normalized_levels_when_rewriting_partial_tail(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """Catches SQLite reconciliation downgrading WARNING/ERROR events to INFO."""
+    monkeypatch.chdir(tmp_path)
+    db_path = _prepare_db(tmp_path)
+    module = importlib.import_module("src.infrastructure.observability.event_logger")
+    logger = module.EventLogger(db_path)
+    warning = EventLog(
+        id="EVENT-WARNING",
+        project_id="LLD",
+        event_type="source_ingest_security_blocked",
+        entity_type="source",
+        entity_id="SRC-WARNING",
+        actor="system",
+        correlation_id="CORR-WARNING",
+        payload={"status": "blocked"},
+        created_at=NOW,
+    )
+    error = warning.model_copy(
+        update={
+            "id": "EVENT-ERROR",
+            "event_type": "source_ingest_failed",
+            "entity_id": "SRC-ERROR",
+            "correlation_id": "CORR-ERROR",
+            "payload": {"status": "failed"},
+            "created_at": NOW + timedelta(seconds=1),
+        }
+    )
+    logger.record(warning, level=" warning ")
+    original_append = logger.append_prepared
+
+    def append_invalid_utf8_then_fail(prepared):
+        with logger.log_path.open("ab") as stream:
+            stream.write(b'{"payload":"\xe4')
+        raise OSError("disk full after partial multibyte write")
+
+    monkeypatch.setattr(logger, "append_prepared", append_invalid_utf8_then_fail)
+    with pytest.raises(module.AuditDurabilityUncertainError):
+        logger.record(error, level="error")
+    monkeypatch.setattr(logger, "append_prepared", original_append)
+
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT id, level FROM event_logs ORDER BY created_at, id"
+        ).fetchall()
+    assert rows == [("EVENT-WARNING", "WARNING"), ("EVENT-ERROR", "ERROR")]
+
+    assert logger.reconcile() == 1
+    documents = [
+        json.loads(line) for line in logger.log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [(document["event_id"], document["level"]) for document in documents] == [
+        ("EVENT-WARNING", "WARNING"),
+        ("EVENT-ERROR", "ERROR"),
+    ]
+
+
 def test_event_logger_atomic_rewrite_failure_preserves_partial_original(
     tmp_path: Path,
     monkeypatch,
@@ -382,7 +474,7 @@ def test_event_logger_atomic_rewrite_failure_preserves_partial_original(
     with sqlite3.connect(db_path) as connection:
         logger.insert_prepared(connection, prepared)
     logger.log_path.parent.mkdir(parents=True, exist_ok=True)
-    original = b'{"event_id":"EVENT-ATOMIC"'
+    original = b'{"payload":"\xe4'
     logger.log_path.write_bytes(original)
     monkeypatch.setattr(
         os,

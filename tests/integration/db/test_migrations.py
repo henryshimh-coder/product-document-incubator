@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from src.infrastructure.db.migrations import migrate
 
 
@@ -48,7 +50,43 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-    assert versions == [("1.0",), ("1.1",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",)]
+
+
+def test_migrate_creates_event_level_with_safe_info_default(tmp_path: Path) -> None:
+    """Protects fresh audit rows from missing or accepting an invalid level."""
+    db_path = tmp_path / "product_intelligence.db"
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO event_logs (
+                id, project_id, event_type, entity_type, entity_id,
+                actor, correlation_id, payload_json, created_at
+            ) VALUES (
+                'EVENT-DEFAULT', 'LLD', 'legacy_event', 'source', 'SRC-001',
+                'system', 'CORR-DEFAULT', '{}', '2026-07-29T00:00:00+00:00'
+            )
+            """
+        )
+        level = connection.execute(
+            "SELECT level FROM event_logs WHERE id = 'EVENT-DEFAULT'"
+        ).fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO event_logs (
+                    id, project_id, event_type, entity_type, entity_id,
+                    actor, correlation_id, payload_json, created_at, level
+                ) VALUES (
+                    'EVENT-INVALID', 'LLD', 'legacy_event', 'source', 'SRC-001',
+                    'system', 'CORR-INVALID', '{}', '2026-07-29T00:00:00+00:00', 'WARN'
+                )
+                """
+            )
+    assert level == "INFO"
 
 
 def test_migrate_adds_audit_columns_to_existing_database_without_losing_rows(
@@ -101,8 +139,10 @@ def test_migrate_adds_audit_columns_to_existing_database_without_losing_rows(
         model_row = connection.execute(
             "SELECT id, correlation_id, workflow_run_id FROM model_call_logs"
         ).fetchone()
-        event_row = connection.execute("SELECT id, correlation_id FROM event_logs").fetchone()
+        event_row = connection.execute(
+            "SELECT id, correlation_id, level FROM event_logs"
+        ).fetchone()
     assert {"correlation_id", "workflow_run_id"} <= model_columns
-    assert "correlation_id" in event_columns
+    assert {"correlation_id", "level"} <= event_columns
     assert model_row == ("CALL-LEGACY", None, None)
-    assert event_row == ("EVENT-LEGACY", None)
+    assert event_row == ("EVENT-LEGACY", None, "INFO")

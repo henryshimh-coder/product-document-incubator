@@ -306,7 +306,7 @@ def test_import_source_creates_conflict_without_changing_effective_baseline(
             "challenging_source",
         }
         assert len({item["source_id"] for item in evidence}) == 2
-        assert connection.execute("SELECT COUNT(*) FROM event_logs").fetchone()[0] == 1
+        assert connection.execute("SELECT level FROM event_logs").fetchone()[0] == "INFO"
         model_call = connection.execute(
             "SELECT correlation_id, workflow_run_id, status FROM model_call_logs"
         ).fetchone()

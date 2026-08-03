@@ -193,6 +193,8 @@ CREATE TABLE IF NOT EXISTS event_logs (
     entity_id TEXT NOT NULL,
     actor TEXT NOT NULL,
     correlation_id TEXT NOT NULL,
+    level TEXT NOT NULL DEFAULT 'INFO'
+        CHECK (level IN ('DEBUG', 'INFO', 'WARNING', 'ERROR')),
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -229,6 +231,12 @@ def migrate(db_path: Path) -> None:
         _add_column_if_missing(connection, "model_call_logs", "workflow_run_id", "TEXT")
         _add_column_if_missing(connection, "model_call_logs", "correlation_id", "TEXT")
         _add_column_if_missing(connection, "event_logs", "correlation_id", "TEXT")
+        _add_column_if_missing(
+            connection,
+            "event_logs",
+            "level",
+            "TEXT NOT NULL DEFAULT 'INFO' CHECK (level IN ('DEBUG', 'INFO', 'WARNING', 'ERROR'))",
+        )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_call_correlation "
             "ON model_call_logs(project_id, correlation_id)"
@@ -239,3 +247,4 @@ def migrate(db_path: Path) -> None:
         )
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.0",))
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.1",))
+        connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.2",))
