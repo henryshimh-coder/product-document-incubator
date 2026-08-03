@@ -11,6 +11,8 @@ def _render_query_page(
     raises: str | None = None,
     configured_scope: str = "effective",
 ) -> None:
+    import streamlit as st
+
     from src.application.container import AppContainer, AppSettings
     from src.domain.errors import DomainError, ErrorCode
     from src.domain.models import QueryResponse
@@ -22,6 +24,7 @@ def _render_query_page(
             return ("LLD-700_1", "LLD-650_1")
 
         def execute(self, command):
+            st.session_state["query_test_command"] = command.model_dump(mode="json")
             if raises is not None:
                 raise DomainError(ErrorCode(raises))
             return QueryResponse.model_validate_json(response_json)
@@ -183,16 +186,55 @@ def test_insufficient_evidence_uses_the_fixed_non_factual_copy() -> None:
     assert "证据不足" in _html(page)
 
 
-def test_historical_scope_requires_a_version_before_query_is_enabled() -> None:
-    """Catches the page silently querying current cards under a historical label."""
+def test_historical_scope_outside_form_shows_dropdown_without_prior_submit_and_gates_query() -> (
+    None
+):
+    """Catches the historical dropdown requiring an erroneous first Query submission."""
     page = AppTest.from_function(
         _render_query_page,
         args=(_response().model_dump_json(),),
     ).run()
 
+    assert not page.radio(key="query_scope").proto.form_id
+    assert page.text_input(key="query_question").proto.form_id == "query_form"
+    assert page.button(key="query_submit").proto.form_id == "query_form"
     page.radio(key="query_scope").set_value("historical").run()
 
+    assert not page.selectbox(key="query_historical_version").proto.form_id
     assert page.selectbox(key="query_historical_version").value is None
     assert page.button(key="query_submit").disabled is True
     page.selectbox(key="query_historical_version").select("LLD-700_1").run()
     assert page.button(key="query_submit").disabled is False
+
+
+def test_historical_query_submits_the_explicitly_selected_version_once() -> None:
+    """Catches historical selection being lost between its immediate rerun and form submit."""
+    page = AppTest.from_function(
+        _render_query_page,
+        args=(_response().model_dump_json(),),
+    ).run()
+    page.radio(key="query_scope").set_value("historical").run()
+    page.selectbox(key="query_historical_version").select("LLD-700_1").run()
+
+    page = _submit(page, question="历史客群规则是什么？")
+
+    assert page.session_state["query_test_command"] == {
+        "project_id": "LLD",
+        "question": "历史客群规则是什么？",
+        "scope": "historical",
+        "historical_version": "LLD-700_1",
+    }
+
+
+def test_switching_scope_clears_response_instead_of_relabeling_old_answer() -> None:
+    """Catches a prior effective response being displayed under a newly selected scope."""
+    page = AppTest.from_function(
+        _render_query_page,
+        args=(_response().model_dump_json(),),
+    ).run()
+    page = _submit(page)
+    assert "当前回答" in _html(page)
+
+    page.radio(key="query_scope").set_value("effective_with_notices").run()
+
+    assert "当前回答" not in _html(page)

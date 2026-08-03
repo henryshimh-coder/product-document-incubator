@@ -43,6 +43,34 @@ def render(container: AppContainer) -> None:
     st.caption(f"查询项目 {container.settings.project_id} 的当前生效规则与可追溯引用")
 
     service_available = container.query is not None
+    scope = st.radio(
+        "查询范围",
+        options=tuple(_SCOPE_LABELS),
+        format_func=_SCOPE_LABELS.__getitem__,
+        horizontal=True,
+        index=0,
+        key="query_scope",
+    )
+    historical_version = None
+    if scope == "historical":
+        try:
+            historical_versions = (
+                ()
+                if container.query is None
+                else container.query.list_historical_versions(container.settings.project_id)
+            )
+        except (KeyError, OSError, ValueError):
+            historical_versions = ()
+        historical_version = st.selectbox(
+            "历史版本",
+            options=historical_versions,
+            index=None,
+            placeholder="请选择明确的历史版本",
+            key="query_historical_version",
+        )
+        st.caption("历史版本 · 只读查询")
+    historical_ready = scope != "historical" or bool((historical_version or "").strip())
+
     with st.form("query_form"):
         question = st.text_input(
             "想了解什么？",
@@ -50,33 +78,6 @@ def render(container: AppContainer) -> None:
             max_chars=500,
             key="query_question",
         )
-        scope = st.radio(
-            "查询范围",
-            options=tuple(_SCOPE_LABELS),
-            format_func=_SCOPE_LABELS.__getitem__,
-            horizontal=True,
-            index=0,
-            key="query_scope",
-        )
-        historical_version = None
-        if scope == "historical":
-            try:
-                historical_versions = (
-                    ()
-                    if container.query is None
-                    else container.query.list_historical_versions(container.settings.project_id)
-                )
-            except (KeyError, OSError, ValueError):
-                historical_versions = ()
-            historical_version = st.selectbox(
-                "历史版本",
-                options=historical_versions,
-                index=None,
-                placeholder="请选择明确的历史版本",
-                key="query_historical_version",
-            )
-            st.caption("历史版本 · 只读查询")
-        historical_ready = scope != "historical" or bool((historical_version or "").strip())
         submitted = st.form_submit_button(
             "查询",
             type="primary",
