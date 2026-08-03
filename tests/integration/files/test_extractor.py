@@ -75,6 +75,21 @@ def test_extract_supported_document(fixture_dir: Path, fixture_name: str) -> Non
     assert all(chunk.locator for chunk in result.chunks)
 
 
+def test_extract_document_bytes_builds_text_and_locators_from_supplied_content() -> None:
+    """Catches bytes-based callers being forced back through a mutable filesystem path."""
+    result = extractor_module().extract_document_bytes(
+        "# 已验证标题\n已验证正文".encode(),
+        filename="已存档.md",
+        source_id="SRC-001",
+    )
+
+    assert result.text == "# 已验证标题\n已验证正文"
+    assert [chunk.locator for chunk in result.chunks] == [
+        "heading:已验证标题; line:1",
+        "heading:已验证标题; line:2",
+    ]
+
+
 def test_document_chunks_cap_length_and_overlap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

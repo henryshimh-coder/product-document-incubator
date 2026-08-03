@@ -79,6 +79,66 @@ def test_reader_verifies_real_baseline_and_archive_then_counts_unique_supporting
     assert reader.total_chars([baseline, source, source]) == len(baseline.text) + len(source.text)
 
 
+def _read_source_while_replacing_path_after_first_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    original_text = "# 原始标题\n可信原始正文"
+    replacement_text = "# 替换标题\n校验后的恶意替换正文"
+    monkeypatch.chdir(tmp_path)
+    archived = SourceArchive(project_id="LLD", source_id="SRC-001").save(
+        "当前方案.md",
+        original_text.encode(),
+    )
+    source = _source(archived.path, archived.sha256, archived.size_bytes)
+    real_read_bytes = Path.read_bytes
+    replaced = False
+
+    def read_then_replace(path: Path) -> bytes:
+        nonlocal replaced
+        payload = real_read_bytes(path)
+        if path.resolve() == archived.path.resolve() and not replaced:
+            replaced = True
+            path.write_bytes(replacement_text.encode())
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_replace)
+    material = LocalQueryMaterialReader(tmp_path).read_source(source)
+    return material, original_text, replacement_text
+
+
+def test_reader_denominator_uses_the_same_verified_bytes_if_path_changes_after_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a second path read swapping new text under an already verified old hash."""
+    material, original_text, replacement_text = _read_source_while_replacing_path_after_first_read(
+        tmp_path,
+        monkeypatch,
+    )
+
+    assert material.text == original_text
+    assert replacement_text not in material.text
+    assert LocalQueryMaterialReader.total_chars([material]) == len(original_text)
+
+
+def test_reader_citation_fragments_use_verified_bytes_if_path_changes_after_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches citation locators/excerpts being extracted from replacement path contents."""
+    material, _, replacement_text = _read_source_while_replacing_path_after_first_read(
+        tmp_path,
+        monkeypatch,
+    )
+
+    assert [fragment.text for fragment in material.fragments] == [
+        "# 原始标题",
+        "可信原始正文",
+    ]
+    assert all(replacement_text not in fragment.text for fragment in material.fragments)
+
+
 def test_reader_rejects_baseline_hash_drift_before_using_text(
     tmp_path: Path,
 ) -> None:

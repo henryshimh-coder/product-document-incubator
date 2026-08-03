@@ -129,7 +129,7 @@ class RunQuery:
             project=project,
             version=version,
         )
-        supporting_materials = _unique_materials(evidence_materials + notice_materials)
+        supporting_materials = evidence_materials + notice_materials
         inputs = QueryWorkflowInput(
             schema_version=self.schema_version,
             project_id=command.project_id,
@@ -142,11 +142,12 @@ class RunQuery:
             notices=notices,
             citations=citations,
         ).model_dump(mode="json")
+        proof_security_level = _proof_security_level(supporting_materials)
         source_total_chars = self.material_reader.total_chars(supporting_materials)
         proof = create_outbound_safety_proof(
             QueryWorkflowInput,
             inputs,
-            security_level=_proof_security_level(supporting_materials),
+            security_level=proof_security_level,
             customer_names=self.customer_names,
             strategy_terms=self.strategy_terms,
             financial_terms=self.financial_terms,
@@ -265,10 +266,12 @@ class RunQuery:
                 seen_evidence.add(key)
                 candidates.append((material, fragment.locator))
 
-            if not candidates and baseline_material is not None:
-                fragment = _supporting_fragment(baseline_material, card.content)
-                if fragment is not None:
-                    candidates.append((baseline_material, fragment.locator))
+            baseline_fragment = _supporting_fragment(baseline_material, card.content)
+            if baseline_fragment is not None:
+                if candidates:
+                    supporting_materials.append(baseline_material)
+                else:
+                    candidates.append((baseline_material, baseline_fragment.locator))
 
             if not candidates:
                 raise DomainError(
@@ -276,6 +279,7 @@ class RunQuery:
                     f"QUERY_CARD_SOURCE_TEXT_MISMATCH:{card.id}",
                 )
             candidates_by_card[card.id] = candidates
+            supporting_materials.extend(material for material, _ in candidates)
 
         citation_candidates = [(card, candidates_by_card[card.id][0]) for card in cards]
         citation_candidates.extend(
@@ -285,7 +289,6 @@ class RunQuery:
             citation = _build_citation(material, locator, card.content, counters)
             citations.append(citation)
             card_citation_ids[card.id].add(citation["id"])
-            supporting_materials.append(material)
 
         effective_cards = [
             {
@@ -309,14 +312,13 @@ class RunQuery:
         notices: list[dict[str, str]] = []
         supporting_materials: list[VerifiedQueryMaterial] = []
         for card in cards:
-            supporting = None
+            card_supporting: list[VerifiedQueryMaterial] = []
             for reference in card.source_refs:
                 source_id, fragment_id = _split_reference(reference)
                 material = source_materials.get(source_id)
                 if _supporting_fragment(material, card.content, fragment_id) is not None:
-                    supporting = material
-                    break
-            if supporting is None:
+                    card_supporting.append(material)
+            if not card_supporting:
                 raise DomainError(
                     ErrorCode.CITATION_INVALID,
                     f"QUERY_NOTICE_SOURCE_TEXT_MISMATCH:{card.id}",
@@ -330,7 +332,7 @@ class RunQuery:
                     "summary": card.content,
                 }
             )
-            supporting_materials.append(supporting)
+            supporting_materials.extend(card_supporting)
         return notices, supporting_materials
 
     def _verified_source_materials(
@@ -475,14 +477,16 @@ def _build_citation(material, locator: str, excerpt: str, counters: Counter[str]
     return citation.model_dump(mode="json")
 
 
-def _unique_materials(materials: list[VerifiedQueryMaterial]) -> list[VerifiedQueryMaterial]:
-    unique: dict[str, VerifiedQueryMaterial] = {}
-    for material in materials:
-        unique.setdefault(material.sha256, material)
-    return list(unique.values())
-
-
 def _proof_security_level(materials: list[VerifiedQueryMaterial]) -> SecurityLevel:
+    if any(
+        material.security_level
+        not in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL}
+        for material in materials
+    ):
+        raise DomainError(
+            ErrorCode.EXTERNAL_CALL_DENIED,
+            "QUERY_SUPPORTING_MATERIAL_NOT_EXPORTABLE",
+        )
     if any(material.security_level == SecurityLevel.L2_INTERNAL for material in materials):
         return SecurityLevel.L2_INTERNAL
     return SecurityLevel.L1_PUBLIC_SIMULATED

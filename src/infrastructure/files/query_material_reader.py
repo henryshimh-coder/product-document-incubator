@@ -8,7 +8,7 @@ from pathlib import Path
 from src.domain.enums import AuthorityLevel, SecurityLevel
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.models import SourceRecord
-from src.infrastructure.files.extractor import extract_document
+from src.infrastructure.files.extractor import extract_document_bytes
 
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
@@ -113,7 +113,11 @@ class LocalQueryMaterialReader:
         actual_sha256 = hashlib.sha256(payload).hexdigest()
         if actual_sha256 != source.sha256 or len(payload) != source.size_bytes:
             raise DomainError(ErrorCode.CITATION_INVALID, "QUERY_SOURCE_ARCHIVE_HASH_MISMATCH")
-        extracted = extract_document(path, source_id=source.id)
+        extracted = extract_document_bytes(
+            payload,
+            filename=path.name,
+            source_id=source.id,
+        )
         return VerifiedQueryMaterial(
             source_id=source.id,
             filename=path.name,

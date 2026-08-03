@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from docx import Document
@@ -59,8 +60,8 @@ def _read_text(content: bytes) -> str:
             raise DomainError(ErrorCode.EXTRACTION_FAILED, detail="TEXT_DECODE_FAILED") from error
 
 
-def _extract_pdf(path: Path) -> list[_Section]:
-    reader = PdfReader(str(path))
+def _extract_pdf(content: bytes) -> list[_Section]:
+    reader = PdfReader(BytesIO(content))
     if len(reader.pages) > MAX_PDF_PAGES:
         raise DomainError(ErrorCode.FILE_TOO_LARGE, detail="PDF_PAGE_LIMIT")
     return [
@@ -69,8 +70,8 @@ def _extract_pdf(path: Path) -> list[_Section]:
     ]
 
 
-def _extract_docx(path: Path) -> list[_Section]:
-    document = Document(str(path))
+def _extract_docx(content: bytes) -> list[_Section]:
+    document = Document(BytesIO(content))
     paragraph_chars = sum(len(paragraph.text) for paragraph in document.paragraphs)
     if paragraph_chars > MAX_DOCX_PARAGRAPH_CHARS:
         raise DomainError(ErrorCode.FILE_TOO_LARGE, detail="DOCX_PARAGRAPH_LIMIT")
@@ -149,12 +150,43 @@ def _chunk_sections(source_id: str, sections: list[_Section]) -> tuple[str, list
     return text, chunks
 
 
+def extract_document_bytes(
+    content: bytes,
+    *,
+    filename: str,
+    source_id: str,
+) -> ExtractedDocument:
+    """Extract text and citation locators from one immutable, caller-supplied byte string."""
+    try:
+        resolved_source_id = validate_business_id(source_id, "source_id")
+        safe_filename = validate_upload(filename, content)
+        suffix = Path(safe_filename).suffix.lower()
+        if suffix == ".pdf":
+            sections = _extract_pdf(content)
+        elif suffix == ".docx":
+            sections = _extract_docx(content)
+        else:
+            raw_text = _read_text(content)
+            if suffix == ".md":
+                sections = _extract_markdown(raw_text)
+            else:
+                sections = [_Section("text:1", raw_text)]
+        text, chunks = _chunk_sections(resolved_source_id, sections)
+        if not text.strip() or not chunks:
+            raise DomainError(ErrorCode.EXTRACTION_FAILED, detail="EMPTY_EXTRACTED_TEXT")
+        return ExtractedDocument(source_id=resolved_source_id, text=text, chunks=chunks)
+    except DomainError:
+        raise
+    except Exception as error:
+        raise DomainError(ErrorCode.EXTRACTION_FAILED, detail=type(error).__name__) from error
+
+
 def extract_document(
     path: Path,
     *,
     source_id: str | None = None,
 ) -> ExtractedDocument:
-    """Extract locally, preserving page, paragraph, or heading citation context."""
+    """Read one trusted archive path once, then extract from those immutable bytes."""
     try:
         if source_id is None:
             raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="SOURCE_ID_REQUIRED")
@@ -169,24 +201,12 @@ def extract_document(
         validate_business_id(relative_path.parts[0], "project_id")
         if relative_path.parts[1] != resolved_source_id:
             raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_ARCHIVE_PATH")
-
         content = resolved_path.read_bytes()
-        safe_filename = validate_upload(resolved_path.name, content)
-        suffix = Path(safe_filename).suffix.lower()
-        if suffix == ".pdf":
-            sections = _extract_pdf(resolved_path)
-        elif suffix == ".docx":
-            sections = _extract_docx(resolved_path)
-        else:
-            raw_text = _read_text(content)
-            if suffix == ".md":
-                sections = _extract_markdown(raw_text)
-            else:
-                sections = [_Section("text:1", raw_text)]
-        text, chunks = _chunk_sections(resolved_source_id, sections)
-        if not text.strip() or not chunks:
-            raise DomainError(ErrorCode.EXTRACTION_FAILED, detail="EMPTY_EXTRACTED_TEXT")
-        return ExtractedDocument(source_id=resolved_source_id, text=text, chunks=chunks)
+        return extract_document_bytes(
+            content,
+            filename=resolved_path.name,
+            source_id=resolved_source_id,
+        )
     except DomainError:
         raise
     except Exception as error:

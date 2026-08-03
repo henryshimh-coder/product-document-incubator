@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+from dataclasses import replace
 from datetime import UTC, date, datetime
 
 import pytest
@@ -497,8 +499,192 @@ def test_notice_source_material_counts_toward_the_real_safety_coverage_denominat
         )
     )
 
-    assert set(reader.calls[0]) == {"SRC-001", "SRC-CANDIDATE"}
+    assert set(reader.calls[0]) == {
+        "BASE-LLD-724_1",
+        "SRC-001",
+        "SRC-CANDIDATE",
+    }
     assert {item["source_id"] for item in gateway.last_inputs["citations"]} == {"SRC-001"}
+
+
+@pytest.mark.parametrize(
+    "source_ids",
+    [
+        ("SRC-L1", "SRC-L2"),
+        ("SRC-L2", "SRC-L1"),
+    ],
+    ids=["l1-first", "l2-first"],
+)
+def test_historical_query_aggregates_strictest_risk_before_same_hash_character_dedupe(
+    source_ids: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches same-content source order downgrading an L2 outbound proof to L1."""
+    version = "LLD-700_1"
+    shared_sha256 = "f" * 64
+    card = _card(
+        "RULE-HISTORY-001",
+        version=version,
+        content="历史客群规则。",
+        source_refs=list(source_ids),
+    )
+    source_by_id = {
+        "SRC-L1": _source("SRC-L1").model_copy(
+            update={
+                "sha256": shared_sha256,
+                "security_level": SecurityLevel.L1_PUBLIC_SIMULATED,
+                "applicable_baseline_version": version,
+            }
+        ),
+        "SRC-L2": _source("SRC-L2").model_copy(
+            update={
+                "sha256": shared_sha256,
+                "security_level": SecurityLevel.L2_INTERNAL,
+                "applicable_baseline_version": version,
+            }
+        ),
+    }
+    reader = FakeMaterialReader([card])
+    captured_levels: list[SecurityLevel] = []
+    module = importlib.import_module("src.application.use_cases.run_query")
+    real_factory = module.create_outbound_safety_proof
+
+    def recording_factory(*args, **kwargs):
+        captured_levels.append(kwargs["security_level"])
+        return real_factory(*args, **kwargs)
+
+    monkeypatch.setattr(module, "create_outbound_safety_proof", recording_factory)
+    use_case, _, _, _ = _use_case(
+        [card],
+        sources=FakeSources([source_by_id[source_id] for source_id in source_ids]),
+        material_reader=reader,
+    )
+
+    use_case.execute(
+        RunQueryInput(
+            project_id="LLD",
+            question="历史客群规则是什么？",
+            scope="historical",
+            historical_version=version,
+        )
+    )
+
+    assert captured_levels == [SecurityLevel.L2_INTERNAL]
+    assert set(reader.calls[0]) == {"SRC-L1", "SRC-L2"}
+
+
+def test_current_query_preserves_l2_baseline_risk_when_l1_source_has_same_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches content dedupe discarding the current baseline's stricter L2 risk."""
+    shared_sha256 = "b" * 64
+    card = _card("RULE-LLD-001", source_refs=["SRC-L1"])
+
+    class SameBytesReader(FakeMaterialReader):
+        def __init__(self):
+            super().__init__([card])
+            self.baseline_material = None
+
+        def read_baseline(self, **context):
+            self.baseline_material = super().read_baseline(**context)
+            return self.baseline_material
+
+        def read_source(self, source):
+            material = super().read_source(source)
+            return replace(
+                material,
+                text=self.baseline_material.text,
+                sha256=shared_sha256,
+            )
+
+    source = _source("SRC-L1").model_copy(
+        update={
+            "sha256": shared_sha256,
+            "security_level": SecurityLevel.L1_PUBLIC_SIMULATED,
+        }
+    )
+    reader = SameBytesReader()
+    captured_levels: list[SecurityLevel] = []
+    module = importlib.import_module("src.application.use_cases.run_query")
+    real_factory = module.create_outbound_safety_proof
+
+    def recording_factory(*args, **kwargs):
+        captured_levels.append(kwargs["security_level"])
+        return real_factory(*args, **kwargs)
+
+    monkeypatch.setattr(module, "create_outbound_safety_proof", recording_factory)
+    use_case, _, _, _ = _use_case(
+        [card],
+        sources=FakeSources([source]),
+        material_reader=reader,
+    )
+
+    use_case.execute(
+        RunQueryInput(
+            project_id="LLD",
+            question="当前目标客群是什么？",
+            scope="effective",
+            historical_version=None,
+        )
+    )
+
+    assert captured_levels == [SecurityLevel.L2_INTERNAL]
+    assert set(reader.calls[0]) == {"BASE-LLD-724_1", "SRC-L1"}
+
+
+@pytest.mark.parametrize(
+    "restricted_level",
+    [SecurityLevel.L3_CONFIDENTIAL, SecurityLevel.L4_RESTRICTED],
+)
+def test_current_query_fails_closed_for_restricted_baseline_sharing_l1_source_hash(
+    restricted_level: SecurityLevel,
+) -> None:
+    """Catches a restricted supporting material being mapped to an L1 proof after hash dedupe."""
+    shared_sha256 = "b" * 64
+    card = _card("RULE-LLD-001", source_refs=["SRC-L1"])
+
+    class RestrictedBaselineReader(FakeMaterialReader):
+        def read_baseline(self, **context):
+            return replace(
+                super().read_baseline(**context),
+                security_level=restricted_level,
+            )
+
+        def read_source(self, source):
+            material = super().read_source(source)
+            return replace(
+                material,
+                text="# 当前产品方案\n## 目标客群\n" + card.content,
+                sha256=shared_sha256,
+            )
+
+    source = _source("SRC-L1").model_copy(
+        update={
+            "sha256": shared_sha256,
+            "security_level": SecurityLevel.L1_PUBLIC_SIMULATED,
+        }
+    )
+    gateway = ProofCheckingGateway()
+    reader = RestrictedBaselineReader([card])
+    use_case, _, _, _ = _use_case(
+        [card],
+        gateway=gateway,
+        sources=FakeSources([source]),
+        material_reader=reader,
+    )
+
+    with pytest.raises(DomainError, match="EXTERNAL_CALL_DENIED"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前目标客群是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is None
+    assert reader.calls == []
 
 
 def test_historical_scope_requires_explicit_version() -> None:
