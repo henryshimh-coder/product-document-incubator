@@ -196,3 +196,19 @@ class AiCache:
             return value
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValidationError):
             return None
+
+    def get_with_created_at(
+        self,
+        identity: CacheIdentity,
+    ) -> tuple[dict[str, Any], datetime] | None:
+        result = self.get(identity)
+        if result is None:
+            return None
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT created_at FROM cache_entries WHERE cache_key = ?",
+                (identity.cache_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return result, datetime.fromisoformat(row["created_at"])

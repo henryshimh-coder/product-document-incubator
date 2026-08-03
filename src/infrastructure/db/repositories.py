@@ -22,6 +22,7 @@ from src.domain.models import (
     Decision,
     EventLog,
     IngestReport,
+    IngestResultView,
     IssueCard,
     KnowledgeCard,
     Project,
@@ -29,6 +30,7 @@ from src.domain.models import (
     SourceRecord,
 )
 from src.infrastructure.db.connection import connect
+from src.infrastructure.observability.event_logger import EventLogger
 
 Model = TypeVar("Model", bound=BaseModel)
 
@@ -604,8 +606,9 @@ class SqliteChangeRepository:
 class SqliteIngestUnitOfWork:
     """Own one SQLite transaction for every authoritative ingest result write."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, event_logger: EventLogger | None = None) -> None:
         self.db_path = db_path
+        self.event_logger = event_logger or EventLogger(db_path)
 
     def complete(
         self,
@@ -615,6 +618,7 @@ class SqliteIngestUnitOfWork:
         issues: list[IssueCard],
         event: EventLog,
     ) -> None:
+        prepared_event = self.event_logger.prepare(event)
         with connect(self.db_path) as connection:
             for card in cards:
                 connection.execute(
@@ -706,27 +710,14 @@ class SqliteIngestUnitOfWork:
             )
             if result.rowcount != 1:
                 raise KeyError(f"source not found: {source.id}")
-            connection.execute(
-                """
-                INSERT INTO event_logs (
-                    id, project_id, event_type, entity_type, entity_id,
-                    actor, correlation_id, payload_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event.id,
-                    event.project_id,
-                    event.event_type,
-                    event.entity_type,
-                    event.entity_id,
-                    event.actor,
-                    event.correlation_id,
-                    _json_dumps(event.payload),
-                    event.created_at.isoformat(),
-                ),
-            )
+            self.event_logger.insert_prepared(connection, prepared_event)
+        self.event_logger.append_committed(prepared_event)
 
-    def duplicate_report(self, source: SourceRecord) -> IngestReport:
+    def duplicate_report(
+        self,
+        source: SourceRecord,
+        command_fingerprint: str,
+    ) -> IngestReport:
         with connect(self.db_path) as connection:
             row = connection.execute(
                 """
@@ -742,6 +733,58 @@ class SqliteIngestUnitOfWork:
         if row is None:
             raise KeyError(f"completed ingest event not found: {source.id}")
         payload = _json_loads(row["payload_json"])
+        if payload.get("command_fingerprint") != command_fingerprint:
+            raise ValueError("SOURCE_METADATA_MISMATCH")
+        with connect(self.db_path) as connection:
+            card_rows = [
+                connection.execute(
+                    "SELECT * FROM knowledge_cards WHERE id = ?",
+                    (card_id,),
+                ).fetchone()
+                for card_id in payload["created_card_ids"]
+            ]
+            issue_rows = [
+                connection.execute(
+                    "SELECT title, evidence_json FROM issue_cards WHERE id = ?",
+                    (issue_id,),
+                ).fetchone()
+                for issue_id in payload["created_issue_ids"]
+            ]
+        details_by_title: dict[str, tuple[str, str]] = {}
+        for issue_row in issue_rows:
+            if issue_row is None:
+                continue
+            evidence = _json_loads(issue_row["evidence_json"])
+            baseline = next(
+                (item for item in evidence if item.get("side") == "current_baseline"),
+                None,
+            )
+            challenging = next(
+                (item for item in evidence if item.get("side") == "challenging_source"),
+                None,
+            )
+            if baseline is not None and challenging is not None:
+                details_by_title[issue_row["title"]] = (
+                    baseline["page_or_section"],
+                    challenging["excerpt"],
+                )
+        result_items = [
+            IngestResultView(
+                item_type=card_row["card_type"],
+                summary=card_row["content"],
+                section=details_by_title.get(card_row["title"], (card_row["applicable_scope"], ""))[
+                    0
+                ],
+                citation=details_by_title.get(
+                    card_row["title"],
+                    ("", _json_loads(card_row["source_refs_json"])[0]),
+                )[1],
+                status=card_row["status"],
+            )
+            for card_row in card_rows
+            if card_row is not None
+        ]
+        cache_generated_at = payload.get("cache_generated_at")
         return IngestReport(
             source_id=source.id,
             duplicate=True,
@@ -753,4 +796,7 @@ class SqliteIngestUnitOfWork:
             conflict_count=payload["conflict_count"],
             result_mode=CallResultMode(payload["result_mode"]),
             model_call_id=payload.get("model_call_id"),
+            source_hash8=source.sha256[:8],
+            cache_generated_at=cache_generated_at,
+            result_items=result_items,
         )

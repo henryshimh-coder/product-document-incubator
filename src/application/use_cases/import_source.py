@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from src.domain.errors import AppError, DomainError, ErrorCode, OutputValidation
 from src.domain.models import (
     EventLog,
     IngestReport,
+    IngestResultView,
     IssueCard,
     IssueEvidence,
     KnowledgeCard,
@@ -51,6 +53,7 @@ from src.infrastructure.gateways._common import (
 )
 from src.infrastructure.gateways.ingest_gateway import IngestGateway
 from src.infrastructure.gateways.schemas import IngestWorkflowInput, IngestWorkflowOutput
+from src.infrastructure.observability.event_logger import EventLogger
 from src.infrastructure.observability.model_call_logger import ModelCallLogger
 
 
@@ -77,6 +80,7 @@ class ImportSource:
         cache: AiCache,
         manifest_store: ManifestStore,
         model_call_logger: ModelCallLogger,
+        event_logger: EventLogger | None = None,
         customer_names: Iterable[str],
         strategy_terms: Iterable[str],
         financial_terms: Iterable[str],
@@ -97,6 +101,7 @@ class ImportSource:
         self.cache = cache
         self.manifest_store = manifest_store
         self.model_call_logger = model_call_logger
+        self.event_logger = event_logger or EventLogger(model_call_logger.db_path)
         self.customer_names = tuple(customer_names)
         self.strategy_terms = tuple(strategy_terms)
         self.financial_terms = tuple(financial_terms)
@@ -110,16 +115,18 @@ class ImportSource:
     def execute(self, command: ImportSourceInput) -> IngestReport:
         safe_name = validate_upload(command.uploaded_name, command.uploaded_bytes)
         digest = hashlib.sha256(command.uploaded_bytes).hexdigest()
+        command_fingerprint = self._command_fingerprint(command, digest)
+        manifest_before = self._read_manifest()
+        self._require_manifest_context(command, manifest_before)
         existing = self.sources.find_by_sha256(command.project_id, digest)
         if existing is not None and existing.ingest_status == "completed":
-            return self.unit_of_work.duplicate_report(existing)
-
-        manifest_before = self.manifest_store.read_and_validate()
-        if (
-            manifest_before.project_id != command.project_id
-            or manifest_before.current_version != command.applicable_baseline_version
-        ):
-            raise DomainError(ErrorCode.BASELINE_INTEGRITY_FAILED, "BASELINE_CONTEXT_MISMATCH")
+            try:
+                return self.unit_of_work.duplicate_report(existing, command_fingerprint)
+            except ValueError as error:
+                raise DomainError(
+                    ErrorCode.SOURCE_METADATA_MISMATCH,
+                    "COMPLETED_SOURCE_COMMAND_MISMATCH",
+                ) from error
 
         source = existing or self._archive_new_source(command, safe_name, digest)
         extracted = self.extractor(Path(source.archive_path), source_id=source.id)
@@ -158,33 +165,38 @@ class ImportSource:
         identity = self._cache_identity(digest, command.applicable_baseline_version)
         call_id = f"CALL-{uuid4().hex.upper()}"
         correlation_id = f"CORR-{uuid4().hex.upper()}"
-        started_at = self.now()
         authorized = can_call_external_model(project, source)
         outbound_chars = 0
         outbound_coverage = 0.0
         workflow_run_id: str | None = None
-
-        self._record_model_call(
-            call_id=call_id,
-            correlation_id=correlation_id,
-            source=source,
-            mode=CallResultMode(command.preferred_mode),
-            status="started",
-            authorized=authorized,
-            started_at=started_at,
-            outbound_chars=0,
-            outbound_coverage=0,
-        )
+        started_at: datetime | None = None
+        result_mode = self._result_mode(command.preferred_mode)
+        cache_generated_at: datetime | None = None
         try:
             if command.preferred_mode == "cache":
-                raw_result = self.cache.get(identity)
-                if raw_result is None:
+                cache_entry = self.cache.get_with_created_at(identity)
+                if cache_entry is None:
                     raise DomainError(ErrorCode.CACHE_NOT_FOUND)
+                raw_result, cache_generated_at = cache_entry
                 result = self._validate_result(raw_result, inputs)
-                result_mode = CallResultMode.CACHE
+            elif command.preferred_mode == "local":
+                result = IngestWorkflowOutput(
+                    schema_version="1.0",
+                    task_id=inputs["task_id"],
+                    summary="已完成本地确定性结构检查；未调用外部模型，未生成候选知识。",
+                    items=[],
+                    relations=[],
+                )
             else:
                 if not authorized:
                     raise DomainError(ErrorCode.EXTERNAL_CALL_DENIED)
+                outbound_chars = self._canonical_input_chars(inputs)
+                outbound_coverage = outbound_chars / len(extracted.text)
+                if (
+                    outbound_chars > MAX_CANONICAL_PAYLOAD_CHARS
+                    or outbound_coverage > MAX_OUTBOUND_COVERAGE
+                ):
+                    raise DomainError(ErrorCode.OUTBOUND_COVERAGE_EXCEEDED)
                 proof = create_outbound_safety_proof(
                     IngestWorkflowInput,
                     inputs,
@@ -196,15 +208,18 @@ class ImportSource:
                     unpublished_decisions=self.unpublished_decisions,
                     source_total_chars=len(extracted.text),
                 )
-                outbound_chars = len(
-                    json.dumps(
-                        IngestWorkflowInput.model_validate(inputs).model_dump(mode="json"),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
+                started_at = self.now()
+                self._record_model_call(
+                    call_id=call_id,
+                    correlation_id=correlation_id,
+                    source=source,
+                    mode=CallResultMode.REALTIME,
+                    status="started",
+                    authorized=True,
+                    started_at=started_at,
+                    outbound_chars=outbound_chars,
+                    outbound_coverage=outbound_coverage,
                 )
-                outbound_coverage = outbound_chars / len(extracted.text)
                 gateway_result = self.gateway.run(
                     inputs,
                     safety_proof=proof,
@@ -212,53 +227,70 @@ class ImportSource:
                 )
                 workflow_run_id = gateway_result["workflow_run_id"]
                 result = self._validate_result(gateway_result["result"], inputs)
-                self.cache.put(identity, result.model_dump(mode="json"))
-                result_mode = CallResultMode.REALTIME
+            try:
+                cards, relations, issues = self._to_domain(source, effective_cards, result)
+            except (KeyError, ValidationError, ValueError) as error:
+                raise OutputValidationError("INGEST_DOMAIN_CONVERSION_INVALID") from error
+            manifest_after = self._read_manifest()
+            if manifest_after != manifest_before:
+                raise DomainError(
+                    ErrorCode.BASELINE_INTEGRITY_FAILED,
+                    "MANIFEST_CHANGED_DURING_INGEST",
+                )
         except AppError as error:
             status = "timeout" if error.code == ErrorCode.MODEL_TIMEOUT else "failed"
+            if started_at is not None:
+                self._record_model_call(
+                    call_id=call_id,
+                    correlation_id=correlation_id,
+                    source=source,
+                    mode=CallResultMode.REALTIME,
+                    status=status,
+                    authorized=True,
+                    started_at=started_at,
+                    workflow_run_id=workflow_run_id,
+                    outbound_chars=outbound_chars,
+                    outbound_coverage=outbound_coverage,
+                    error_code=error.code,
+                )
+            security_errors = {
+                ErrorCode.EXTERNAL_CALL_DENIED,
+                ErrorCode.OUTBOUND_COVERAGE_EXCEEDED,
+                ErrorCode.REDACTION_REQUIRED,
+            }
+            if started_at is None and error.code in security_errors:
+                self.sources.update_ingest_status(source.id, "security_blocked")
+                self._record_safe_event(
+                    source,
+                    "source_ingest_security_blocked",
+                    error.code,
+                )
+            else:
+                self.sources.update_ingest_status(
+                    source.id,
+                    "realtime_failed"
+                    if error.code == ErrorCode.MODEL_TIMEOUT
+                    else "validation_failed",
+                )
+            if started_at is None and error.code not in security_errors:
+                self._record_safe_event(source, "source_ingest_failed", error.code)
+            raise
+
+        finished_at = self.now()
+        if started_at is not None:
             self._record_model_call(
                 call_id=call_id,
                 correlation_id=correlation_id,
                 source=source,
-                mode=CallResultMode(command.preferred_mode),
-                status=status,
-                authorized=authorized,
+                mode=CallResultMode.REALTIME,
+                status="succeeded",
+                authorized=True,
                 started_at=started_at,
                 workflow_run_id=workflow_run_id,
                 outbound_chars=outbound_chars,
                 outbound_coverage=outbound_coverage,
-                error_code=error.code,
+                finished_at=finished_at,
             )
-            self.sources.update_ingest_status(
-                source.id,
-                "realtime_failed" if status == "timeout" else "validation_failed",
-            )
-            raise
-
-        cards, relations, issues = self._to_domain(
-            source,
-            effective_cards,
-            result,
-        )
-        manifest_after = self.manifest_store.read_and_validate()
-        if manifest_after != manifest_before:
-            self.sources.update_ingest_status(source.id, "validation_failed")
-            raise DomainError(ErrorCode.BASELINE_INTEGRITY_FAILED, "MANIFEST_CHANGED_DURING_INGEST")
-
-        finished_at = self.now()
-        self._record_model_call(
-            call_id=call_id,
-            correlation_id=correlation_id,
-            source=source,
-            mode=result_mode,
-            status="succeeded",
-            authorized=authorized,
-            started_at=started_at,
-            workflow_run_id=workflow_run_id,
-            outbound_chars=outbound_chars,
-            outbound_coverage=outbound_coverage,
-            finished_at=finished_at,
-        )
         report = IngestReport(
             source_id=source.id,
             duplicate=False,
@@ -269,7 +301,10 @@ class ImportSource:
             candidate_count=sum(item.result_type == "candidate" for item in result.items),
             conflict_count=sum(item.result_type == "conflict_discussion" for item in result.items),
             result_mode=result_mode,
-            model_call_id=call_id,
+            model_call_id=call_id if started_at is not None else None,
+            source_hash8=source.sha256[:8],
+            cache_generated_at=cache_generated_at,
+            result_items=self._result_views(result, effective_cards),
         )
         event = EventLog(
             id=f"EVENT-INGEST-{source.sha256[:16].upper()}",
@@ -288,10 +323,35 @@ class ImportSource:
                 "candidate_count": report.candidate_count,
                 "conflict_count": report.conflict_count,
                 "model_call_id": report.model_call_id,
+                "command_fingerprint": command_fingerprint,
+                "cache_generated_at": (
+                    None
+                    if report.cache_generated_at is None
+                    else report.cache_generated_at.isoformat()
+                ),
             },
             created_at=finished_at,
         )
-        self.unit_of_work.complete(source, cards, relations, issues, event)
+        try:
+            self.unit_of_work.complete(source, cards, relations, issues, event)
+        except sqlite3.Error as error:
+            self.sources.update_ingest_status(source.id, "persistence_failed")
+            self._record_safe_event(
+                source,
+                "source_ingest_persistence_failed",
+                ErrorCode.INGEST_PERSISTENCE_FAILED,
+            )
+            raise DomainError(
+                ErrorCode.INGEST_PERSISTENCE_FAILED,
+                "SQLITE_TRANSACTION_ROLLED_BACK",
+            ) from error
+        if result_mode == CallResultMode.REALTIME:
+            try:
+                self.cache.put(identity, result.model_dump(mode="json"))
+            except (OSError, sqlite3.Error):
+                # The authoritative ingest transaction has already committed. Cache
+                # population is recoverable and must not turn that success into a failure.
+                pass
         return report
 
     def _archive_new_source(
@@ -434,9 +494,41 @@ class ImportSource:
         item_ids = {item.item_id for item in result.items}
         if len(item_ids) != len(result.items):
             raise OutputValidationError("DUPLICATE_INGEST_ITEM_ID")
+        relations_by_source: dict[str, list[Any]] = {}
+        for relation in result.relations:
+            relations_by_source.setdefault(relation.source_id, []).append(relation)
         for item in result.items:
             if item.target_card_id is not None and item.target_card_id not in baseline_ids:
                 raise OutputValidationError("UNKNOWN_TARGET_CARD")
+            expected_status = {
+                "candidate": "candidate",
+                "conflict_discussion": "conflict",
+                "information_gap": "ai_inferred",
+            }[item.result_type]
+            if item.status != expected_status:
+                raise OutputValidationError("INGEST_ITEM_STATUS_MISMATCH")
+            item_relations = relations_by_source.get(item.item_id, [])
+            if item.result_type == "conflict_discussion":
+                if (
+                    item.target_card_id is None
+                    or len(item_relations) != 1
+                    or item_relations[0].relation_type != "conflicts_with"
+                    or item_relations[0].target_id != item.target_card_id
+                ):
+                    raise OutputValidationError("CONFLICT_RELATION_REQUIRED")
+            elif item.result_type == "candidate" and item.target_card_id is not None:
+                if (
+                    len(item_relations) != 1
+                    or item_relations[0].relation_type != "proposes_change_to"
+                    or item_relations[0].target_id != item.target_card_id
+                ):
+                    raise OutputValidationError("CANDIDATE_RELATION_REQUIRED")
+            elif item.result_type == "candidate" and item_relations:
+                raise OutputValidationError("CANDIDATE_RELATION_INVALID")
+            elif item.result_type == "information_gap" and (
+                item.target_card_id is not None or item_relations
+            ):
+                raise OutputValidationError("INFORMATION_GAP_RELATION_INVALID")
             for citation in item.source_citations:
                 chunk = chunks.get(citation.chunk_id)
                 if (
@@ -591,6 +683,117 @@ class ImportSource:
             prompt_version=self.prompt_version,
             model_label=self.model_label,
             schema_version=self.schema_version,
+        )
+
+    @staticmethod
+    def _result_views(
+        result: IngestWorkflowOutput,
+        effective_cards: list[KnowledgeCard],
+    ) -> list[IngestResultView]:
+        baseline_by_id = {card.id: card for card in effective_cards}
+        views: list[IngestResultView] = []
+        for item in result.items:
+            citation = item.source_citations[0]
+            target = baseline_by_id.get(item.target_card_id or "")
+            views.append(
+                IngestResultView(
+                    item_type=item.item_type,
+                    summary=item.content,
+                    section=target.title if target is not None else citation.locator,
+                    citation=citation.excerpt,
+                    status=item.status,
+                )
+            )
+        return views
+
+    def _read_manifest(self):
+        try:
+            return self.manifest_store.read_and_validate()
+        except ValueError as error:
+            raise DomainError(
+                ErrorCode.BASELINE_INTEGRITY_FAILED,
+                "MANIFEST_READ_FAILED",
+            ) from error
+
+    @staticmethod
+    def _require_manifest_context(command: ImportSourceInput, manifest: Any) -> None:
+        if (
+            manifest.project_id != command.project_id
+            or manifest.current_version != command.applicable_baseline_version
+        ):
+            raise DomainError(
+                ErrorCode.BASELINE_INTEGRITY_FAILED,
+                "BASELINE_CONTEXT_MISMATCH",
+            )
+
+    @staticmethod
+    def _result_mode(preferred_mode: str) -> CallResultMode:
+        return {
+            "realtime": CallResultMode.REALTIME,
+            "cache": CallResultMode.CACHE,
+            "local": CallResultMode.LOCAL_ONLY,
+        }[preferred_mode]
+
+    @staticmethod
+    def _command_fingerprint(command: ImportSourceInput, digest: str) -> str:
+        metadata = {
+            "sha256": digest,
+            "project_id": command.project_id,
+            "uploaded_name": command.uploaded_name,
+            "source_type": command.source_type,
+            "authority_level": command.authority_level.value,
+            "source_department": command.source_department,
+            "provider": command.provider,
+            "document_date": command.document_date.isoformat(),
+            "document_version": command.document_version,
+            "applicable_baseline_version": command.applicable_baseline_version,
+            "security_level": command.security_level.value,
+            "is_redacted_confirmed": command.is_redacted_confirmed,
+            "allow_external_model": command.allow_external_model,
+            "is_sandbox": command.is_sandbox,
+        }
+        canonical = json.dumps(
+            metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _canonical_input_chars(inputs: Mapping[str, Any]) -> int:
+        serialized = IngestWorkflowInput.model_validate(inputs).model_dump(mode="json")
+        return len(
+            json.dumps(
+                serialized,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+
+    def _record_safe_event(
+        self,
+        source: SourceRecord,
+        event_type: str,
+        error_code: ErrorCode | str,
+    ) -> None:
+        self.event_logger.record(
+            EventLog(
+                id=f"EVENT-{uuid4().hex.upper()}",
+                project_id=source.project_id,
+                event_type=event_type,
+                entity_type="source",
+                entity_id=source.id,
+                actor="system",
+                correlation_id=f"CORR-{uuid4().hex.upper()}",
+                payload={
+                    "status": "blocked" if "security" in event_type else "failed",
+                    "error_code": str(error_code),
+                },
+                created_at=self.now(),
+            ),
+            level="WARNING",
         )
 
     def _record_model_call(

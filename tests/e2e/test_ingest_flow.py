@@ -12,6 +12,7 @@ from src.ui.pages.ingest import (
     can_submit,
     effective_external_permission,
     result_badge,
+    stage_states,
     step_labels,
 )
 
@@ -66,12 +67,29 @@ def test_timeout_feedback_and_result_badges_are_safe_and_visually_distinct():
     assert "DIFY" not in " ".join(str(value) for value in timeout.model_dump().values())
     assert result_badge("realtime") != result_badge("cache")
     assert result_badge("cache") == ("冻结缓存", "warning")
+    assert result_badge("local_only") == ("本地检查", "muted")
+    coverage = build_feedback(AppError("OUTBOUND_COVERAGE_EXCEEDED"))
+    assert "覆盖率预算" in coverage.next_action
+    assert coverage.offer_cache is True
+    assert coverage.offer_local is True
 
 
 def test_sandbox_and_ai_inferred_labels_are_explicit():
     assert result_badge("sandbox") == ("模拟材料", "violet")
     assert result_badge("ai_inferred") == ("AI 推定", "muted")
     assert result_badge("human_confirmed") == ("人工确认", "success")
+
+
+def test_six_stage_state_machine_covers_waiting_processing_completed_and_failed():
+    from src.ui.pages import ingest
+
+    assert len(ingest.stage_states("waiting")) == 6
+    assert {item.status for item in ingest.stage_states("processing")} == {
+        "processing",
+        "waiting",
+    }
+    assert {item.status for item in ingest.stage_states("completed")} == {"completed"}
+    assert "failed" in {item.status for item in ingest.stage_states("failed", failed_index=3)}
 
 
 def test_rendered_three_step_page_gates_submit_and_offers_cache_after_timeout():
@@ -122,3 +140,107 @@ def test_rendered_three_step_page_gates_submit_and_offers_cache_after_timeout():
     assert not page.exception
     assert any("MODEL_TIMEOUT" in item.value for item in page.warning)
     assert page.button(key="ingest_use_cache").label == "使用缓存结果"
+
+
+def test_rendered_cache_retry_shows_hash_time_and_grouped_result_details():
+    def render_page():
+        from datetime import UTC, datetime
+
+        from src.application.container import AppContainer, AppSettings
+        from src.domain.errors import AppError, ErrorCode
+        from src.domain.models import IngestReport, IngestResultView
+        from src.ui.pages.ingest import render
+
+        class RetryService:
+            def execute(self, command):
+                if command.preferred_mode == "realtime":
+                    raise AppError(ErrorCode.MODEL_TIMEOUT)
+                return IngestReport(
+                    source_id="SRC-001",
+                    duplicate=False,
+                    summary="缓存恢复完成",
+                    created_card_ids=["CARD-001"],
+                    created_relation_ids=[],
+                    created_issue_ids=["ISSUE-001"],
+                    candidate_count=0,
+                    conflict_count=1,
+                    result_mode="cache",
+                    model_call_id=None,
+                    source_hash8="abcdef12",
+                    cache_generated_at=datetime(2026, 7, 29, 8, 0, tzinfo=UTC),
+                    result_items=[
+                        IngestResultView(
+                            item_type="professional_opinion",
+                            summary="建议收紧目标客群",
+                            section="目标客群",
+                            citation="风险意见要求收紧目标客群",
+                            status="conflict",
+                        )
+                    ],
+                )
+
+        render(
+            AppContainer(
+                settings=AppSettings(
+                    name="产品智策",
+                    project_id="LLD",
+                    default_query_scope="effective",
+                    max_upload_mb=20,
+                    accepted_extensions=(".pdf", ".docx", ".txt", ".md"),
+                    demo_mode=True,
+                    schema_version="1.0",
+                ),
+                import_source=RetryService(),
+            )
+        )
+
+    page = AppTest.from_function(render_page).run()
+    page.file_uploader[0].set_value(("风险意见.md", b"risk", "text/markdown"))
+    page.selectbox(key="ingest_source_type").select("risk_opinion")
+    page.selectbox(key="ingest_authority").select("professional_opinion")
+    page.text_input(key="ingest_department").set_value("风险")
+    page.text_input(key="ingest_version").set_value("v1.0")
+    page.checkbox(key="ingest_redacted").check()
+    page.run()
+    page.toggle(key="ingest_external").set_value(True).run()
+    page.radio(key="ingest_mode").set_value("realtime").run()
+    page.button(key="ingest_submit").click().run()
+    page.button(key="ingest_use_cache").click().run()
+
+    assert not page.exception
+    assert any(
+        "abcdef12" in item.value and "2026-07-29T08:00:00" in item.value for item in page.warning
+    )
+    rendered = "\n".join(item.value for item in page.markdown)
+    assert "建议收紧目标客群" in rendered
+    assert "风险意见要求收紧目标客群" in rendered
+    assert all(item.status == "completed" for item in stage_states("completed"))
+
+
+def test_rendered_realtime_success_shows_completed_flow():
+    def render_page():
+        from src.domain.models import IngestReport
+        from src.ui.pages.ingest import _render_report, _render_stages, stage_states
+
+        _render_stages(stage_states("completed"))
+        _render_report(
+            IngestReport(
+                source_id="SRC-001",
+                duplicate=False,
+                summary="实时分析完成",
+                created_card_ids=[],
+                created_relation_ids=[],
+                created_issue_ids=[],
+                candidate_count=0,
+                conflict_count=0,
+                result_mode="realtime",
+                model_call_id="CALL-001",
+                source_hash8="12345678",
+            ),
+            sandbox=False,
+        )
+
+    page = AppTest.from_function(render_page).run()
+    assert not page.exception
+    assert any("实时分析" in item.value for item in page.info)
+    assert any("completed" in item.value for item in page.markdown)

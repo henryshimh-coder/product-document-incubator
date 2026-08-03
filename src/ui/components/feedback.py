@@ -14,6 +14,7 @@ class UserFeedback(BaseModel):
     next_action: str
     error_code: str
     offer_cache: bool = False
+    offer_local: bool = False
     level: Literal["warning", "error"] = "error"
 
 

@@ -31,6 +31,9 @@ class ErrorCode(StrEnum):
     RELEASE_APPROVER_REQUIRED = "RELEASE_APPROVER_REQUIRED"
     TARGET_VERSION_ALREADY_EFFECTIVE = "TARGET_VERSION_ALREADY_EFFECTIVE"
     TARGET_VERSION_ALREADY_EXISTS = "TARGET_VERSION_ALREADY_EXISTS"
+    SOURCE_METADATA_MISMATCH = "SOURCE_METADATA_MISMATCH"
+    OUTBOUND_COVERAGE_EXCEEDED = "OUTBOUND_COVERAGE_EXCEEDED"
+    INGEST_PERSISTENCE_FAILED = "INGEST_PERSISTENCE_FAILED"
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,12 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
     ErrorCode.RELEASE_APPROVER_REQUIRED: ErrorDefinition("发布审批人不能为空"),
     ErrorCode.TARGET_VERSION_ALREADY_EFFECTIVE: ErrorDefinition("目标版本已是当前生效版本"),
     ErrorCode.TARGET_VERSION_ALREADY_EXISTS: ErrorDefinition("目标版本已存在"),
+    ErrorCode.SOURCE_METADATA_MISMATCH: ErrorDefinition("同一材料的属性或安全设置与原记录不一致"),
+    ErrorCode.OUTBOUND_COVERAGE_EXCEEDED: ErrorDefinition("材料过短，无法满足最小外调覆盖率预算"),
+    ErrorCode.INGEST_PERSISTENCE_FAILED: ErrorDefinition(
+        "导入结果未能安全写入，当前基线不受影响",
+        retryable=True,
+    ),
 }
 
 

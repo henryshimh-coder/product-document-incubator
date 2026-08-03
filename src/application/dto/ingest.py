@@ -25,4 +25,4 @@ class ImportSourceInput(BaseModel):
     is_redacted_confirmed: bool
     allow_external_model: bool
     is_sandbox: bool
-    preferred_mode: Literal["realtime", "cache"] = "realtime"
+    preferred_mode: Literal["realtime", "cache", "local"] = "realtime"

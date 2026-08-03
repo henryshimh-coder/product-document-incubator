@@ -279,6 +279,14 @@ class QueryResponse(DomainModel):
     model_call_id: NonEmptyStr | None
 
 
+class IngestResultView(DomainModel):
+    item_type: NonEmptyStr
+    summary: NonEmptyStr
+    section: NonEmptyStr
+    citation: NonEmptyStr
+    status: Literal["ai_inferred", "candidate", "conflict"]
+
+
 class IngestReport(DomainModel):
     source_id: NonEmptyStr
     duplicate: bool
@@ -290,6 +298,9 @@ class IngestReport(DomainModel):
     conflict_count: NonNegativeInt
     result_mode: CallResultMode
     model_call_id: NonEmptyStr | None
+    source_hash8: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{8}$")] | None = None
+    cache_generated_at: datetime | None = None
+    result_items: list[IngestResultView] = Field(default_factory=list)
 
 
 class LintReport(DomainModel):

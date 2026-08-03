@@ -33,6 +33,23 @@ class IngestFormState(BaseModel):
     is_sandbox: bool = False
 
 
+class IngestStageState(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    label: str
+    status: Literal["waiting", "processing", "completed", "failed"]
+
+
+STAGE_LABELS = (
+    "本地保存",
+    "文本提取",
+    "脱敏和授权检查",
+    "AI 分析",
+    "结构校验",
+    "写入知识库",
+)
+
+
 def step_labels() -> tuple[str, str, str]:
     return (
         "1 上传文件",
@@ -77,10 +94,39 @@ def result_badge(
     return {
         "realtime": ("实时分析", "primary"),
         "cache": ("冻结缓存", "warning"),
+        "local_only": ("本地检查", "muted"),
         "sandbox": ("模拟材料", "violet"),
         "ai_inferred": ("AI 推定", "muted"),
         "human_confirmed": ("人工确认", "success"),
     }[value]
+
+
+def stage_states(
+    state: Literal["waiting", "processing", "completed", "failed"],
+    *,
+    failed_index: int = 0,
+) -> list[IngestStageState]:
+    if state == "completed":
+        statuses = ["completed"] * len(STAGE_LABELS)
+    elif state == "processing":
+        statuses = ["processing", *(["waiting"] * (len(STAGE_LABELS) - 1))]
+    elif state == "failed":
+        statuses = [
+            (
+                "completed"
+                if index < failed_index
+                else "failed"
+                if index == failed_index
+                else "waiting"
+            )
+            for index in range(len(STAGE_LABELS))
+        ]
+    else:
+        statuses = ["waiting"] * len(STAGE_LABELS)
+    return [
+        IngestStageState(label=label, status=status)
+        for label, status in zip(STAGE_LABELS, statuses, strict=True)
+    ]
 
 
 def build_feedback(error: AppError) -> UserFeedback:
@@ -91,6 +137,17 @@ def build_feedback(error: AppError) -> UserFeedback:
             next_action="可继续等待，或使用同材料、同版本的冻结缓存。",
             error_code=error.code,
             offer_cache=True,
+            offer_local=True,
+            level="warning",
+        )
+    if error.code == ErrorCode.OUTBOUND_COVERAGE_EXCEEDED:
+        return UserFeedback(
+            title=error.user_message,
+            impact="未发生外部模型调用，资料仅保存在本地。",
+            next_action="当前材料超过 25% 覆盖率预算；可尝试精确缓存或本地确定性检查。",
+            error_code=error.code,
+            offer_cache=True,
+            offer_local=True,
             level="warning",
         )
     next_action = (
@@ -203,6 +260,20 @@ def render(container: AppContainer) -> None:
     with st.container(border=True):
         st.subheader("3 编译并查看结果")
         st.caption("本地保存 → 文本提取 → 脱敏和授权检查 → AI 分析 → 结构校验 → 写入知识库")
+        realtime_allowed = effective_external_permission(state)
+        mode_options = ["realtime", "cache", "local"] if realtime_allowed else ["cache", "local"]
+        preferred_mode = st.radio(
+            "处理方式",
+            options=mode_options,
+            format_func=lambda value: {
+                "realtime": "实时模型",
+                "cache": "精确缓存",
+                "local": "本地确定性检查",
+            }[value],
+            horizontal=True,
+            key="ingest_mode",
+        )
+        _render_stages(stage_states("waiting"))
         service = container.import_source
         if service is None:
             st.info("导入服务尚未配置；页面可用于确认三步流程与安全边界。")
@@ -213,29 +284,37 @@ def render(container: AppContainer) -> None:
             key="ingest_submit",
         )
         if submitted and service is not None:
-            command = _to_command(container, state, preferred_mode="realtime")
+            command = _to_command(container, state, preferred_mode=preferred_mode)
             st.session_state["ingest_command"] = command
             _execute_and_render(service, command)
         cached_command = st.session_state.get("ingest_timeout_command")
-        if (
-            cached_command is not None
-            and service is not None
-            and st.button(
-                "使用缓存结果",
-                key="ingest_use_cache",
-            )
-        ):
-            _execute_and_render(
-                service,
-                cached_command.model_copy(update={"preferred_mode": "cache"}),
-            )
+        if cached_command is not None and service is not None:
+            action_columns = st.columns(4)
+            if action_columns[0].button("继续等待", key="ingest_continue_wait"):
+                _execute_and_render(
+                    service,
+                    cached_command.model_copy(update={"preferred_mode": "realtime"}),
+                )
+            if action_columns[1].button("使用缓存结果", key="ingest_use_cache"):
+                _execute_and_render(
+                    service,
+                    cached_command.model_copy(update={"preferred_mode": "cache"}),
+                )
+            if action_columns[2].button("本地确定性检查", key="ingest_use_local"):
+                _execute_and_render(
+                    service,
+                    cached_command.model_copy(update={"preferred_mode": "local"}),
+                )
+            if action_columns[3].button("取消本次处理", key="ingest_cancel"):
+                st.session_state.pop("ingest_timeout_command", None)
+                st.info("已取消本次处理；本地归档保留，未写入知识库。")
 
 
 def _to_command(
     container: AppContainer,
     state: IngestFormState,
     *,
-    preferred_mode: Literal["realtime", "cache"],
+    preferred_mode: Literal["realtime", "cache", "local"],
 ) -> ImportSourceInput:
     return ImportSourceInput(
         project_id=container.settings.project_id,
@@ -261,18 +340,27 @@ def _execute_and_render(service: ImportSourceService, command: ImportSourceInput
         report = service.execute(command)
     except AppError as error:
         feedback = build_feedback(error)
+        _render_stages(stage_states("failed", failed_index=3))
         render_feedback(feedback)
-        if feedback.offer_cache:
+        if feedback.offer_cache or feedback.offer_local:
             st.session_state["ingest_timeout_command"] = command
         return
     st.session_state.pop("ingest_timeout_command", None)
+    _render_stages(stage_states("completed"))
     _render_report(report, sandbox=command.is_sandbox)
 
 
 def _render_report(report: IngestReport, *, sandbox: bool) -> None:
     badge, _ = result_badge(report.result_mode.value)
     if report.result_mode.value == "cache":
-        st.warning(f"编译完成 · {badge}（同材料、同版本精确匹配）")
+        generated = (
+            report.cache_generated_at.isoformat(timespec="seconds")
+            if report.cache_generated_at is not None
+            else "时间未知"
+        )
+        st.warning(
+            f"编译完成 · {badge} · 材料 {report.source_hash8 or '未知'} · 生成于 {generated}"
+        )
     else:
         st.info(f"编译完成 · {badge}")
     if sandbox:
@@ -283,7 +371,30 @@ def _render_report(report: IngestReport, *, sandbox: bool) -> None:
     conflict.metric("冲突问题", report.conflict_count)
     gap.metric("信息缺口", max(0, len(report.created_issue_ids) - report.conflict_count))
     st.write(report.summary)
+    grouped: dict[str, list] = {}
+    for item in report.result_items:
+        grouped.setdefault(item.status, []).append(item)
+    for status, items in grouped.items():
+        with st.expander(f"{status}（{len(items)}）", expanded=True):
+            for item in items:
+                st.markdown(
+                    f"**类型：** {item.item_type}  \n"
+                    f"**摘要：** {item.summary}  \n"
+                    f"**章节：** {item.section}  \n"
+                    f"**引用：** {item.citation}  \n"
+                    f"**状态：** {item.status}"
+                )
     if report.conflict_count:
         st.button("查看并处理问题", type="primary", key="ingest_review_issues")
     else:
         st.button("完成并返回首页", type="primary", key="ingest_finish")
+
+
+def _render_stages(states: list[IngestStageState]) -> None:
+    icons = {
+        "waiting": "○",
+        "processing": "◉",
+        "completed": "✓",
+        "failed": "!",
+    }
+    st.markdown("　".join(f"{icons[item.status]} {item.label} · {item.status}" for item in states))

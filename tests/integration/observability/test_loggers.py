@@ -135,6 +135,7 @@ def test_event_logger_writes_queryable_sqlite_index_and_safe_utf8_jsonl(
     assert document == {
         "actor": "产品经理",
         "correlation_id": "CORR-001",
+        "event_id": "EVENT-001",
         "entity_id": "SRC-001",
         "entity_type": "source",
         "event": "source_ingest_completed",
@@ -258,6 +259,48 @@ def test_model_call_logger_allows_safe_prompt_version_metadata(tmp_path: Path):
             "SELECT prompt_version FROM model_call_logs WHERE id = 'CALL-001'"
         ).fetchone()
     assert row == ("query-v1",)
+
+
+def test_event_logger_reconciles_committed_sqlite_event_after_jsonl_append_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    db_path = _prepare_db(tmp_path)
+    module = importlib.import_module("src.infrastructure.observability.event_logger")
+    logger = module.EventLogger(db_path)
+    event = EventLog(
+        id="EVENT-RECOVER",
+        project_id="LLD",
+        event_type="source_ingest_completed",
+        entity_type="source",
+        entity_id="SRC-RECOVER",
+        actor="system",
+        correlation_id="CORR-RECOVER",
+        payload={"status": "succeeded"},
+        created_at=NOW,
+    )
+    original_append = logger.append_prepared
+    monkeypatch.setattr(
+        logger,
+        "append_prepared",
+        lambda prepared: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(module.AuditDurabilityUncertainError):
+        logger.record(event)
+
+    with sqlite3.connect(db_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM event_logs WHERE id = 'EVENT-RECOVER'"
+            ).fetchone()[0]
+            == 1
+        )
+    monkeypatch.setattr(logger, "append_prepared", original_append)
+    assert logger.reconcile() == 1
+    document = json.loads((tmp_path / "data/local_state/app.log.jsonl").read_text(encoding="utf-8"))
+    assert document["event_id"] == "EVENT-RECOVER"
 
 
 @pytest.mark.parametrize(

@@ -103,4 +103,8 @@ class IngestUnitOfWork(Protocol):
         event: EventLog,
     ) -> None: ...
 
-    def duplicate_report(self, source: SourceRecord) -> IngestReport: ...
+    def duplicate_report(
+        self,
+        source: SourceRecord,
+        command_fingerprint: str,
+    ) -> IngestReport: ...
