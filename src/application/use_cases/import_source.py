@@ -53,7 +53,10 @@ from src.infrastructure.gateways._common import (
 )
 from src.infrastructure.gateways.ingest_gateway import IngestGateway
 from src.infrastructure.gateways.schemas import IngestWorkflowInput, IngestWorkflowOutput
-from src.infrastructure.observability.event_logger import EventLogger
+from src.infrastructure.observability.event_logger import (
+    AuditDurabilityUncertainError,
+    EventLogger,
+)
 from src.infrastructure.observability.model_call_logger import ModelCallLogger
 
 
@@ -308,22 +311,25 @@ class ImportSource:
         )
         if result_mode == CallResultMode.LOCAL_ONLY:
             self.sources.update_ingest_status(source.id, "local_checked")
-            self.event_logger.record(
-                EventLog(
-                    id=f"EVENT-{uuid4().hex.upper()}",
-                    project_id=source.project_id,
-                    event_type="source_ingest_local_checked",
-                    entity_type="source",
-                    entity_id=source.id,
-                    actor="system",
-                    correlation_id=correlation_id,
-                    payload={
-                        "status": "local_checked",
-                        "result_mode": CallResultMode.LOCAL_ONLY.value,
-                    },
-                    created_at=finished_at,
+            try:
+                self.event_logger.record(
+                    EventLog(
+                        id=f"EVENT-{uuid4().hex.upper()}",
+                        project_id=source.project_id,
+                        event_type="source_ingest_local_checked",
+                        entity_type="source",
+                        entity_id=source.id,
+                        actor="system",
+                        correlation_id=correlation_id,
+                        payload={
+                            "status": "local_checked",
+                            "result_mode": CallResultMode.LOCAL_ONLY.value,
+                        },
+                        created_at=finished_at,
+                    )
                 )
-            )
+            except AuditDurabilityUncertainError:
+                report = report.model_copy(update={"audit_reconciliation_pending": True})
             return report
         event = EventLog(
             id=f"EVENT-INGEST-{source.sha256[:16].upper()}",
@@ -806,23 +812,26 @@ class ImportSource:
         event_type: str,
         error_code: ErrorCode | str,
     ) -> None:
-        self.event_logger.record(
-            EventLog(
-                id=f"EVENT-{uuid4().hex.upper()}",
-                project_id=source.project_id,
-                event_type=event_type,
-                entity_type="source",
-                entity_id=source.id,
-                actor="system",
-                correlation_id=f"CORR-{uuid4().hex.upper()}",
-                payload={
-                    "status": "blocked" if "security" in event_type else "failed",
-                    "error_code": str(error_code),
-                },
-                created_at=self.now(),
-            ),
-            level="WARNING",
-        )
+        try:
+            self.event_logger.record(
+                EventLog(
+                    id=f"EVENT-{uuid4().hex.upper()}",
+                    project_id=source.project_id,
+                    event_type=event_type,
+                    entity_type="source",
+                    entity_id=source.id,
+                    actor="system",
+                    correlation_id=f"CORR-{uuid4().hex.upper()}",
+                    payload={
+                        "status": "blocked" if "security" in event_type else "failed",
+                        "error_code": str(error_code),
+                    },
+                    created_at=self.now(),
+                ),
+                level="WARNING",
+            )
+        except AuditDurabilityUncertainError:
+            pass
 
     def _record_model_call(
         self,

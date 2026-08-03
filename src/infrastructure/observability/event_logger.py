@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,32 +106,80 @@ class EventLogger:
 
     def reconcile(self) -> int:
         existing_ids: set[str] = set()
+        rewrite_required = False
         if self.log_path.exists():
-            for line in self.log_path.read_text(encoding="utf-8").splitlines():
+            raw_text = self.log_path.read_text(encoding="utf-8")
+            if raw_text and not raw_text.endswith("\n"):
+                rewrite_required = True
+            for line in raw_text.splitlines():
                 try:
                     document = json.loads(line)
                 except json.JSONDecodeError:
+                    rewrite_required = True
+                    continue
+                if not isinstance(document, dict) or line != _json_dumps(document):
+                    rewrite_required = True
                     continue
                 event_id = document.get("event_id")
-                if isinstance(event_id, str):
-                    existing_ids.add(event_id)
+                if not isinstance(event_id, str) or event_id in existing_ids:
+                    rewrite_required = True
+                    continue
+                existing_ids.add(event_id)
         with connect(self.db_path) as connection:
             rows = connection.execute("SELECT * FROM event_logs ORDER BY created_at, id").fetchall()
+        sqlite_ids = {row["id"] for row in rows}
+        if existing_ids - sqlite_ids:
+            rewrite_required = True
+        missing_ids = sqlite_ids - existing_ids
+        if rewrite_required:
+            self._atomic_rewrite(rows)
+            return len(missing_ids)
         appended = 0
         for row in rows:
             if row["id"] in existing_ids:
                 continue
-            event = EventLog(
-                id=row["id"],
-                project_id=row["project_id"],
-                event_type=row["event_type"],
-                entity_type=row["entity_type"],
-                entity_id=row["entity_id"],
-                actor=row["actor"],
-                correlation_id=row["correlation_id"],
-                payload=json.loads(row["payload_json"]),
-                created_at=row["created_at"],
-            )
-            self.append_prepared(self.prepare(event))
+            self.append_prepared(self.prepare(self._event_from_row(row)))
             appended += 1
         return appended
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> EventLog:
+        return EventLog(
+            id=row["id"],
+            project_id=row["project_id"],
+            event_type=row["event_type"],
+            entity_type=row["entity_type"],
+            entity_id=row["entity_id"],
+            actor=row["actor"],
+            correlation_id=row["correlation_id"],
+            payload=json.loads(row["payload_json"]),
+            created_at=row["created_at"],
+        )
+
+    def _atomic_rewrite(self, rows: list[sqlite3.Row]) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.log_path.parent,
+                prefix=f".{self.log_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                for row in rows:
+                    temporary.write(self.prepare(self._event_from_row(row)).line)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, self.log_path)
+            temporary_path = None
+            descriptor = os.open(self.log_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)

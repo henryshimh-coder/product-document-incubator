@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -301,6 +302,99 @@ def test_event_logger_reconciles_committed_sqlite_event_after_jsonl_append_failu
     assert logger.reconcile() == 1
     document = json.loads((tmp_path / "data/local_state/app.log.jsonl").read_text(encoding="utf-8"))
     assert document["event_id"] == "EVENT-RECOVER"
+
+
+def test_event_logger_rewrites_partial_tail_to_canonical_unique_sqlite_events(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    db_path = _prepare_db(tmp_path)
+    module = importlib.import_module("src.infrastructure.observability.event_logger")
+    logger = module.EventLogger(db_path)
+    first = EventLog(
+        id="EVENT-FIRST",
+        project_id="LLD",
+        event_type="source_ingest_completed",
+        entity_type="source",
+        entity_id="SRC-FIRST",
+        actor="system",
+        correlation_id="CORR-FIRST",
+        payload={"status": "succeeded"},
+        created_at=NOW,
+    )
+    second = first.model_copy(
+        update={
+            "id": "EVENT-SECOND",
+            "entity_id": "SRC-SECOND",
+            "correlation_id": "CORR-SECOND",
+            "created_at": NOW + timedelta(seconds=1),
+        }
+    )
+    logger.record(first)
+    original_append = logger.append_prepared
+
+    def append_partial_then_fail(prepared):
+        with logger.log_path.open("a", encoding="utf-8") as stream:
+            stream.write(prepared.line[:23])
+        raise OSError("disk full after partial write")
+
+    monkeypatch.setattr(logger, "append_prepared", append_partial_then_fail)
+    with pytest.raises(module.AuditDurabilityUncertainError):
+        logger.record(second)
+    monkeypatch.setattr(logger, "append_prepared", original_append)
+
+    assert logger.reconcile() == 1
+    raw_lines = logger.log_path.read_text(encoding="utf-8").splitlines()
+    documents = [json.loads(line) for line in raw_lines]
+    assert raw_lines == [
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for document in documents
+    ]
+    event_ids = [document["event_id"] for document in documents]
+    with sqlite3.connect(db_path) as connection:
+        sqlite_ids = {row[0] for row in connection.execute("SELECT id FROM event_logs").fetchall()}
+    assert event_ids == ["EVENT-FIRST", "EVENT-SECOND"]
+    assert len(event_ids) == len(set(event_ids))
+    assert set(event_ids) == sqlite_ids
+
+
+def test_event_logger_atomic_rewrite_failure_preserves_partial_original(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    db_path = _prepare_db(tmp_path)
+    module = importlib.import_module("src.infrastructure.observability.event_logger")
+    logger = module.EventLogger(db_path)
+    event = EventLog(
+        id="EVENT-ATOMIC",
+        project_id="LLD",
+        event_type="source_ingest_completed",
+        entity_type="source",
+        entity_id="SRC-ATOMIC",
+        actor="system",
+        correlation_id="CORR-ATOMIC",
+        payload={"status": "succeeded"},
+        created_at=NOW,
+    )
+    prepared = logger.prepare(event)
+    with sqlite3.connect(db_path) as connection:
+        logger.insert_prepared(connection, prepared)
+    logger.log_path.parent.mkdir(parents=True, exist_ok=True)
+    original = b'{"event_id":"EVENT-ATOMIC"'
+    logger.log_path.write_bytes(original)
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda source, target: (_ for _ in ()).throw(OSError("replace denied")),
+    )
+
+    with pytest.raises(OSError, match="replace denied"):
+        logger.reconcile()
+
+    assert logger.log_path.read_bytes() == original
+    assert list(logger.log_path.parent.glob(".app.log.jsonl.*.tmp")) == []
 
 
 @pytest.mark.parametrize(

@@ -753,3 +753,132 @@ def test_jsonl_append_failure_returns_committed_success_and_reconciles_from_sqli
     assert logger.reconcile() == 1
     document = json.loads(logger.log_path.read_text(encoding="utf-8"))
     assert document["event_id"] == event_id
+
+
+def test_local_check_jsonl_failure_returns_pending_success_and_reconciles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeDifyClient()
+    use_case, content, db_path, _ = _prepare(tmp_path, monkeypatch, client)
+    logger = use_case.event_logger
+    original_append = logger.append_prepared
+    monkeypatch.setattr(
+        logger,
+        "append_prepared",
+        lambda prepared: (_ for _ in ()).throw(OSError("local audit disk full")),
+    )
+
+    report = use_case.execute(_command(content, preferred_mode="local"))
+
+    assert report.result_mode == "local_only"
+    assert report.audit_reconciliation_pending is True
+    assert SqliteSourceRepository(db_path).get(report.source_id).ingest_status == "local_checked"
+    with sqlite3.connect(db_path) as connection:
+        event_id = connection.execute(
+            "SELECT id FROM event_logs WHERE entity_id = ? "
+            "AND event_type = 'source_ingest_local_checked'",
+            (report.source_id,),
+        ).fetchone()[0]
+    monkeypatch.setattr(logger, "append_prepared", original_append)
+    assert logger.reconcile() == 1
+    assert json.loads(logger.log_path.read_text(encoding="utf-8"))["event_id"] == event_id
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected_code", "expected_status", "expected_event"),
+    [
+        (
+            {
+                "security_level": SecurityLevel.L3_CONFIDENTIAL,
+                "allow_external_model": True,
+            },
+            ErrorCode.EXTERNAL_CALL_DENIED,
+            "security_blocked",
+            "source_ingest_security_blocked",
+        ),
+        (
+            {"preferred_mode": "cache"},
+            ErrorCode.CACHE_NOT_FOUND,
+            "validation_failed",
+            "source_ingest_failed",
+        ),
+    ],
+)
+def test_safe_event_jsonl_failure_does_not_mask_original_application_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    updates,
+    expected_code,
+    expected_status,
+    expected_event,
+) -> None:
+    client = FakeDifyClient()
+    use_case, content, db_path, _ = _prepare(tmp_path, monkeypatch, client)
+    logger = use_case.event_logger
+    original_append = logger.append_prepared
+    monkeypatch.setattr(
+        logger,
+        "append_prepared",
+        lambda prepared: (_ for _ in ()).throw(OSError("safe event disk full")),
+    )
+
+    with pytest.raises(AppError) as caught:
+        use_case.execute(_command(content, **updates))
+
+    assert caught.value.code == expected_code
+    source = SqliteSourceRepository(db_path).list_for_project("LLD")[0]
+    assert source.ingest_status == expected_status
+    with sqlite3.connect(db_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT event_type FROM event_logs WHERE entity_id = ?", (source.id,)
+            ).fetchone()[0]
+            == expected_event
+        )
+    monkeypatch.setattr(logger, "append_prepared", original_append)
+    assert logger.reconcile() == 1
+
+
+def test_persistence_safe_event_jsonl_failure_does_not_mask_persistence_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeDifyClient()
+    use_case, content, db_path, _ = _prepare(tmp_path, monkeypatch, client)
+    digest = hashlib.sha256(content).hexdigest()
+    source_id = f"SRC-{digest[:16].upper()}"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO event_logs (
+                id, project_id, event_type, entity_type, entity_id, actor,
+                correlation_id, payload_json, created_at
+            ) VALUES (?, 'LLD', 'seed', 'source', ?, 'system', 'seed', '{}', ?)
+            """,
+            (f"EVENT-INGEST-{digest[:16].upper()}", source_id, NOW.isoformat()),
+        )
+    logger = use_case.event_logger
+    original_append = logger.append_prepared
+    monkeypatch.setattr(
+        logger,
+        "append_prepared",
+        lambda prepared: (_ for _ in ()).throw(OSError("persistence event disk full")),
+    )
+
+    with pytest.raises(AppError) as caught:
+        use_case.execute(_command(content))
+
+    assert caught.value.code == ErrorCode.INGEST_PERSISTENCE_FAILED
+    assert SqliteSourceRepository(db_path).get(source_id).ingest_status == "persistence_failed"
+    with sqlite3.connect(db_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM event_logs WHERE entity_id = ? "
+                "AND event_type = 'source_ingest_persistence_failed'",
+                (source_id,),
+            ).fetchone()[0]
+            == 1
+        )
+    monkeypatch.setattr(logger, "append_prepared", original_append)
+    assert logger.reconcile() == 2
