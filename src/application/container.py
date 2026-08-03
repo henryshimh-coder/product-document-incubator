@@ -10,19 +10,25 @@ import httpx
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from src.application.dto.dashboard import DashboardView, GetDashboardInput
 from src.application.dto.ingest import ImportSourceInput
+from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
 from src.domain.models import IngestReport
 from src.infrastructure.cache.ai_cache import AiCache
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
+    SqliteChangeRepository,
+    SqliteEventRepository,
     SqliteIngestUnitOfWork,
+    SqliteIssueRepository,
     SqliteKnowledgeRepository,
     SqliteProjectRepository,
     SqliteSourceRepository,
 )
 from src.infrastructure.files.archive import SourceArchive
 from src.infrastructure.files.extractor import extract_document
+from src.infrastructure.files.manifest_integrity import ManifestIntegrityChecker
 from src.infrastructure.files.manifest_store import ManifestStore
 from src.infrastructure.gateways.composition import DifyGatewaySettings, build_workflow_gateways
 from src.infrastructure.observability.event_logger import EventLogger
@@ -31,6 +37,10 @@ from src.infrastructure.observability.model_call_logger import ModelCallLogger
 
 class ImportSourceService(Protocol):
     def execute(self, command: ImportSourceInput) -> IngestReport: ...
+
+
+class DashboardService(Protocol):
+    def execute(self, command: GetDashboardInput) -> DashboardView: ...
 
 
 class ConfigurationError(ValueError):
@@ -53,6 +63,7 @@ class AppSettings(BaseModel):
 class AppContainer:
     settings: AppSettings
     import_source: ImportSourceService | None = None
+    dashboard: DashboardService | None = None
 
 
 def load_settings(app_path: Path, schema_path: Path) -> AppSettings:
@@ -74,6 +85,25 @@ def build_container(
     http_factory=None,
 ) -> AppContainer:
     settings = load_settings(app_path, schema_path)
+    project_root = app_path.resolve().parent.parent
+    db_path = project_root / "data/local_state/product_intelligence.db"
+    manifest_path = project_root / "data/local_state/current_baseline.json"
+    if not manifest_path.is_file():
+        return AppContainer(settings=settings)
+    migrate(db_path)
+    dashboard = GetDashboard(
+        manifest=ManifestStore(manifest_path),
+        integrity=ManifestIntegrityChecker(
+            project_root=project_root,
+            db_path=db_path,
+            manifest_path=manifest_path,
+        ),
+        projects=SqliteProjectRepository(db_path),
+        issues=SqliteIssueRepository(db_path),
+        changes=SqliteChangeRepository(db_path),
+        sources=SqliteSourceRepository(db_path),
+        events=SqliteEventRepository(db_path),
+    )
     runtime = os.environ if environ is None else environ
     required = (
         runtime.get("DIFY_BASE_URL", "").strip(),
@@ -82,14 +112,7 @@ def build_container(
         runtime.get("DIFY_LINT_API_KEY", "").strip(),
     )
     if not all(required):
-        return AppContainer(settings=settings)
-
-    project_root = app_path.resolve().parent.parent
-    db_path = project_root / "data/local_state/product_intelligence.db"
-    manifest_path = project_root / "data/local_state/current_baseline.json"
-    if not manifest_path.is_file():
-        return AppContainer(settings=settings)
-    migrate(db_path)
+        return AppContainer(settings=settings, dashboard=dashboard)
     gateway_settings = DifyGatewaySettings(
         base_url=required[0],
         ingest_api_key=required[1],
@@ -128,4 +151,4 @@ def build_container(
         unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
         schema_version=settings.schema_version,
     )
-    return AppContainer(settings=settings, import_source=service)
+    return AppContainer(settings=settings, import_source=service, dashboard=dashboard)

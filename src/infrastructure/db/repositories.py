@@ -606,6 +606,33 @@ class SqliteChangeRepository:
         return ChangeRequest.model_validate(data)
 
 
+class SqliteEventRepository:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def latest(self, project_id: str, *, limit: int) -> list[EventLog]:
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, project_id, event_type, entity_type, entity_id, actor,
+                       correlation_id, payload_json, created_at
+                FROM event_logs
+                WHERE project_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (project_id, limit),
+            ).fetchall()
+        events: list[EventLog] = []
+        for row in rows:
+            data = _row_data(row)
+            data["payload"] = _json_loads(data.pop("payload_json"))
+            events.append(EventLog.model_validate(data))
+        return events
+
+
 class SqliteIngestUnitOfWork:
     """Own one SQLite transaction for every authoritative ingest result write."""
 

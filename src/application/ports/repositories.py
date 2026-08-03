@@ -93,6 +93,10 @@ class BaselineRepository(Protocol):
     def mark_superseded(self, baseline_id: str) -> None: ...
 
 
+class EventRepository(Protocol):
+    def latest(self, project_id: str, *, limit: int) -> list[EventLog]: ...
+
+
 class IngestUnitOfWork(Protocol):
     def complete(
         self,
