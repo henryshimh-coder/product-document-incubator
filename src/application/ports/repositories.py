@@ -8,6 +8,7 @@ from src.domain.models import (
     Baseline,
     ChangeRequest,
     Decision,
+    DecisionResult,
     EventLog,
     IngestReport,
     IssueCard,
@@ -57,11 +58,15 @@ class IssueRepository(Protocol):
 
     def update_status(self, issue_id: str, status: IssueStatus, updated_at: datetime) -> None: ...
 
+    def upsert_all(self, issues: list[IssueCard]) -> None: ...
+
 
 class DecisionRepository(Protocol):
     def add(self, decision: Decision, idempotency_key: str) -> None: ...
 
     def get(self, decision_id: str) -> Decision: ...
+
+    def find_by_idempotency_key(self, idempotency_key: str) -> Decision | None: ...
 
 
 class ChangeRepository(Protocol):
@@ -85,6 +90,21 @@ class ChangeRepository(Protocol):
     def update_status(self, change_id: str, status: ChangeStatus, updated_at: datetime) -> None: ...
 
     def list_pending(self, project_id: str) -> list[ChangeRequest]: ...
+
+    def find_by_decision_id(self, decision_id: str) -> ChangeRequest | None: ...
+
+
+class DecisionUnitOfWork(Protocol):
+    def record(
+        self,
+        *,
+        decision: Decision,
+        idempotency_key: str,
+        command_fingerprint: str,
+        issue_status: IssueStatus,
+        issue_updated_at: datetime,
+        change_request: ChangeRequest | None,
+    ) -> DecisionResult: ...
 
 
 class BaselineRepository(Protocol):

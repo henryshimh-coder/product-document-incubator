@@ -93,6 +93,22 @@
   background: var(--pi-surface);
 }
 
+.pi-lint-evidence {
+  margin: 8px 0 16px;
+  padding: 14px 16px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--pi-border);
+  border-left: 3px solid var(--pi-blue-600);
+  border-radius: var(--pi-radius);
+  background: var(--pi-surface);
+  color: var(--pi-text-900);
+  line-height: 1.65;
+}
+
+.st-key-lint_run button {
+  width: 100%;
+}
+
 .pi-page-header {
   min-height: 92px;
   margin-bottom: 24px;

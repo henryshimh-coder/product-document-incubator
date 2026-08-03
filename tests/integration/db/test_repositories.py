@@ -317,3 +317,61 @@ def test_knowledge_repository_lists_only_version_scoped_candidate_and_conflict_n
         "RULE-CANDIDATE",
         "RULE-CONFLICT",
     ]
+
+
+def test_issue_repository_upserts_repeated_lint_fingerprint_without_losing_creation_time(
+    tmp_path: Path,
+) -> None:
+    """Catches a second lint run crashing or creating a duplicate for the same fingerprint."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    first = IssueCard(
+        id="ISSUE-FIRST",
+        project_id="LLD",
+        issue_type="information_gap",
+        severity=IssueSeverity.PENDING_INFO,
+        status=IssueStatus.OPEN,
+        title="首次发现",
+        description="需要补充市场依据。",
+        evidence=[],
+        impacted_domains=["市场"],
+        options=[],
+        ai_recommendation=None,
+        ai_confidence=None,
+        uncertainty="缺少市场依据",
+        fingerprint="f" * 64,
+        owner=None,
+        due_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    repository = SqliteIssueRepository(db_path)
+    repository.upsert_all([first])
+    repository.upsert_all(
+        [
+            first.model_copy(
+                update={
+                    "id": "ISSUE-SECOND",
+                    "title": "再次发现",
+                    "updated_at": NOW + timedelta(minutes=5),
+                }
+            )
+        ]
+    )
+
+    stored = repository.get("ISSUE-FIRST")
+    assert stored.title == "再次发现"
+    assert stored.created_at == NOW
+    assert stored.updated_at == NOW + timedelta(minutes=5)

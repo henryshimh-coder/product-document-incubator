@@ -1,0 +1,37 @@
+rules:
+  - id: STR-001
+    type: structure
+    severity: pending_info
+    description: 知识卡缺少来源
+  - id: STR-002
+    type: structure
+    severity: pending_info
+    description: 当前卡片引用不存在
+  - id: GOV-001
+    type: governance
+    severity: blocking
+    description: 非 effective 内容进入当前基线
+  - id: GOV-002
+    type: governance
+    severity: blocking
+    description: 未授权资料产生外部模型调用
+  - id: GOV-003
+    type: governance
+    severity: pending_decision
+    description: 正式会议决定未映射到产品变更
+  - id: VER-001
+    type: version
+    severity: blocking
+    description: 当前基线引用历史产品规则
+  - id: VER-002
+    type: version
+    severity: pending_decision
+    description: 技术方案对应产品版本落后
+  - id: MKT-001
+    type: market
+    severity: pending_info
+    description: 市场判断没有证据或验证计划
+  - id: COST-001
+    type: cost
+    severity: pending_decision
+    description: 影响成本的产品参数变化后未重算

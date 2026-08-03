@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from src.domain.enums import AuthorityLevel, CallResultMode, EvidenceSide, IssueSeverity
 
@@ -248,26 +248,6 @@ class LintIssueOutput(WorkflowOutput):
     ai_recommendation: NonEmptyStr | None
     ai_confidence: float | None = Field(default=None, ge=0, le=1)
     uncertainty: NonEmptyStr | None
-
-    @model_validator(mode="after")
-    def require_two_sided_major_evidence(self) -> Self:
-        if self.severity not in {
-            IssueSeverity.BLOCKING,
-            IssueSeverity.PENDING_DECISION,
-        }:
-            return self
-        sides = {evidence.side for evidence in self.evidence}
-        sources = {evidence.source_id for evidence in self.evidence}
-        if (
-            sides
-            != {
-                EvidenceSide.CURRENT_BASELINE,
-                EvidenceSide.CHALLENGING_SOURCE,
-            }
-            or len(sources) < 2
-        ):
-            raise ValueError("major issues require two-sided evidence")
-        return self
 
 
 class LintWorkflowOutput(WorkflowOutput):

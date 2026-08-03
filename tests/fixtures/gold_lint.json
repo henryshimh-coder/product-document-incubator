@@ -1,0 +1,145 @@
+[
+  {
+    "name": "客群边界冲突",
+    "expected_detected": true,
+    "expected_issue_type": "conflict",
+    "model_issue": {
+      "issue_type": "conflict",
+      "severity": "pending_decision",
+      "title": "产品方案与风险意见的客群边界不一致",
+      "description": "需要会议确认当前执行口径",
+      "evidence": [
+        {"source_id": "SRC-BASE", "citation_id": "CIT-BASE-001", "excerpt": "当前客群为存量客户。", "document_version": "LLD-724_1", "page_or_section": "目标客群", "side": "current_baseline"},
+        {"source_id": "SRC-RISK", "citation_id": "CIT-RISK-001", "excerpt": "风险意见要求收紧准入。", "document_version": "v1.0", "page_or_section": "客群限制", "side": "challenging_source"}
+      ],
+      "impacted_domains": ["产品", "风险"],
+      "options": [{"code": "A", "label": "收紧", "impact": "调整规则"}],
+      "ai_recommendation": "A",
+      "ai_confidence": 0.86,
+      "uncertainty": "尚未形成正式决定"
+    }
+  },
+  {
+    "name": "风险意见未同步",
+    "expected_detected": true,
+    "expected_issue_type": "not_synchronized",
+    "model_issue": {
+      "issue_type": "not_synchronized",
+      "severity": "pending_decision",
+      "title": "风险限制尚未同步到产品规则",
+      "description": "需要确认是否调整规则",
+      "evidence": [
+        {"source_id": "SRC-BASE", "citation_id": "CIT-BASE-002", "excerpt": "当前规则未包含该限制。", "document_version": "LLD-724_1", "page_or_section": "准入规则", "side": "current_baseline"},
+        {"source_id": "SRC-RISK", "citation_id": "CIT-RISK-002", "excerpt": "新增一项风险限制。", "document_version": "v1.1", "page_or_section": "风险限制", "side": "challenging_source"}
+      ],
+      "impacted_domains": ["产品", "风险"],
+      "options": [{"code": "A", "label": "同步", "impact": "更新规则"}],
+      "ai_recommendation": "A",
+      "ai_confidence": 0.81,
+      "uncertainty": "需会议确认"
+    }
+  },
+  {
+    "name": "会议决定未形成变更",
+    "expected_detected": true,
+    "expected_issue_type": "not_synchronized",
+    "model_issue": {
+      "issue_type": "not_synchronized",
+      "severity": "pending_decision",
+      "title": "会议决定尚未形成产品变更",
+      "description": "会议结论与当前版本不一致",
+      "evidence": [
+        {"source_id": "SRC-BASE", "citation_id": "CIT-BASE-003", "excerpt": "当前版本仍维持原规则。", "document_version": "LLD-724_1", "page_or_section": "产品规则", "side": "current_baseline"},
+        {"source_id": "SRC-MEETING", "citation_id": "CIT-MEETING-001", "excerpt": "会议决定调整该规则。", "document_version": "v1.0", "page_or_section": "会议结论", "side": "challenging_source"}
+      ],
+      "impacted_domains": ["产品"],
+      "options": [{"code": "A", "label": "形成变更", "impact": "进入审批"}],
+      "ai_recommendation": "A",
+      "ai_confidence": 0.9,
+      "uncertainty": "尚无变更单"
+    }
+  },
+  {
+    "name": "技术方案版本落后",
+    "expected_detected": true,
+    "expected_issue_type": "stale",
+    "model_issue": {
+      "issue_type": "stale",
+      "severity": "pending_decision",
+      "title": "技术方案对应产品版本落后",
+      "description": "技术实现仍对应旧产品规则",
+      "evidence": [
+        {"source_id": "SRC-BASE", "citation_id": "CIT-BASE-004", "excerpt": "当前版本为 LLD-724_1。", "document_version": "LLD-724_1", "page_or_section": "版本", "side": "current_baseline"},
+        {"source_id": "SRC-TECH", "citation_id": "CIT-TECH-001", "excerpt": "本技术方案对应 LLD-700_1。", "document_version": "v1.0", "page_or_section": "适用版本", "side": "challenging_source"}
+      ],
+      "impacted_domains": ["技术"],
+      "options": [{"code": "A", "label": "升级", "impact": "更新技术方案"}],
+      "ai_recommendation": "A",
+      "ai_confidence": 0.93,
+      "uncertainty": "需确认排期"
+    }
+  },
+  {
+    "name": "市场判断缺证据",
+    "expected_detected": true,
+    "expected_issue_type": "insufficient_evidence",
+    "model_issue": {
+      "issue_type": "insufficient_evidence",
+      "severity": "pending_info",
+      "title": "市场判断缺少证据",
+      "description": "需要补充来源或验证计划",
+      "evidence": [],
+      "impacted_domains": ["市场"],
+      "options": [{"code": "A", "label": "补证", "impact": "补充研究材料"}],
+      "ai_recommendation": null,
+      "ai_confidence": 0.62,
+      "uncertainty": "缺少市场来源和验证计划"
+    }
+  },
+  {
+    "name": "成本参数变化未重算",
+    "expected_detected": true,
+    "expected_issue_type": "stale",
+    "model_issue": {
+      "issue_type": "stale",
+      "severity": "pending_decision",
+      "title": "成本参数变化后尚未重算",
+      "description": "需要重新执行确定性成本计算",
+      "evidence": [
+        {"source_id": "SRC-BASE", "citation_id": "CIT-BASE-005", "excerpt": "当前成本参数为 10。", "document_version": "LLD-724_1", "page_or_section": "成本参数", "side": "current_baseline"},
+        {"source_id": "SRC-COST", "citation_id": "CIT-COST-001", "excerpt": "成本参数已调整为 12。", "document_version": "v1.1", "page_or_section": "参数变更", "side": "challenging_source"}
+      ],
+      "impacted_domains": ["产品", "财务"],
+      "options": [{"code": "A", "label": "重算", "impact": "更新成本结果"}],
+      "ai_recommendation": "A",
+      "ai_confidence": 0.88,
+      "uncertainty": "尚未执行重算"
+    }
+  },
+  {
+    "name": "候选内容误入当前基线",
+    "expected_detected": true,
+    "expected_issue_type": "conflict",
+    "model_issue": {
+      "issue_type": "conflict",
+      "severity": "blocking",
+      "title": "候选内容进入当前基线",
+      "description": "非 effective 内容不得作为当前规则",
+      "evidence": [
+        {"source_id": "BASE-LLD", "citation_id": "CIT-MANIFEST-001", "excerpt": "当前基线 LLD-724_1。", "document_version": "LLD-724_1", "page_or_section": "Manifest", "side": "current_baseline"},
+        {"source_id": "SRC-CANDIDATE", "citation_id": "CIT-CANDIDATE-001", "excerpt": "该内容状态为 candidate。", "document_version": "v1.0", "page_or_section": "候选规则", "side": "challenging_source"}
+      ],
+      "impacted_domains": ["治理"],
+      "options": [{"code": "A", "label": "移出", "impact": "恢复当前基线"}],
+      "ai_recommendation": "A",
+      "ai_confidence": 1.0,
+      "uncertainty": null
+    }
+  },
+  {
+    "name": "正常措辞差异不应判冲突",
+    "expected_detected": false,
+    "expected_issue_type": null,
+    "model_issue": null
+  }
+]

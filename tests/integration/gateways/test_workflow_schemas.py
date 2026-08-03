@@ -866,13 +866,15 @@ def test_lint_gateway_accepts_two_sided_issue_from_allowed_input_universe():
     assert result["result"]["issues"][0]["severity"] == "pending_decision"
 
 
-def test_lint_gateway_rejects_major_issue_without_both_sides():
-    """Catches a major Lint issue presented without current and challenging evidence."""
+def test_lint_gateway_preserves_trusted_one_sided_major_issue_for_post_validation_downgrade():
+    """Catches the adapter rejecting trusted evidence before RunLint can downgrade it."""
     output = _lint_output()
     output["issues"][0]["evidence"] = output["issues"][0]["evidence"][:1]
 
-    with pytest.raises(OutputValidationError, match="LINT_OUTPUT_INVALID"):
-        _run_gateway("lint", FakeDifyClient(output), _lint_input())
+    result = _run_gateway("lint", FakeDifyClient(output), _lint_input())
+
+    assert result["result"]["issues"][0]["severity"] == "pending_decision"
+    assert result["result"]["issues"][0]["evidence"][0]["citation_id"] == "CIT-BASE-001"
 
 
 def test_lint_gateway_rejects_evidence_with_swapped_source_sides():

@@ -20,6 +20,7 @@ from src.domain.models import (
     Baseline,
     ChangeRequest,
     Decision,
+    DecisionResult,
     EventLog,
     IngestReport,
     IngestResultView,
@@ -411,8 +412,9 @@ class SqliteIssueRepository:
                     INSERT INTO issue_cards (
                         id, project_id, issue_type, severity, status, title, description,
                         evidence_json, impacted_domains_json, options_json, ai_recommendation,
-                        ai_confidence, uncertainty, owner, due_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ai_confidence, uncertainty, validation_note, fingerprint, target_rule_id,
+                        owner, due_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         issue.id,
@@ -428,11 +430,58 @@ class SqliteIssueRepository:
                         issue.ai_recommendation,
                         issue.ai_confidence,
                         issue.uncertainty,
+                        issue.validation_note,
+                        issue.fingerprint,
+                        issue.target_rule_id,
                         issue.owner,
                         _iso_or_none(issue.due_at),
                         issue.created_at.isoformat(),
                         issue.updated_at.isoformat(),
                     ),
+                )
+
+    def upsert_all(self, issues: list[IssueCard]) -> None:
+        with connect(self.db_path) as connection:
+            for issue in issues:
+                existing = None
+                if issue.fingerprint is not None:
+                    existing = connection.execute(
+                        "SELECT id, created_at FROM issue_cards WHERE fingerprint = ?",
+                        (issue.fingerprint,),
+                    ).fetchone()
+                stored = issue
+                if existing is not None:
+                    stored = issue.model_copy(
+                        update={
+                            "id": existing["id"],
+                            "created_at": datetime.fromisoformat(existing["created_at"]),
+                        }
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO issue_cards (
+                        id, project_id, issue_type, severity, status, title, description,
+                        evidence_json, impacted_domains_json, options_json, ai_recommendation,
+                        ai_confidence, uncertainty, validation_note, fingerprint, target_rule_id,
+                        owner, due_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        issue_type = excluded.issue_type,
+                        severity = excluded.severity,
+                        title = excluded.title,
+                        description = excluded.description,
+                        evidence_json = excluded.evidence_json,
+                        impacted_domains_json = excluded.impacted_domains_json,
+                        options_json = excluded.options_json,
+                        ai_recommendation = excluded.ai_recommendation,
+                        ai_confidence = excluded.ai_confidence,
+                        uncertainty = excluded.uncertainty,
+                        validation_note = excluded.validation_note,
+                        fingerprint = excluded.fingerprint,
+                        target_rule_id = excluded.target_rule_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    self._values(stored),
                 )
 
     def get(self, issue_id: str) -> IssueCard:
@@ -465,6 +514,31 @@ class SqliteIssueRepository:
                 raise KeyError(f"issue not found: {issue_id}")
 
     @staticmethod
+    def _values(issue: IssueCard) -> tuple[Any, ...]:
+        return (
+            issue.id,
+            issue.project_id,
+            issue.issue_type,
+            issue.severity.value,
+            issue.status.value,
+            issue.title,
+            issue.description,
+            _json_dumps([item.model_dump(mode="json") for item in issue.evidence]),
+            _json_dumps(issue.impacted_domains),
+            _json_dumps(issue.options),
+            issue.ai_recommendation,
+            issue.ai_confidence,
+            issue.uncertainty,
+            issue.validation_note,
+            issue.fingerprint,
+            issue.target_rule_id,
+            issue.owner,
+            _iso_or_none(issue.due_at),
+            issue.created_at.isoformat(),
+            issue.updated_at.isoformat(),
+        )
+
+    @staticmethod
     def _to_model(row: sqlite3.Row) -> IssueCard:
         data = _row_data(row)
         data["evidence"] = _json_loads(data.pop("evidence_json"))
@@ -483,8 +557,9 @@ class SqliteDecisionRepository:
                 """
                 INSERT INTO decisions (
                     id, project_id, issue_id, action, conclusion, confirmed_by,
-                    responsible_party, due_at, verification_condition, idempotency_key, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    responsible_party, due_at, verification_condition, idempotency_key,
+                    command_fingerprint, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision.id,
@@ -497,6 +572,7 @@ class SqliteDecisionRepository:
                     _iso_or_none(decision.due_at),
                     decision.verification_condition,
                     idempotency_key,
+                    "",
                     decision.created_at.isoformat(),
                 ),
             )
@@ -512,6 +588,19 @@ class SqliteDecisionRepository:
             )
         data = _row_data(row)
         data.pop("idempotency_key")
+        data.pop("command_fingerprint", None)
+        return Decision.model_validate(data)
+
+    def find_by_idempotency_key(self, idempotency_key: str) -> Decision | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM decisions WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+        if row is None:
+            return None
+        data = _row_data(row)
+        data.pop("idempotency_key")
+        data.pop("command_fingerprint", None)
         return Decision.model_validate(data)
 
 
@@ -608,6 +697,13 @@ class SqliteChangeRepository:
             ).fetchall()
         return [self._to_model(row) for row in rows]
 
+    def find_by_decision_id(self, decision_id: str) -> ChangeRequest | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM change_requests WHERE decision_id = ?", (decision_id,)
+            ).fetchone()
+        return None if row is None else self._to_model(row)
+
     @staticmethod
     def _values(change: ChangeRequest) -> tuple[Any, ...]:
         return (
@@ -642,6 +738,115 @@ class SqliteChangeRepository:
         data["evidence_refs"] = _json_loads(data.pop("evidence_refs_json"))
         data["impacted_objects"] = _json_loads(data.pop("impacted_objects_json"))
         return ChangeRequest.model_validate(data)
+
+
+class SqliteDecisionUnitOfWork:
+    """Atomically record a decision, issue transition, and optional change request."""
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def record(
+        self,
+        *,
+        decision: Decision,
+        idempotency_key: str,
+        command_fingerprint: str,
+        issue_status: IssueStatus,
+        issue_updated_at: datetime,
+        change_request: ChangeRequest | None,
+    ) -> DecisionResult:
+        from src.domain.errors import DomainError, ErrorCode
+
+        issue_updated_at = _require_utc(issue_updated_at)
+        connection = connect(self.db_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM decisions WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if existing["command_fingerprint"] != command_fingerprint:
+                    raise DomainError(ErrorCode.DECISION_IDEMPOTENCY_CONFLICT)
+                stored_decision = self._decision(existing)
+                change_row = connection.execute(
+                    "SELECT * FROM change_requests WHERE decision_id = ?",
+                    (stored_decision.id,),
+                ).fetchone()
+                connection.commit()
+                return DecisionResult(
+                    decision=stored_decision,
+                    change_request=(
+                        None if change_row is None else SqliteChangeRepository._to_model(change_row)
+                    ),
+                )
+
+            issue_row = connection.execute(
+                "SELECT project_id, status FROM issue_cards WHERE id = ?",
+                (decision.issue_id,),
+            ).fetchone()
+            if issue_row is None or issue_row["project_id"] != decision.project_id:
+                raise DomainError(ErrorCode.DECISION_INVALID, "ISSUE_NOT_FOUND")
+            if issue_row["status"] != IssueStatus.OPEN.value:
+                raise DomainError(ErrorCode.DECISION_INVALID, "ISSUE_NOT_OPEN")
+
+            connection.execute(
+                """
+                INSERT INTO decisions (
+                    id, project_id, issue_id, action, conclusion, confirmed_by,
+                    responsible_party, due_at, verification_condition, idempotency_key,
+                    command_fingerprint, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision.id,
+                    decision.project_id,
+                    decision.issue_id,
+                    decision.action.value,
+                    decision.conclusion,
+                    decision.confirmed_by,
+                    decision.responsible_party,
+                    _iso_or_none(decision.due_at),
+                    decision.verification_condition,
+                    idempotency_key,
+                    command_fingerprint,
+                    decision.created_at.isoformat(),
+                ),
+            )
+            updated = connection.execute(
+                "UPDATE issue_cards SET status = ?, updated_at = ? WHERE id = ?",
+                (issue_status.value, issue_updated_at.isoformat(), decision.issue_id),
+            )
+            if updated.rowcount != 1:
+                raise DomainError(ErrorCode.DECISION_INVALID, "ISSUE_UPDATE_FAILED")
+            if change_request is not None:
+                connection.execute(
+                    """
+                    INSERT INTO change_requests (
+                        id, project_id, issue_id, decision_id, target_card_id, before_content,
+                        after_content, rationale, evidence_refs_json, impacted_objects_json,
+                        responsible_domain, required_approver_role, demo_confirmer, status,
+                        review_action, reviewed_by, review_comment, review_idempotency_key,
+                        reviewed_at, target_version, effective_condition, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    SqliteChangeRepository._values(change_request),
+                )
+            connection.commit()
+            return DecisionResult(decision=decision, change_request=change_request)
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _decision(row: sqlite3.Row) -> Decision:
+        data = _row_data(row)
+        data.pop("idempotency_key")
+        data.pop("command_fingerprint", None)
+        return Decision.model_validate(data)
 
 
 class SqliteEventRepository:

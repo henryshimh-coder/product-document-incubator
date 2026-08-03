@@ -36,6 +36,10 @@ class ErrorCode(StrEnum):
     INGEST_PERSISTENCE_FAILED = "INGEST_PERSISTENCE_FAILED"
     HISTORICAL_VERSION_REQUIRED = "HISTORICAL_VERSION_REQUIRED"
     HISTORICAL_VERSION_INVALID = "HISTORICAL_VERSION_INVALID"
+    DECISION_FIELDS_REQUIRED = "DECISION_FIELDS_REQUIRED"
+    CHANGE_FIELDS_REQUIRED = "CHANGE_FIELDS_REQUIRED"
+    DECISION_IDEMPOTENCY_CONFLICT = "DECISION_IDEMPOTENCY_CONFLICT"
+    LINT_SOURCE_REQUIRED = "LINT_SOURCE_REQUIRED"
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,10 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
     ),
     ErrorCode.HISTORICAL_VERSION_REQUIRED: ErrorDefinition("历史查询必须指定产品版本"),
     ErrorCode.HISTORICAL_VERSION_INVALID: ErrorDefinition("指定的版本不是可查询的历史基线"),
+    ErrorCode.DECISION_FIELDS_REQUIRED: ErrorDefinition("会议决定缺少当前操作的必填信息"),
+    ErrorCode.CHANGE_FIELDS_REQUIRED: ErrorDefinition("变更单缺少修改前后、依据或目标版本"),
+    ErrorCode.DECISION_IDEMPOTENCY_CONFLICT: ErrorDefinition("重复提交键对应的会议结论不一致"),
+    ErrorCode.LINT_SOURCE_REQUIRED: ErrorDefinition("当前自检范围需要指定比较资料"),
 }
 
 

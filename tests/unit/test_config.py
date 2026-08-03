@@ -59,6 +59,7 @@ app:
         "schema_version": "1.0",
     }
     assert result.import_source is None
+    assert result.lint is None
 
 
 def test_build_container_composes_real_import_source_when_runtime_configuration_is_present(
@@ -103,6 +104,10 @@ app:
     assert result.import_source.__class__.__name__ == "ImportSource"
     assert result.query is not None
     assert result.query.__class__.__name__ == "RunQuery"
+    assert result.lint is not None
+    assert result.lint.__class__.__name__ == "RunLint"
+    assert result.record_decision is not None
+    assert result.record_decision.__class__.__name__ == "RecordDecision"
 
 
 def test_build_container_runs_real_query_vertical_slice_with_manifest_and_trusted_citations(

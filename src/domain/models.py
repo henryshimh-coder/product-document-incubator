@@ -157,6 +157,9 @@ class IssueCard(DomainModel):
     ai_recommendation: NonEmptyStr | None
     ai_confidence: float | None = Field(default=None, ge=0, le=1)
     uncertainty: NonEmptyStr | None
+    validation_note: NonEmptyStr | None = None
+    fingerprint: NonEmptyStr | None = None
+    target_rule_id: NonEmptyStr | None = None
     owner: NonEmptyStr | None
     due_at: datetime | None
     created_at: datetime
