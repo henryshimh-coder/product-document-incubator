@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, date, datetime
 
 import pytest
@@ -8,13 +9,36 @@ from pydantic import ValidationError
 from src.application.dto.query import RunQueryInput
 from src.application.ports.dashboard import ManifestSnapshot
 from src.application.use_cases.run_query import INSUFFICIENT_EVIDENCE_ANSWER, RunQuery
-from src.domain.enums import AuthorityLevel, CallResultMode, KnowledgeStatus, SecurityLevel
+from src.domain.enums import (
+    AuthorityLevel,
+    BaselineStatus,
+    CallResultMode,
+    KnowledgeStatus,
+    SecurityLevel,
+)
 from src.domain.errors import DomainError, OutputValidationError
-from src.domain.models import Baseline, BaselineManifest, KnowledgeCard, SourceRecord
+from src.domain.models import Baseline, BaselineManifest, KnowledgeCard, Project, SourceRecord
+from src.infrastructure.files.query_material_reader import (
+    VerifiedFragment,
+    VerifiedQueryMaterial,
+)
 from src.infrastructure.gateways._common import validate_input
 from src.infrastructure.gateways.schemas import QueryWorkflowInput
 
 NOW = datetime(2026, 7, 29, 7, 0, tzinfo=UTC)
+
+
+def _project(*, allow_external_model: bool = True) -> Project:
+    return Project(
+        id="LLD",
+        name="产品智策",
+        product_line="轻量交付",
+        stage="demo",
+        current_baseline_id="BASE-LLD-724_1",
+        allow_external_model=allow_external_model,
+        created_at=NOW,
+        updated_at=NOW,
+    )
 
 
 def _card(
@@ -48,7 +72,7 @@ def _source(source_id: str = "SRC-001") -> SourceRecord:
         project_id="LLD",
         original_filename="当前产品方案.md",
         archive_path=f"/trusted/{source_id}/当前产品方案.md",
-        sha256="a" * 64,
+        sha256=hashlib.sha256(source_id.encode()).hexdigest(),
         mime_type="text/markdown",
         size_bytes=10_000,
         source_type="formal_document",
@@ -84,6 +108,24 @@ def _manifest(version: str = "LLD-724_1") -> BaselineManifest:
     )
 
 
+def _historical_baseline(**updates) -> Baseline:
+    baseline = Baseline(
+        id="BASE-LLD-700_1",
+        project_id="LLD",
+        version="LLD-700_1",
+        parent_baseline_id=None,
+        status=BaselineStatus.SUPERSEDED,
+        full_document_path="data/baselines/LLD-700_1/full.md",
+        card_snapshot_path="data/baselines/LLD-700_1/cards.json",
+        manifest_sha256="e" * 64,
+        change_request_id=None,
+        approved_by="产品经理",
+        effective_at=NOW,
+        created_at=NOW,
+    )
+    return baseline.model_copy(update=updates)
+
+
 class FakeManifest:
     def __init__(self, events: list[str], manifest: BaselineManifest | None = None) -> None:
         self.events = events
@@ -117,7 +159,8 @@ class FakeKnowledge:
 
 class FakeSources:
     def __init__(self, sources: list[SourceRecord] | None = None) -> None:
-        self.sources = {source.id: source for source in sources or [_source()]}
+        selected = [_source()] if sources is None else sources
+        self.sources = {source.id: source for source in selected}
 
     def get(self, source_id: str) -> SourceRecord:
         if source_id not in self.sources:
@@ -125,13 +168,22 @@ class FakeSources:
         return self.sources[source_id]
 
 
+class FakeProjects:
+    def __init__(self, project: Project | None = None) -> None:
+        self.project = project or _project()
+
+    def get(self, project_id: str) -> Project:
+        return self.project
+
+
 class FakeBaselines:
-    def __init__(self) -> None:
+    def __init__(self, baseline: Baseline | None = None) -> None:
         self.requested: list[tuple[str, str]] = []
+        self.baseline = baseline
 
     def get_by_version(self, project_id: str, version: str) -> Baseline:
         self.requested.append((project_id, version))
-        return Baseline(
+        return self.baseline or Baseline(
             id="BASE-LLD-700_1",
             project_id=project_id,
             version=version,
@@ -154,12 +206,67 @@ class FakeBaselines:
 
 
 class FakeMaterialReader:
-    def __init__(self, total_chars: int = 100_000) -> None:
+    def __init__(
+        self,
+        cards: list[KnowledgeCard] | None = None,
+        total_chars: int = 100_000,
+    ) -> None:
         self._total_chars = total_chars
-        self.calls: list[tuple[str, tuple[str, ...]]] = []
+        self.calls: list[tuple[str, ...]] = []
+        self.baseline_calls: list[dict] = []
+        self.source_calls: list[str] = []
+        self.card_text_by_source: dict[str, list[str]] = {}
+        self.baseline_texts: list[str] = []
+        for card in cards or []:
+            if card.status == KnowledgeStatus.EFFECTIVE:
+                self.baseline_texts.append(card.content)
+            for reference in card.source_refs:
+                source_id = reference.split(":", 1)[0]
+                self.card_text_by_source.setdefault(source_id, []).append(card.content)
 
-    def total_chars(self, baseline_path: str, sources: list[SourceRecord]) -> int:
-        self.calls.append((baseline_path, tuple(source.id for source in sources)))
+    def read_baseline(self, **context) -> VerifiedQueryMaterial:
+        self.baseline_calls.append(context)
+        text = "# 当前产品方案\n## 目标客群\n" + "\n".join(self.baseline_texts)
+        return VerifiedQueryMaterial(
+            source_id=context["asset_id"],
+            filename="full.md",
+            document_version=context["version"],
+            sha256=context["expected_sha256"],
+            text=text,
+            fragments=(
+                VerifiedFragment(
+                    locator="heading:当前产品方案 > 目标客群; line:3",
+                    text="\n".join(self.baseline_texts),
+                ),
+            ),
+            authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+            security_level=SecurityLevel.L2_INTERNAL,
+            is_baseline_asset=True,
+        )
+
+    def read_source(self, source: SourceRecord) -> VerifiedQueryMaterial:
+        self.source_calls.append(source.id)
+        text = "\n".join(self.card_text_by_source.get(source.id, []))
+        return VerifiedQueryMaterial(
+            source_id=source.id,
+            filename=source.original_filename,
+            document_version=source.document_version,
+            sha256=source.sha256,
+            text=text,
+            fragments=(
+                VerifiedFragment(
+                    locator="heading:当前产品方案 > 目标客群; line:1",
+                    text=text,
+                    fragment_id=f"{source.id}-0001",
+                ),
+            ),
+            authority_level=source.authority_level,
+            security_level=source.security_level,
+            is_baseline_asset=False,
+        )
+
+    def total_chars(self, materials: list[VerifiedQueryMaterial]) -> int:
+        self.calls.append(tuple(material.source_id for material in materials))
         return self._total_chars
 
 
@@ -184,7 +291,7 @@ class ProofCheckingGateway:
             "result": {
                 "answer": answer,
                 "effective_rules": [card["id"] for card in cards],
-                "citations": citations[:1],
+                "citations": citations,
                 "candidate_notice": notices.get("candidate"),
                 "conflict_notice": notices.get("conflict"),
                 "baseline_version": self.last_inputs["baseline_version"],
@@ -201,14 +308,18 @@ def _use_case(
     events: list[str] | None = None,
     gateway: ProofCheckingGateway | None = None,
     sources: FakeSources | None = None,
+    manifest: FakeManifest | None = None,
+    material_reader: FakeMaterialReader | None = None,
+    baselines: FakeBaselines | None = None,
 ):
     event_log = events if events is not None else []
     selected_gateway = gateway or ProofCheckingGateway()
-    baselines = FakeBaselines()
-    reader = FakeMaterialReader()
+    selected_baselines = baselines or FakeBaselines()
+    reader = material_reader or FakeMaterialReader(cards)
     use_case = RunQuery(
-        manifest=FakeManifest(event_log),
-        baselines=baselines,
+        manifest=manifest or FakeManifest(event_log),
+        baselines=selected_baselines,
+        projects=FakeProjects(),
         knowledge=FakeKnowledge(event_log, cards),
         sources=sources or FakeSources(),
         material_reader=reader,
@@ -220,7 +331,7 @@ def _use_case(
         unpublished_decisions=(),
         task_id_factory=lambda: "TASK-QUERY-001",
     )
-    return use_case, selected_gateway, baselines, reader
+    return use_case, selected_gateway, selected_baselines, reader
 
 
 def test_query_input_rejects_unknown_fields_blank_question_and_more_than_500_chars() -> None:
@@ -240,6 +351,75 @@ def test_query_input_rejects_unknown_fields_blank_question_and_more_than_500_cha
             scope="effective",
             historical_version=None,
         )
+
+
+def test_query_rejects_external_call_when_project_has_not_authorized_it() -> None:
+    """Catches payload proof creation when the trusted local project forbids external models."""
+    gateway = ProofCheckingGateway()
+    use_case = RunQuery(
+        manifest=FakeManifest([]),
+        baselines=FakeBaselines(),
+        projects=FakeProjects(_project(allow_external_model=False)),
+        knowledge=FakeKnowledge([], [_card("RULE-LLD-001")]),
+        sources=FakeSources(),
+        material_reader=FakeMaterialReader(),
+        gateway=gateway,
+        customer_names=(),
+        strategy_terms=(),
+        financial_terms=(),
+        leader_names=(),
+        unpublished_decisions=(),
+    )
+
+    with pytest.raises(DomainError, match="EXTERNAL_CALL_DENIED"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前目标客群是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is None
+
+
+@pytest.mark.parametrize(
+    ("source_update", "case_id"),
+    [
+        ({"security_level": SecurityLevel.L3_CONFIDENTIAL}, "l3"),
+        ({"security_level": SecurityLevel.L4_RESTRICTED}, "l4"),
+        ({"is_redacted": False}, "unredacted"),
+        ({"allow_external_model": False}, "source-not-authorized"),
+        ({"ingest_status": "processing"}, "not-completed"),
+        ({"applicable_baseline_version": "LLD-OTHER"}, "wrong-version"),
+        ({"project_id": "OTHER"}, "wrong-project"),
+    ],
+)
+def test_query_rejects_ineligible_source_before_proof_or_gateway(
+    source_update: dict,
+    case_id: str,
+) -> None:
+    """Catches unsafe or out-of-scope SourceRecord material crossing the model boundary."""
+    gateway = ProofCheckingGateway()
+    source = _source().model_copy(update=source_update)
+    use_case, _, _, _ = _use_case(
+        [_card("RULE-LLD-001")],
+        gateway=gateway,
+        sources=FakeSources([source]),
+    )
+
+    with pytest.raises(DomainError, match="EXTERNAL_CALL_DENIED"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question=f"当前目标客群是什么？ {case_id}",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is None
 
 
 def test_effective_query_reads_manifest_first_and_never_sends_candidate_cards() -> None:
@@ -317,7 +497,7 @@ def test_notice_source_material_counts_toward_the_real_safety_coverage_denominat
         )
     )
 
-    assert set(reader.calls[0][1]) == {"SRC-001", "SRC-CANDIDATE"}
+    assert set(reader.calls[0]) == {"SRC-001", "SRC-CANDIDATE"}
     assert {item["source_id"] for item in gateway.last_inputs["citations"]} == {"SRC-001"}
 
 
@@ -336,11 +516,62 @@ def test_historical_scope_requires_explicit_version() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "baseline",
+    [
+        _historical_baseline(status=BaselineStatus.DRAFT),
+        _historical_baseline(status=BaselineStatus.FAILED),
+        _historical_baseline(status=BaselineStatus.EFFECTIVE),
+        _historical_baseline(project_id="OTHER"),
+        _historical_baseline(version="LLD-OTHER"),
+        _historical_baseline(version="LLD-724_1"),
+    ],
+    ids=[
+        "draft",
+        "failed",
+        "effective",
+        "wrong-project",
+        "wrong-version",
+        "manifest-current",
+    ],
+)
+def test_historical_query_accepts_only_same_project_superseded_non_current_baseline(
+    baseline: Baseline,
+) -> None:
+    """Catches treating an arbitrary Baseline row as an authorized historical scope."""
+    requested_version = "LLD-724_1" if baseline.version == "LLD-724_1" else "LLD-700_1"
+    use_case, gateway, _, _ = _use_case(
+        [_card("RULE-HISTORY-001", version=requested_version)],
+        baselines=FakeBaselines(baseline),
+    )
+
+    with pytest.raises(DomainError, match="HISTORICAL_VERSION_INVALID"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="历史规则是什么？",
+                scope="historical",
+                historical_version=requested_version,
+            )
+        )
+
+    assert gateway.last_inputs is None
+
+
 def test_historical_query_loads_only_the_explicit_version_without_notices() -> None:
     """Catches historical cards or current notices crossing version boundaries."""
     historical = _card("RULE-HISTORY-001", version="LLD-700_1", content="历史客群规则。")
     current = _card("RULE-LLD-001")
-    use_case, gateway, baselines, reader = _use_case([historical, current])
+    historical_source = _source().model_copy(
+        update={
+            "document_version": "v0.9",
+            "applicable_baseline_version": "LLD-700_1",
+        }
+    )
+    use_case, gateway, baselines, reader = _use_case(
+        [historical, current],
+        sources=FakeSources([historical_source]),
+    )
 
     response = use_case.execute(
         RunQueryInput(
@@ -356,7 +587,8 @@ def test_historical_query_loads_only_the_explicit_version_without_notices() -> N
     assert [item["id"] for item in gateway.last_inputs["effective_cards"]] == ["RULE-HISTORY-001"]
     assert gateway.last_inputs["notices"] == []
     assert response.baseline_version == "LLD-700_1"
-    assert reader.calls[0][0] == "data/baselines/LLD-700_1/full.md"
+    assert reader.baseline_calls == []
+    assert reader.calls[0] == ("SRC-001",)
 
 
 def test_historical_version_choices_exclude_the_manifest_current_version() -> None:
@@ -385,12 +617,138 @@ def test_query_builds_citations_only_from_trusted_local_source_metadata() -> Non
             "source_id": "SRC-001",
             "filename": "当前产品方案.md",
             "document_version": "v1.0",
-            "section": "产品方案 > 目标客群",
+            "section": "heading:当前产品方案 > 目标客群; line:1",
             "excerpt": "当前目标客群是符合准入要求的存量客户。",
             "authority_level": "formal_effective",
         }
     ]
     assert response.citations[0].filename == "当前产品方案.md"
+
+
+def test_missing_source_uses_verified_manifest_asset_not_synthesized_source_metadata() -> None:
+    """Catches fallback citations that invent metadata for a missing SourceRecord."""
+    card = _card(
+        "RULE-LLD-001",
+        source_refs=["SRC-MISSING"],
+    ).model_copy(update={"applicable_scope": "伪造章节"})
+    use_case, gateway, _, reader = _use_case([card], sources=FakeSources([]))
+
+    response = use_case.execute(
+        RunQueryInput(
+            project_id="LLD",
+            question="当前目标客群是什么？",
+            scope="effective",
+            historical_version=None,
+        )
+    )
+
+    assert reader.baseline_calls == [
+        {
+            "project_id": "LLD",
+            "asset_id": "BASE-LLD-724_1",
+            "version": "LLD-724_1",
+            "relative_path": "data/baselines/LLD-724_1/full.md",
+            "expected_sha256": "b" * 64,
+        }
+    ]
+    assert gateway.last_inputs["citations"] == [
+        {
+            "id": "CIT-BASE-LLD-724_1-01",
+            "source_id": "BASE-LLD-724_1",
+            "filename": "full.md",
+            "document_version": "LLD-724_1",
+            "section": "heading:当前产品方案 > 目标客群; line:3",
+            "excerpt": "当前目标客群是符合准入要求的存量客户。",
+            "authority_level": "formal_effective",
+        }
+    ]
+    assert response.citations[0].source_id == "BASE-LLD-724_1"
+
+
+def test_card_text_not_found_in_verified_source_or_baseline_is_rejected() -> None:
+    """Catches a persisted card self-proving its own excerpt without matching real source text."""
+
+    class MismatchReader(FakeMaterialReader):
+        def read_baseline(self, **context):
+            material = super().read_baseline(**context)
+            return material.__class__(
+                **{
+                    **material.__dict__,
+                    "text": "# 当前产品方案\n原文不包含卡片断言。",
+                    "fragments": (VerifiedFragment(locator="line:2", text="原文不包含卡片断言。"),),
+                }
+            )
+
+        def read_source(self, source):
+            material = super().read_source(source)
+            return material.__class__(
+                **{
+                    **material.__dict__,
+                    "text": "来源原文不包含卡片断言。",
+                    "fragments": (
+                        VerifiedFragment(
+                            locator="line:1",
+                            text="来源原文不包含卡片断言。",
+                            fragment_id="SRC-001-0001",
+                        ),
+                    ),
+                }
+            )
+
+    gateway = ProofCheckingGateway()
+    reader = MismatchReader([_card("RULE-LLD-001")])
+    use_case, _, _, _ = _use_case(
+        [_card("RULE-LLD-001")],
+        gateway=gateway,
+        material_reader=reader,
+    )
+
+    with pytest.raises(DomainError, match="CITATION_INVALID"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前目标客群是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is None
+
+
+def test_query_rejects_result_if_manifest_changes_during_gateway_call() -> None:
+    """Catches mixing evidence from one Manifest snapshot with a newer current answer."""
+
+    class ChangingManifest(FakeManifest):
+        def read_snapshot(self):
+            snapshot = super().read_snapshot()
+            if len(self.events) == 1:
+                return snapshot
+            return ManifestSnapshot(
+                snapshot.manifest.model_copy(update={"current_version": "LLD-724_2"}),
+                "e" * 64,
+            )
+
+    events: list[str] = []
+    gateway = ProofCheckingGateway()
+    use_case, _, _, _ = _use_case(
+        [_card("RULE-LLD-001")],
+        gateway=gateway,
+        manifest=ChangingManifest(events),
+    )
+
+    with pytest.raises(DomainError, match="BASELINE_INTEGRITY_FAILED"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前目标客群是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is not None
+    assert events.count("manifest") == 2
 
 
 def test_query_degrades_unsupported_answer_to_the_fixed_insufficient_evidence_copy() -> None:
@@ -402,6 +760,117 @@ def test_query_degrades_unsupported_answer_to_the_fixed_insufficient_evidence_co
         RunQueryInput(
             project_id="LLD",
             question="当前目标客群是什么？",
+            scope="effective",
+            historical_version=None,
+        )
+    )
+
+    assert response.answer == INSUFFICIENT_EVIDENCE_ANSWER
+    assert response.evidence_sufficiency == "insufficient"
+
+
+def test_query_rejects_notice_content_repeated_as_the_answer() -> None:
+    """Catches candidate or conflict notices being promoted into the current answer."""
+
+    class NoticeAnswerGateway(ProofCheckingGateway):
+        def run(self, inputs, *, safety_proof, user=None, timeout_seconds=30):
+            result = super().run(
+                inputs,
+                safety_proof=safety_proof,
+                user=user,
+                timeout_seconds=timeout_seconds,
+            )
+            result["result"]["answer"] = "建议收紧客群。"
+            return result
+
+    cards = [
+        _card("RULE-LLD-001"),
+        _card(
+            "RULE-CANDIDATE-001",
+            status=KnowledgeStatus.CANDIDATE,
+            content="建议收紧客群。",
+            source_refs=["SRC-CANDIDATE"],
+        ),
+    ]
+    use_case, _, _, _ = _use_case(
+        cards,
+        gateway=NoticeAnswerGateway(),
+        sources=FakeSources([_source(), _source("SRC-CANDIDATE")]),
+    )
+
+    with pytest.raises(OutputValidationError, match="NOTICE_CONTENT_IN_ANSWER"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前客群是什么？",
+                scope="effective_with_notices",
+                historical_version=None,
+            )
+        )
+
+
+def test_query_rejects_returned_rule_without_one_of_its_own_citations() -> None:
+    """Catches a cited first rule laundering an uncited second returned rule."""
+
+    class MissingRuleCitationGateway(ProofCheckingGateway):
+        def run(self, inputs, *, safety_proof, user=None, timeout_seconds=30):
+            result = super().run(
+                inputs,
+                safety_proof=safety_proof,
+                user=user,
+                timeout_seconds=timeout_seconds,
+            )
+            result["result"]["citations"] = result["result"]["citations"][:1]
+            return result
+
+    cards = [
+        _card("RULE-LLD-001"),
+        _card(
+            "RULE-LLD-002",
+            content="当前客群需通过实名认证。",
+            source_refs=["SRC-002"],
+        ),
+    ]
+    use_case, _, _, _ = _use_case(
+        cards,
+        gateway=MissingRuleCitationGateway(),
+        sources=FakeSources([_source(), _source("SRC-002")]),
+    )
+
+    with pytest.raises(OutputValidationError, match="EFFECTIVE_RULE_CITATION_MISSING"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前客群规则是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+
+def test_query_degrades_when_any_answer_claim_lacks_one_way_excerpt_support() -> None:
+    """Catches symmetric substring matching accepting an extra unsupported assertion."""
+
+    class ExtraClaimGateway(ProofCheckingGateway):
+        def run(self, inputs, *, safety_proof, user=None, timeout_seconds=30):
+            result = super().run(
+                inputs,
+                safety_proof=safety_proof,
+                user=user,
+                timeout_seconds=timeout_seconds,
+            )
+            result["result"]["answer"] += "额外的新断言。"
+            return result
+
+    use_case, _, _, _ = _use_case(
+        [_card("RULE-LLD-001")],
+        gateway=ExtraClaimGateway(),
+    )
+
+    response = use_case.execute(
+        RunQueryInput(
+            project_id="LLD",
+            question="当前客群是什么？",
             scope="effective",
             historical_version=None,
         )
@@ -462,7 +931,7 @@ def test_query_caps_effective_cards_notices_and_citations_at_schema_limits() -> 
     source_ids = [reference for card in effective for reference in card.source_refs]
     use_case, gateway, _, _ = _use_case(
         effective + notices,
-        sources=FakeSources([_source(source_id) for source_id in source_ids]),
+        sources=FakeSources([_source(), *[_source(source_id) for source_id in source_ids]]),
     )
 
     use_case.execute(

@@ -165,6 +165,7 @@ def build_container(
     query_service = RunQuery(
         manifest=ManifestStore(manifest_path),
         baselines=SqliteBaselineRepository(db_path),
+        projects=SqliteProjectRepository(db_path),
         knowledge=SqliteKnowledgeRepository(db_path),
         sources=SqliteSourceRepository(db_path),
         material_reader=LocalQueryMaterialReader(project_root),

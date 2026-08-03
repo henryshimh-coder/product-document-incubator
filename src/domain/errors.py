@@ -35,6 +35,7 @@ class ErrorCode(StrEnum):
     OUTBOUND_COVERAGE_EXCEEDED = "OUTBOUND_COVERAGE_EXCEEDED"
     INGEST_PERSISTENCE_FAILED = "INGEST_PERSISTENCE_FAILED"
     HISTORICAL_VERSION_REQUIRED = "HISTORICAL_VERSION_REQUIRED"
+    HISTORICAL_VERSION_INVALID = "HISTORICAL_VERSION_INVALID"
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
         retryable=True,
     ),
     ErrorCode.HISTORICAL_VERSION_REQUIRED: ErrorDefinition("历史查询必须指定产品版本"),
+    ErrorCode.HISTORICAL_VERSION_INVALID: ErrorDefinition("指定的版本不是可查询的历史基线"),
 }
 
 

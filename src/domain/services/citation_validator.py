@@ -13,10 +13,32 @@ TRUSTED_METADATA_FIELDS = (
     "section",
     "excerpt",
 )
+_CLAIM_SEPARATOR = re.compile(r"[。！？!?；;\n]+")
 
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()
+
+
+def contains_normalized_statement(text: str, statement: str) -> bool:
+    """Return whether a complete normalized statement occurs in the surrounding text."""
+    normalized_text = _normalize_text(text)
+    normalized_statement = _normalize_text(statement)
+    return bool(normalized_statement) and normalized_statement in normalized_text
+
+
+def all_claims_have_direct_support(
+    answer: str,
+    citations: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Require every answer sentence to occur one-way inside at least one excerpt."""
+    claims = [
+        _normalize_text(claim) for claim in _CLAIM_SEPARATOR.split(answer) if _normalize_text(claim)
+    ]
+    excerpts = [_normalize_text(str(citation.get("excerpt", ""))) for citation in citations]
+    return bool(claims) and all(
+        any(claim in excerpt for excerpt in excerpts if excerpt) for claim in claims
+    )
 
 
 class CitationValidator:

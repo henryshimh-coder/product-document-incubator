@@ -7,7 +7,11 @@ from pydantic import ValidationError
 
 from src.application.ports.workflow_gateway import WorkflowGateway
 from src.domain.errors import OutputValidationError
-from src.domain.services.citation_validator import CitationValidator
+from src.domain.services.citation_validator import (
+    CitationValidator,
+    all_claims_have_direct_support,
+    contains_normalized_statement,
+)
 from src.infrastructure.gateways._common import OutboundSafetyProof, invoke, validate_input
 from src.infrastructure.gateways.schemas import QueryWorkflowInput, QueryWorkflowOutput
 
@@ -48,6 +52,14 @@ class QueryGateway:
         trusted_rule_ids = {card["id"] for card in validated_inputs["effective_cards"]}
         if not set(output.effective_rules) <= trusted_rule_ids:
             raise OutputValidationError("UNKNOWN_EFFECTIVE_RULE")
+        returned_citation_ids = {citation.id for citation in output.citations}
+        citation_ids_by_rule = {
+            card["id"]: set(card["source_citations"])
+            for card in validated_inputs["effective_cards"]
+        }
+        for rule_id in output.effective_rules:
+            if not returned_citation_ids & citation_ids_by_rule[rule_id]:
+                raise OutputValidationError("EFFECTIVE_RULE_CITATION_MISSING")
         trusted_notices = {
             notice_type: {
                 notice["summary"]
@@ -66,9 +78,14 @@ class QueryGateway:
             and output.conflict_notice not in trusted_notices["conflict"]
         ):
             raise OutputValidationError("UNKNOWN_CONFLICT_NOTICE")
-        if not any(
-            validator.has_direct_support(output.answer, citation.model_dump(mode="json"))
-            for citation in output.citations
+        if any(
+            contains_normalized_statement(output.answer, notice["summary"])
+            for notice in validated_inputs["notices"]
+        ):
+            raise OutputValidationError("NOTICE_CONTENT_IN_ANSWER")
+        if output.evidence_sufficiency == "insufficient" or not all_claims_have_direct_support(
+            output.answer,
+            [citation.model_dump(mode="json") for citation in output.citations],
         ):
             output = output.model_copy(
                 update={

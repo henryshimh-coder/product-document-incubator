@@ -714,6 +714,50 @@ def test_query_gateway_rejects_unknown_citation():
         _run_gateway("query", FakeDifyClient(output), _query_input())
 
 
+def test_query_gateway_rejects_notice_content_promoted_into_answer():
+    """Catches a trusted notice being restated as if it were the effective answer."""
+    output = _query_output()
+    output["answer"] = "候选意见尚未生效。"
+
+    with pytest.raises(OutputValidationError, match="NOTICE_CONTENT_IN_ANSWER"):
+        _run_gateway("query", FakeDifyClient(output), _query_input())
+
+
+def test_query_gateway_rejects_returned_rule_without_its_own_citation():
+    """Catches one cited rule laundering a second uncited effective rule."""
+    inputs = _query_input()
+    second_citation = {
+        **_citation(),
+        "id": "CIT-BASE-002",
+        "excerpt": "当前客群必须完成实名认证。",
+    }
+    inputs["effective_cards"].append(
+        {
+            "id": "RULE-002",
+            "title": "实名认证",
+            "content": second_citation["excerpt"],
+            "source_citations": [second_citation["id"]],
+        }
+    )
+    inputs["citations"].append(second_citation)
+    output = _query_output()
+    output["effective_rules"].append("RULE-002")
+
+    with pytest.raises(OutputValidationError, match="EFFECTIVE_RULE_CITATION_MISSING"):
+        _run_gateway("query", FakeDifyClient(output), inputs)
+
+
+def test_query_gateway_degrades_answer_with_an_unsupported_extra_claim():
+    """Catches symmetric substring support accepting a cited sentence plus a new assertion."""
+    output = _query_output()
+    output["answer"] += "所有新客户也已纳入。"
+
+    result = _run_gateway("query", FakeDifyClient(output), _query_input())
+
+    assert result["result"]["evidence_sufficiency"] == "insufficient"
+    assert result["result"]["answer"] == "现有证据不足，无法给出确定性结论。"
+
+
 @pytest.mark.parametrize("reported_sufficiency", ["sufficient", "insufficient"])
 def test_query_gateway_replaces_unsupported_answer_with_insufficient_evidence_notice(
     reported_sufficiency: str,

@@ -2,23 +2,29 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
 from pydantic import ValidationError
 
 from src.application.dto.query import RunQueryInput
-from src.application.ports.dashboard import ManifestReader
+from src.application.ports.dashboard import ManifestReader, ManifestSnapshot
 from src.application.ports.repositories import (
     BaselineRepository,
     KnowledgeRepository,
+    ProjectRepository,
     SourceRepository,
 )
 from src.domain.enums import BaselineStatus, KnowledgeStatus, SecurityLevel
 from src.domain.errors import DomainError, ErrorCode, OutputValidationError
-from src.domain.models import Citation, KnowledgeCard, QueryResponse, SourceRecord
-from src.domain.services.citation_validator import CitationValidator
+from src.domain.models import Citation, KnowledgeCard, Project, QueryResponse, SourceRecord
+from src.domain.policies.security_policy import can_call_external_model
+from src.domain.services.citation_validator import (
+    CitationValidator,
+    all_claims_have_direct_support,
+    contains_normalized_statement,
+)
+from src.infrastructure.files.query_material_reader import VerifiedQueryMaterial
 from src.infrastructure.gateways._common import create_outbound_safety_proof
 from src.infrastructure.gateways.schemas import QueryWorkflowInput
 
@@ -37,7 +43,19 @@ class QueryWorkflowGateway(Protocol):
 
 
 class QueryMaterialReader(Protocol):
-    def total_chars(self, baseline_path: str, sources: list[SourceRecord]) -> int: ...
+    def read_baseline(
+        self,
+        *,
+        project_id: str,
+        asset_id: str,
+        version: str,
+        relative_path: str,
+        expected_sha256: str,
+    ) -> VerifiedQueryMaterial: ...
+
+    def read_source(self, source: SourceRecord) -> VerifiedQueryMaterial: ...
+
+    def total_chars(self, materials: list[VerifiedQueryMaterial]) -> int: ...
 
 
 class RunQuery:
@@ -46,6 +64,7 @@ class RunQuery:
         *,
         manifest: ManifestReader,
         baselines: BaselineRepository,
+        projects: ProjectRepository,
         knowledge: KnowledgeRepository,
         sources: SourceRepository,
         material_reader: QueryMaterialReader,
@@ -60,6 +79,7 @@ class RunQuery:
     ) -> None:
         self.manifest = manifest
         self.baselines = baselines
+        self.projects = projects
         self.knowledge = knowledge
         self.sources = sources
         self.material_reader = material_reader
@@ -79,21 +99,37 @@ class RunQuery:
         return tuple(
             baseline.version
             for baseline in self.baselines.list_for_project(project_id)
-            if baseline.status == BaselineStatus.SUPERSEDED
+            if baseline.project_id == project_id
+            and baseline.status == BaselineStatus.SUPERSEDED
             and baseline.version != manifest.current_version
         )
 
     def execute(self, command: RunQueryInput) -> QueryResponse:
-        version, baseline_path = self._resolve_scope(command)
+        project = self.projects.get(command.project_id)
+        if project.id != command.project_id or not project.allow_external_model:
+            raise DomainError(ErrorCode.EXTERNAL_CALL_DENIED, "QUERY_PROJECT_NOT_AUTHORIZED")
+
+        snapshot_before = self.manifest.read_snapshot()
+        if snapshot_before.manifest.project_id != command.project_id:
+            raise DomainError(
+                ErrorCode.BASELINE_INTEGRITY_FAILED,
+                "QUERY_MANIFEST_PROJECT_MISMATCH",
+            )
+        version, baseline_material = self._resolve_scope(command, snapshot_before)
         cards = self._effective_cards(command.project_id, version)
         notice_cards = self._notice_cards(command, version)
-        notices = self._notices(notice_cards)
-        effective_cards, citations, source_records = self._trusted_evidence(
+        effective_cards, citations, evidence_materials, card_citation_ids = self._trusted_evidence(
             cards,
-            baseline_path=baseline_path,
+            project=project,
+            version=version,
+            baseline_material=baseline_material,
+        )
+        notices, notice_materials = self._trusted_notices(
+            notice_cards,
+            project=project,
             version=version,
         )
-        source_records = self._include_notice_sources(source_records, notice_cards)
+        supporting_materials = _unique_materials(evidence_materials + notice_materials)
         inputs = QueryWorkflowInput(
             schema_version=self.schema_version,
             project_id=command.project_id,
@@ -106,11 +142,11 @@ class RunQuery:
             notices=notices,
             citations=citations,
         ).model_dump(mode="json")
-        source_total_chars = self.material_reader.total_chars(baseline_path, source_records)
+        source_total_chars = self.material_reader.total_chars(supporting_materials)
         proof = create_outbound_safety_proof(
             QueryWorkflowInput,
             inputs,
-            security_level=SecurityLevel.L2_INTERNAL,
+            security_level=_proof_security_level(supporting_materials),
             customer_names=self.customer_names,
             strategy_terms=self.strategy_terms,
             financial_terms=self.financial_terms,
@@ -119,28 +155,54 @@ class RunQuery:
             source_total_chars=source_total_chars,
         )
         gateway_result = self.gateway.run(inputs, safety_proof=proof, user=command.project_id)
+        snapshot_after = self.manifest.read_snapshot()
+        if snapshot_after != snapshot_before:
+            raise DomainError(
+                ErrorCode.BASELINE_INTEGRITY_FAILED,
+                "MANIFEST_CHANGED_DURING_QUERY",
+            )
         return self._validate_response(
             gateway_result,
             version=version,
             cards=cards,
+            card_citation_ids=card_citation_ids,
             citations=citations,
             notices=notices,
         )
 
-    def _resolve_scope(self, command: RunQueryInput) -> tuple[str, str]:
+    def _resolve_scope(
+        self,
+        command: RunQueryInput,
+        snapshot: ManifestSnapshot,
+    ) -> tuple[str, VerifiedQueryMaterial | None]:
+        manifest = snapshot.manifest
         if command.scope == "historical":
             if command.historical_version is None:
                 raise DomainError(ErrorCode.HISTORICAL_VERSION_REQUIRED)
-            baseline = self.baselines.get_by_version(
-                command.project_id,
-                command.historical_version,
-            )
-            return baseline.version, baseline.full_document_path
-        snapshot = self.manifest.read_snapshot()
-        manifest = snapshot.manifest
-        if manifest.project_id != command.project_id:
-            raise ValueError("query project does not match baseline manifest project")
-        return manifest.current_version, manifest.full_document_path
+            try:
+                baseline = self.baselines.get_by_version(
+                    command.project_id,
+                    command.historical_version,
+                )
+            except KeyError as error:
+                raise DomainError(ErrorCode.HISTORICAL_VERSION_INVALID) from error
+            if (
+                baseline.project_id != command.project_id
+                or baseline.version != command.historical_version
+                or baseline.status != BaselineStatus.SUPERSEDED
+                or baseline.version == manifest.current_version
+            ):
+                raise DomainError(ErrorCode.HISTORICAL_VERSION_INVALID)
+            return baseline.version, None
+
+        baseline_material = self.material_reader.read_baseline(
+            project_id=command.project_id,
+            asset_id=manifest.current_baseline_id,
+            version=manifest.current_version,
+            relative_path=manifest.full_document_path,
+            expected_sha256=manifest.full_document_sha256,
+        )
+        return manifest.current_version, baseline_material
 
     def _effective_cards(self, project_id: str, version: str) -> list[KnowledgeCard]:
         return [
@@ -165,90 +227,162 @@ class RunQuery:
         notice_cards.sort(key=lambda card: (order[card.status], card.id))
         return notice_cards[:20]
 
-    @staticmethod
-    def _notices(notice_cards: list[KnowledgeCard]) -> list[dict[str, str]]:
-        return [
-            {
-                "type": "candidate" if card.status == KnowledgeStatus.CANDIDATE else "conflict",
-                "id": card.id,
-                "summary": card.content,
-            }
-            for card in notice_cards
-        ]
-
-    def _include_notice_sources(
-        self,
-        source_records: list[SourceRecord],
-        notice_cards: list[KnowledgeCard],
-    ) -> list[SourceRecord]:
-        records = {source.id: source for source in source_records}
-        for card in notice_cards:
-            for reference in card.source_refs:
-                source_id = reference.split(":", 1)[0]
-                try:
-                    source = self.sources.get(source_id)
-                except KeyError:
-                    continue
-                if source.project_id == card.project_id:
-                    records[source.id] = source
-        return list(records.values())
-
     def _trusted_evidence(
         self,
         cards: list[KnowledgeCard],
         *,
-        baseline_path: str,
+        project: Project,
         version: str,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[SourceRecord]]:
+        baseline_material: VerifiedQueryMaterial | None,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[VerifiedQueryMaterial],
+        dict[str, set[str]],
+    ]:
+        source_materials = self._verified_source_materials(cards, project=project, version=version)
         citations: list[dict[str, Any]] = []
-        card_citation_ids: dict[str, list[str]] = {card.id: [] for card in cards}
-        source_records: dict[str, SourceRecord] = {}
+        supporting_materials: list[VerifiedQueryMaterial] = []
+        card_citation_ids: dict[str, set[str]] = {card.id: set() for card in cards}
         counters: Counter[str] = Counter()
+        candidates_by_card: dict[
+            str,
+            list[tuple[VerifiedQueryMaterial, str]],
+        ] = {}
 
-        references: list[tuple[KnowledgeCard, str]] = []
-        references.extend((card, card.source_refs[0]) for card in cards)
-        references.extend((card, ref) for card in cards for ref in card.source_refs[1:])
-        for card, reference in references:
-            if len(citations) >= 50:
-                break
-            source_id = reference.split(":", 1)[0]
-            try:
-                source = self.sources.get(source_id)
-            except KeyError:
-                source = None
-            if source is not None and source.project_id == card.project_id:
-                source_records[source.id] = source
-                filename = source.original_filename
-                document_version = source.document_version
-                authority_level = source.authority_level
-            else:
-                filename = Path(baseline_path).name
-                document_version = version
-                authority_level = card.authority_level
-            counters[source_id] += 1
-            citation_id = f"CIT-{source_id}-{counters[source_id]:02d}"
-            citation = Citation(
-                id=citation_id,
-                source_id=source_id,
-                filename=filename,
-                document_version=document_version,
-                section=card.applicable_scope,
-                excerpt=card.content,
-                authority_level=authority_level,
-            ).model_dump(mode="json")
+        for card in cards:
+            seen_evidence: set[tuple[str, str]] = set()
+            candidates: list[tuple[VerifiedQueryMaterial, str]] = []
+            for reference in card.source_refs:
+                source_id, fragment_id = _split_reference(reference)
+                material = source_materials.get(source_id)
+                fragment = _supporting_fragment(material, card.content, fragment_id)
+                if fragment is None:
+                    continue
+                key = (material.source_id, fragment.locator)
+                if key in seen_evidence:
+                    continue
+                seen_evidence.add(key)
+                candidates.append((material, fragment.locator))
+
+            if not candidates and baseline_material is not None:
+                fragment = _supporting_fragment(baseline_material, card.content)
+                if fragment is not None:
+                    candidates.append((baseline_material, fragment.locator))
+
+            if not candidates:
+                raise DomainError(
+                    ErrorCode.CITATION_INVALID,
+                    f"QUERY_CARD_SOURCE_TEXT_MISMATCH:{card.id}",
+                )
+            candidates_by_card[card.id] = candidates
+
+        citation_candidates = [(card, candidates_by_card[card.id][0]) for card in cards]
+        citation_candidates.extend(
+            (card, candidate) for card in cards for candidate in candidates_by_card[card.id][1:]
+        )
+        for card, (material, locator) in citation_candidates[:50]:
+            citation = _build_citation(material, locator, card.content, counters)
             citations.append(citation)
-            card_citation_ids[card.id].append(citation_id)
+            card_citation_ids[card.id].add(citation["id"])
+            supporting_materials.append(material)
 
         effective_cards = [
             {
                 "id": card.id,
                 "title": card.title,
                 "content": card.content,
-                "source_citations": card_citation_ids[card.id],
+                "source_citations": sorted(card_citation_ids[card.id]),
             }
             for card in cards
         ]
-        return effective_cards, citations, list(source_records.values())
+        return effective_cards, citations, supporting_materials, card_citation_ids
+
+    def _trusted_notices(
+        self,
+        cards: list[KnowledgeCard],
+        *,
+        project: Project,
+        version: str,
+    ) -> tuple[list[dict[str, str]], list[VerifiedQueryMaterial]]:
+        source_materials = self._verified_source_materials(cards, project=project, version=version)
+        notices: list[dict[str, str]] = []
+        supporting_materials: list[VerifiedQueryMaterial] = []
+        for card in cards:
+            supporting = None
+            for reference in card.source_refs:
+                source_id, fragment_id = _split_reference(reference)
+                material = source_materials.get(source_id)
+                if _supporting_fragment(material, card.content, fragment_id) is not None:
+                    supporting = material
+                    break
+            if supporting is None:
+                raise DomainError(
+                    ErrorCode.CITATION_INVALID,
+                    f"QUERY_NOTICE_SOURCE_TEXT_MISMATCH:{card.id}",
+                )
+            notices.append(
+                {
+                    "type": (
+                        "candidate" if card.status == KnowledgeStatus.CANDIDATE else "conflict"
+                    ),
+                    "id": card.id,
+                    "summary": card.content,
+                }
+            )
+            supporting_materials.append(supporting)
+        return notices, supporting_materials
+
+    def _verified_source_materials(
+        self,
+        cards: list[KnowledgeCard],
+        *,
+        project: Project,
+        version: str,
+    ) -> dict[str, VerifiedQueryMaterial]:
+        materials: dict[str, VerifiedQueryMaterial] = {}
+        for card in cards:
+            for reference in card.source_refs:
+                source_id, _ = _split_reference(reference)
+                if source_id in materials:
+                    continue
+                try:
+                    source = self.sources.get(source_id)
+                except KeyError:
+                    continue
+                self._require_source_eligible(source, project=project, version=version)
+                material = self.material_reader.read_source(source)
+                if (
+                    material.source_id != source.id
+                    or material.document_version != source.document_version
+                    or material.sha256 != source.sha256
+                    or material.security_level != source.security_level
+                    or material.is_baseline_asset
+                ):
+                    raise DomainError(
+                        ErrorCode.CITATION_INVALID,
+                        f"QUERY_SOURCE_MATERIAL_MISMATCH:{source.id}",
+                    )
+                materials[source_id] = material
+        return materials
+
+    @staticmethod
+    def _require_source_eligible(
+        source: SourceRecord,
+        *,
+        project: Project,
+        version: str,
+    ) -> None:
+        if (
+            source.project_id != project.id
+            or source.applicable_baseline_version != version
+            or source.ingest_status != "completed"
+            or not can_call_external_model(project, source)
+        ):
+            raise DomainError(
+                ErrorCode.EXTERNAL_CALL_DENIED,
+                f"QUERY_SOURCE_NOT_AUTHORIZED:{source.id}",
+            )
 
     def _validate_response(
         self,
@@ -256,6 +390,7 @@ class RunQuery:
         *,
         version: str,
         cards: list[KnowledgeCard],
+        card_citation_ids: dict[str, set[str]],
         citations: list[dict[str, Any]],
         notices: list[dict[str, str]],
     ) -> QueryResponse:
@@ -271,6 +406,11 @@ class RunQuery:
         validator = CitationValidator(citations)
         for citation in response.citations:
             validator.validate(citation.model_dump(mode="json"))
+        returned_citation_ids = {citation.id for citation in response.citations}
+        for rule_id in response.effective_rules:
+            if not returned_citation_ids & card_citation_ids[rule_id]:
+                raise OutputValidationError("EFFECTIVE_RULE_CITATION_MISSING")
+
         allowed_notices = {
             notice_type: {notice["summary"] for notice in notices if notice["type"] == notice_type}
             for notice_type in ("candidate", "conflict")
@@ -285,9 +425,15 @@ class RunQuery:
             and response.conflict_notice not in allowed_notices["conflict"]
         ):
             raise OutputValidationError("UNKNOWN_CONFLICT_NOTICE")
-        directly_supported = any(
-            validator.has_direct_support(response.answer, citation.model_dump(mode="json"))
-            for citation in response.citations
+
+        if any(
+            contains_normalized_statement(response.answer, notice["summary"]) for notice in notices
+        ):
+            raise OutputValidationError("NOTICE_CONTENT_IN_ANSWER")
+
+        directly_supported = all_claims_have_direct_support(
+            response.answer,
+            [citation.model_dump(mode="json") for citation in response.citations],
         )
         if response.evidence_sufficiency == "insufficient" or not directly_supported:
             response = response.model_copy(
@@ -297,3 +443,46 @@ class RunQuery:
                 }
             )
         return response
+
+
+def _split_reference(reference: str) -> tuple[str, str | None]:
+    source_id, separator, fragment_id = reference.partition(":")
+    return source_id, fragment_id if separator and fragment_id else None
+
+
+def _supporting_fragment(material, excerpt: str, fragment_id: str | None = None):
+    if material is None:
+        return None
+    for fragment in material.fragments:
+        if fragment_id is not None and fragment.fragment_id != fragment_id:
+            continue
+        if excerpt in fragment.text:
+            return fragment
+    return None
+
+
+def _build_citation(material, locator: str, excerpt: str, counters: Counter[str]) -> dict[str, Any]:
+    counters[material.source_id] += 1
+    citation = Citation(
+        id=f"CIT-{material.source_id}-{counters[material.source_id]:02d}",
+        source_id=material.source_id,
+        filename=material.filename,
+        document_version=material.document_version,
+        section=locator,
+        excerpt=excerpt,
+        authority_level=material.authority_level,
+    )
+    return citation.model_dump(mode="json")
+
+
+def _unique_materials(materials: list[VerifiedQueryMaterial]) -> list[VerifiedQueryMaterial]:
+    unique: dict[str, VerifiedQueryMaterial] = {}
+    for material in materials:
+        unique.setdefault(material.sha256, material)
+    return list(unique.values())
+
+
+def _proof_security_level(materials: list[VerifiedQueryMaterial]) -> SecurityLevel:
+    if any(material.security_level == SecurityLevel.L2_INTERNAL for material in materials):
+        return SecurityLevel.L2_INTERNAL
+    return SecurityLevel.L1_PUBLIC_SIMULATED

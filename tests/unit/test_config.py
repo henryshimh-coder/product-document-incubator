@@ -111,6 +111,7 @@ def test_build_container_runs_real_query_vertical_slice_with_manifest_and_truste
 ):
     """Catches a page-only query implementation or a composition root bypassing safety proof."""
     import json
+    import sqlite3
     from datetime import UTC, date, datetime
 
     import httpx
@@ -151,6 +152,8 @@ app:
         body.encode(),
     )
     db_path = tmp_path / "data/local_state/product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("UPDATE projects SET allow_external_model = 1 WHERE id = 'LLD'")
     SqliteSourceRepository(db_path).add(
         SourceRecord(
             id="SRC-001",

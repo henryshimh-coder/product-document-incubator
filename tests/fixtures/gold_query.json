@@ -4,6 +4,7 @@
     "question": "当前目标客群是什么？",
     "scope": "effective",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前目标客群是符合准入要求的存量客户。",
     "required_card_ids": ["RULE-LLD-001"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-001-01"]
@@ -13,6 +14,7 @@
     "question": "当前产品的核心价值是什么？",
     "scope": "effective",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前产品的核心价值是缩短产品口径查找时间。",
     "required_card_ids": ["RULE-LLD-002"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-002-01"]
@@ -22,6 +24,7 @@
     "question": "当前产品范围包含哪些内容？",
     "scope": "effective",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前产品范围包含资料导入、当前查询和变更追溯。",
     "required_card_ids": ["RULE-LLD-003"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-003-01"]
@@ -31,6 +34,7 @@
     "question": "当前的主要使用场景是什么？",
     "scope": "effective",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前主要使用场景是会前查口径和会后追决策。",
     "required_card_ids": ["RULE-LLD-004"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-004-01"]
@@ -40,6 +44,7 @@
     "question": "当前规则的适用条件是什么？",
     "scope": "effective",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前规则仅适用于已完成实名认证的客户。",
     "required_card_ids": ["RULE-LLD-005"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-005-01"]
@@ -49,6 +54,7 @@
     "question": "当前版本有哪些关键约束？",
     "scope": "effective",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前版本的关键约束是候选内容不得作为生效规则。",
     "required_card_ids": ["RULE-LLD-006"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-006-01"]
@@ -58,6 +64,7 @@
     "question": "当前版本的权威口径是什么？",
     "scope": "effective",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前版本仅以 Manifest 指向的基线为权威口径。",
     "required_card_ids": ["RULE-LLD-007"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-007-01"]
@@ -67,6 +74,7 @@
     "question": "当前结论有候选变化吗？",
     "scope": "effective_with_notices",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前结论与候选变化分开展示。",
     "required_card_ids": ["RULE-LLD-008"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-008-01"]
@@ -76,6 +84,7 @@
     "question": "当前结论的直接依据是什么？",
     "scope": "effective_with_notices",
     "expected_version": "LLD-724_1",
+    "expected_answer": "当前结论的直接依据是可回溯的正式材料原文。",
     "required_card_ids": ["RULE-LLD-009"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001"],
     "required_citation_ids": ["CIT-SRC-009-01"]
@@ -86,6 +95,7 @@
     "scope": "historical",
     "historical_version": "LLD-700_1",
     "expected_version": "LLD-700_1",
+    "expected_answer": "LLD-700_1 的历史规则是仅服务已签约客户。",
     "required_card_ids": ["RULE-HISTORY-001"],
     "forbidden_card_ids": ["RULE-CANDIDATE-001", "RULE-LLD-001"],
     "required_citation_ids": ["CIT-SRC-HISTORY-01"]
