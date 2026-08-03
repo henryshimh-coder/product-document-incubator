@@ -306,6 +306,25 @@ class ImportSource:
             cache_generated_at=cache_generated_at,
             result_items=self._result_views(result, effective_cards),
         )
+        if result_mode == CallResultMode.LOCAL_ONLY:
+            self.sources.update_ingest_status(source.id, "local_checked")
+            self.event_logger.record(
+                EventLog(
+                    id=f"EVENT-{uuid4().hex.upper()}",
+                    project_id=source.project_id,
+                    event_type="source_ingest_local_checked",
+                    entity_type="source",
+                    entity_id=source.id,
+                    actor="system",
+                    correlation_id=correlation_id,
+                    payload={
+                        "status": "local_checked",
+                        "result_mode": CallResultMode.LOCAL_ONLY.value,
+                    },
+                    created_at=finished_at,
+                )
+            )
+            return report
         event = EventLog(
             id=f"EVENT-INGEST-{source.sha256[:16].upper()}",
             project_id=source.project_id,
@@ -329,11 +348,18 @@ class ImportSource:
                     if report.cache_generated_at is None
                     else report.cache_generated_at.isoformat()
                 ),
+                "result_items": [item.model_dump(mode="json") for item in report.result_items],
             },
             created_at=finished_at,
         )
         try:
-            self.unit_of_work.complete(source, cards, relations, issues, event)
+            audit_reconciliation_pending = self.unit_of_work.complete(
+                source,
+                cards,
+                relations,
+                issues,
+                event,
+            )
         except sqlite3.Error as error:
             self.sources.update_ingest_status(source.id, "persistence_failed")
             self._record_safe_event(
@@ -345,6 +371,8 @@ class ImportSource:
                 ErrorCode.INGEST_PERSISTENCE_FAILED,
                 "SQLITE_TRANSACTION_ROLLED_BACK",
             ) from error
+        if audit_reconciliation_pending:
+            report = report.model_copy(update={"audit_reconciliation_pending": True})
         if result_mode == CallResultMode.REALTIME:
             try:
                 self.cache.put(identity, result.model_dump(mode="json"))

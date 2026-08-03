@@ -73,6 +73,44 @@ class InvalidSemanticClient(FakeDifyClient):
         return response
 
 
+class SameTitleMultiTypeClient(FakeDifyClient):
+    def run(self, **kwargs: Any) -> dict[str, Any]:
+        response = super().run(**kwargs)
+        conflict = response["result"]["items"][0]
+        conflict["title"] = "同名审查项"
+        candidate = deepcopy(conflict)
+        candidate.update(
+            {
+                "item_id": "ITEM-CANDIDATE-001",
+                "content": "建议形成候选变更。",
+                "result_type": "candidate",
+                "status": "candidate",
+                "uncertainty": "待正式批准",
+            }
+        )
+        gap = deepcopy(conflict)
+        gap.update(
+            {
+                "item_id": "ITEM-GAP-001",
+                "content": "缺少目标客群统计口径。",
+                "target_card_id": None,
+                "result_type": "information_gap",
+                "status": "ai_inferred",
+                "uncertainty": "需补充材料",
+            }
+        )
+        response["result"]["items"] = [conflict, candidate, gap]
+        response["result"]["relations"] = [
+            response["result"]["relations"][0],
+            {
+                "source_id": "ITEM-CANDIDATE-001",
+                "relation_type": "proposes_change_to",
+                "target_id": "RULE-001",
+            },
+        ]
+        return response
+
+
 def _workflow_output(inputs: dict[str, Any]) -> dict[str, Any]:
     chunk = inputs["source_chunks"][0]
     source = inputs["source"]
@@ -327,6 +365,37 @@ def test_completed_duplicate_revalidates_manifest_and_command_metadata(
     assert SqliteSourceRepository(db_path).list_for_project("LLD")[0].ingest_status == "completed"
 
 
+def test_duplicate_restores_exact_same_title_candidate_conflict_and_gap_display_items(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = SameTitleMultiTypeClient()
+    use_case, content, db_path, _ = _prepare(tmp_path, monkeypatch, client)
+
+    first = use_case.execute(_command(content))
+    duplicate = use_case.execute(_command(content, preferred_mode="cache"))
+
+    assert first.candidate_count == 1
+    assert first.conflict_count == 1
+    assert [item.status for item in first.result_items] == [
+        "conflict",
+        "candidate",
+        "ai_inferred",
+    ]
+    assert duplicate.duplicate is True
+    assert duplicate.result_items == first.result_items
+    assert client.calls == 1
+    with sqlite3.connect(db_path) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM event_logs "
+                "WHERE entity_id = ? AND event_type = 'source_ingest_completed'",
+                (first.source_id,),
+            ).fetchone()[0]
+        )
+    assert payload["result_items"] == [item.model_dump(mode="json") for item in first.result_items]
+
+
 def test_timeout_keeps_archive_and_recovers_same_source_from_exact_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -517,6 +586,48 @@ def test_short_document_reports_coverage_budget_without_model_audit_and_allows_l
         assert connection.execute("SELECT COUNT(*) FROM model_call_logs").fetchone()[0] == 0
 
 
+def test_local_check_is_traceable_but_does_not_occupy_completed_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeDifyClient()
+    use_case, content, db_path, _ = _prepare(tmp_path, monkeypatch, client)
+    command = _command(content)
+
+    local_report = use_case.execute(command.model_copy(update={"preferred_mode": "local"}))
+
+    assert local_report.result_mode == "local_only"
+    assert local_report.created_card_ids == []
+    assert client.calls == 0
+    source = SqliteSourceRepository(db_path).get(local_report.source_id)
+    assert source.ingest_status == "local_checked"
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM knowledge_cards").fetchone()[0] == 1
+        event_types = {
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM event_logs WHERE entity_id = ?", (source.id,)
+            ).fetchall()
+        }
+    assert event_types == {"source_ingest_local_checked"}
+
+    realtime_report = use_case.execute(command)
+
+    assert realtime_report.duplicate is False
+    assert realtime_report.result_mode == "realtime"
+    assert client.calls == 1
+    assert SqliteSourceRepository(db_path).get(source.id).ingest_status == "completed"
+    with sqlite3.connect(db_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM event_logs WHERE entity_id = ? "
+                "AND event_type = 'source_ingest_completed'",
+                (source.id,),
+            ).fetchone()[0]
+            == 1
+        )
+
+
 def test_duplicate_model_item_ids_are_rejected_before_any_result_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -610,3 +721,35 @@ def test_cache_write_failure_does_not_turn_committed_realtime_ingest_into_failur
             ).fetchone()[0]
             == 1
         )
+
+
+def test_jsonl_append_failure_returns_committed_success_and_reconciles_from_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeDifyClient()
+    use_case, content, db_path, _ = _prepare(tmp_path, monkeypatch, client)
+    logger = use_case.event_logger
+    original_append = logger.append_prepared
+    monkeypatch.setattr(
+        logger,
+        "append_prepared",
+        lambda prepared: (_ for _ in ()).throw(OSError("audit disk full")),
+    )
+
+    report = use_case.execute(_command(content))
+
+    assert report.audit_reconciliation_pending is True
+    assert SqliteSourceRepository(db_path).get(report.source_id).ingest_status == "completed"
+    assert not logger.log_path.exists()
+    with sqlite3.connect(db_path) as connection:
+        event_id = connection.execute(
+            "SELECT id FROM event_logs WHERE entity_id = ? "
+            "AND event_type = 'source_ingest_completed'",
+            (report.source_id,),
+        ).fetchone()[0]
+
+    monkeypatch.setattr(logger, "append_prepared", original_append)
+    assert logger.reconcile() == 1
+    document = json.loads(logger.log_path.read_text(encoding="utf-8"))
+    assert document["event_id"] == event_id

@@ -301,6 +301,7 @@ class IngestReport(DomainModel):
     source_hash8: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{8}$")] | None = None
     cache_generated_at: datetime | None = None
     result_items: list[IngestResultView] = Field(default_factory=list)
+    audit_reconciliation_pending: bool = False
 
 
 class LintReport(DomainModel):

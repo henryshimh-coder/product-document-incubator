@@ -30,7 +30,10 @@ from src.domain.models import (
     SourceRecord,
 )
 from src.infrastructure.db.connection import connect
-from src.infrastructure.observability.event_logger import EventLogger
+from src.infrastructure.observability.event_logger import (
+    AuditDurabilityUncertainError,
+    EventLogger,
+)
 
 Model = TypeVar("Model", bound=BaseModel)
 
@@ -617,7 +620,7 @@ class SqliteIngestUnitOfWork:
         relations: list[Relation],
         issues: list[IssueCard],
         event: EventLog,
-    ) -> None:
+    ) -> bool:
         prepared_event = self.event_logger.prepare(event)
         with connect(self.db_path) as connection:
             for card in cards:
@@ -711,7 +714,11 @@ class SqliteIngestUnitOfWork:
             if result.rowcount != 1:
                 raise KeyError(f"source not found: {source.id}")
             self.event_logger.insert_prepared(connection, prepared_event)
-        self.event_logger.append_committed(prepared_event)
+        try:
+            self.event_logger.append_committed(prepared_event)
+        except AuditDurabilityUncertainError:
+            return True
+        return False
 
     def duplicate_report(
         self,
@@ -735,55 +742,12 @@ class SqliteIngestUnitOfWork:
         payload = _json_loads(row["payload_json"])
         if payload.get("command_fingerprint") != command_fingerprint:
             raise ValueError("SOURCE_METADATA_MISMATCH")
-        with connect(self.db_path) as connection:
-            card_rows = [
-                connection.execute(
-                    "SELECT * FROM knowledge_cards WHERE id = ?",
-                    (card_id,),
-                ).fetchone()
-                for card_id in payload["created_card_ids"]
+        try:
+            result_items = [
+                IngestResultView.model_validate(item) for item in payload["result_items"]
             ]
-            issue_rows = [
-                connection.execute(
-                    "SELECT title, evidence_json FROM issue_cards WHERE id = ?",
-                    (issue_id,),
-                ).fetchone()
-                for issue_id in payload["created_issue_ids"]
-            ]
-        details_by_title: dict[str, tuple[str, str]] = {}
-        for issue_row in issue_rows:
-            if issue_row is None:
-                continue
-            evidence = _json_loads(issue_row["evidence_json"])
-            baseline = next(
-                (item for item in evidence if item.get("side") == "current_baseline"),
-                None,
-            )
-            challenging = next(
-                (item for item in evidence if item.get("side") == "challenging_source"),
-                None,
-            )
-            if baseline is not None and challenging is not None:
-                details_by_title[issue_row["title"]] = (
-                    baseline["page_or_section"],
-                    challenging["excerpt"],
-                )
-        result_items = [
-            IngestResultView(
-                item_type=card_row["card_type"],
-                summary=card_row["content"],
-                section=details_by_title.get(card_row["title"], (card_row["applicable_scope"], ""))[
-                    0
-                ],
-                citation=details_by_title.get(
-                    card_row["title"],
-                    ("", _json_loads(card_row["source_refs_json"])[0]),
-                )[1],
-                status=card_row["status"],
-            )
-            for card_row in card_rows
-            if card_row is not None
-        ]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("DUPLICATE_RESULT_ITEMS_INVALID") from error
         cache_generated_at = payload.get("cache_generated_at")
         return IngestReport(
             source_id=source.id,

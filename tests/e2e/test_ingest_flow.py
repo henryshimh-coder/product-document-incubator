@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.domain.enums import SecurityLevel
@@ -244,3 +245,145 @@ def test_rendered_realtime_success_shows_completed_flow():
     assert not page.exception
     assert any("实时分析" in item.value for item in page.info)
     assert any("completed" in item.value for item in page.markdown)
+
+
+def _complete_rendered_form(page):
+    page.file_uploader[0].set_value(("风险意见.md", b"risk", "text/markdown"))
+    page.selectbox(key="ingest_source_type").select("risk_opinion")
+    page.selectbox(key="ingest_authority").select("professional_opinion")
+    page.text_input(key="ingest_department").set_value("风险")
+    page.text_input(key="ingest_version").set_value("v1.0")
+    page.checkbox(key="ingest_redacted").check()
+    page.run()
+    page.toggle(key="ingest_external").set_value(True).run()
+    page.radio(key="ingest_mode").set_value("realtime").run()
+    return page
+
+
+def _stage_snapshot(states) -> str:
+    statuses = [item.status for item in states]
+    if "failed" in statuses:
+        return f"failed:{statuses.index('failed')}"
+    if "processing" in statuses:
+        return "processing"
+    if set(statuses) == {"completed"}:
+        return "completed"
+    return "waiting"
+
+
+def test_formal_render_click_path_progresses_waiting_processing_completed(monkeypatch):
+    from src.ui.pages import ingest
+
+    trace: list[str] = []
+    original_render_stages = ingest._render_stages
+
+    def recording_render_stages(states, **kwargs):
+        trace.append(_stage_snapshot(states))
+        return original_render_stages(states, **kwargs)
+
+    monkeypatch.setattr(ingest, "_render_stages", recording_render_stages)
+
+    def render_page():
+        from src.application.container import AppContainer, AppSettings
+        from src.domain.models import IngestReport
+        from src.ui.pages import ingest
+
+        class SuccessService:
+            def execute(self, command):
+                return IngestReport(
+                    source_id="SRC-001",
+                    duplicate=False,
+                    summary="完成",
+                    created_card_ids=[],
+                    created_relation_ids=[],
+                    created_issue_ids=[],
+                    candidate_count=0,
+                    conflict_count=0,
+                    result_mode="realtime",
+                    model_call_id="CALL-001",
+                    source_hash8="12345678",
+                )
+
+        ingest.render(
+            AppContainer(
+                settings=AppSettings(
+                    name="产品智策",
+                    project_id="LLD",
+                    default_query_scope="effective",
+                    max_upload_mb=20,
+                    accepted_extensions=(".pdf", ".docx", ".txt", ".md"),
+                    demo_mode=True,
+                    schema_version="1.0",
+                ),
+                import_source=SuccessService(),
+            )
+        )
+
+    page = _complete_rendered_form(AppTest.from_function(render_page).run())
+    page.button(key="ingest_submit").click().run()
+
+    assert not page.exception
+    processing_index = trace.index("processing")
+    assert "waiting" in trace[:processing_index]
+    assert "completed" in trace[processing_index + 1 :]
+
+
+@pytest.mark.parametrize(
+    ("error_code", "failed_index"),
+    [
+        (ErrorCode.FILE_TYPE_NOT_ALLOWED, 0),
+        (ErrorCode.EXTRACTION_FAILED, 1),
+        (ErrorCode.EXTERNAL_CALL_DENIED, 2),
+        (ErrorCode.CACHE_NOT_FOUND, 3),
+        (ErrorCode.MODEL_OUTPUT_INVALID, 4),
+        (ErrorCode.INGEST_PERSISTENCE_FAILED, 5),
+    ],
+)
+def test_formal_render_click_path_maps_errors_to_the_failed_stage(
+    monkeypatch,
+    error_code,
+    failed_index,
+):
+    from src.ui.pages import ingest
+
+    trace: list[str] = []
+    original_render_stages = ingest._render_stages
+
+    def recording_render_stages(states, **kwargs):
+        trace.append(_stage_snapshot(states))
+        return original_render_stages(states, **kwargs)
+
+    monkeypatch.setattr(ingest, "_render_stages", recording_render_stages)
+
+    def render_page(error_code_value):
+        from src.application.container import AppContainer, AppSettings
+        from src.domain.errors import AppError
+        from src.ui.pages import ingest
+
+        class FailedService:
+            def execute(self, command):
+                raise AppError(error_code_value)
+
+        ingest.render(
+            AppContainer(
+                settings=AppSettings(
+                    name="产品智策",
+                    project_id="LLD",
+                    default_query_scope="effective",
+                    max_upload_mb=20,
+                    accepted_extensions=(".pdf", ".docx", ".txt", ".md"),
+                    demo_mode=True,
+                    schema_version="1.0",
+                ),
+                import_source=FailedService(),
+            )
+        )
+
+    page = _complete_rendered_form(
+        AppTest.from_function(render_page, args=(error_code.value,)).run()
+    )
+    page.button(key="ingest_submit").click().run()
+
+    assert not page.exception
+    processing_index = trace.index("processing")
+    assert f"failed:{failed_index}" in trace[processing_index + 1 :]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 import streamlit as st
 from pydantic import BaseModel, ConfigDict
@@ -127,6 +127,31 @@ def stage_states(
         IngestStageState(label=label, status=status)
         for label, status in zip(STAGE_LABELS, statuses, strict=True)
     ]
+
+
+def failure_stage_index(error_code: ErrorCode | str) -> int:
+    normalized = ErrorCode(error_code)
+    if normalized in {
+        ErrorCode.FILE_TYPE_NOT_ALLOWED,
+        ErrorCode.FILE_TOO_LARGE,
+        ErrorCode.DUPLICATE_SOURCE,
+    }:
+        return 0
+    if normalized == ErrorCode.EXTRACTION_FAILED:
+        return 1
+    if normalized in {
+        ErrorCode.REDACTION_REQUIRED,
+        ErrorCode.EXTERNAL_CALL_DENIED,
+        ErrorCode.OUTBOUND_COVERAGE_EXCEEDED,
+        ErrorCode.SANDBOX_SOURCE_NOT_ALLOWED,
+        ErrorCode.SOURCE_AUTHORITY_NOT_FORMAL,
+    }:
+        return 2
+    if normalized in {ErrorCode.MODEL_TIMEOUT, ErrorCode.CACHE_NOT_FOUND}:
+        return 3
+    if normalized == ErrorCode.INGEST_PERSISTENCE_FAILED:
+        return 5
+    return 4
 
 
 def build_feedback(error: AppError) -> UserFeedback:
@@ -273,7 +298,8 @@ def render(container: AppContainer) -> None:
             horizontal=True,
             key="ingest_mode",
         )
-        _render_stages(stage_states("waiting"))
+        stage_target = st.empty()
+        _render_stages(stage_states("waiting"), target=stage_target)
         service = container.import_source
         if service is None:
             st.info("导入服务尚未配置；页面可用于确认三步流程与安全边界。")
@@ -286,7 +312,7 @@ def render(container: AppContainer) -> None:
         if submitted and service is not None:
             command = _to_command(container, state, preferred_mode=preferred_mode)
             st.session_state["ingest_command"] = command
-            _execute_and_render(service, command)
+            _execute_and_render(service, command, stage_target=stage_target)
         cached_command = st.session_state.get("ingest_timeout_command")
         if cached_command is not None and service is not None:
             action_columns = st.columns(4)
@@ -294,16 +320,19 @@ def render(container: AppContainer) -> None:
                 _execute_and_render(
                     service,
                     cached_command.model_copy(update={"preferred_mode": "realtime"}),
+                    stage_target=stage_target,
                 )
             if action_columns[1].button("使用缓存结果", key="ingest_use_cache"):
                 _execute_and_render(
                     service,
                     cached_command.model_copy(update={"preferred_mode": "cache"}),
+                    stage_target=stage_target,
                 )
             if action_columns[2].button("本地确定性检查", key="ingest_use_local"):
                 _execute_and_render(
                     service,
                     cached_command.model_copy(update={"preferred_mode": "local"}),
+                    stage_target=stage_target,
                 )
             if action_columns[3].button("取消本次处理", key="ingest_cancel"):
                 st.session_state.pop("ingest_timeout_command", None)
@@ -335,23 +364,34 @@ def _to_command(
     )
 
 
-def _execute_and_render(service: ImportSourceService, command: ImportSourceInput) -> None:
+def _execute_and_render(
+    service: ImportSourceService,
+    command: ImportSourceInput,
+    *,
+    stage_target: Any | None = None,
+) -> None:
+    _render_stages(stage_states("processing"), target=stage_target)
     try:
         report = service.execute(command)
     except AppError as error:
         feedback = build_feedback(error)
-        _render_stages(stage_states("failed", failed_index=3))
+        _render_stages(
+            stage_states("failed", failed_index=failure_stage_index(error.code)),
+            target=stage_target,
+        )
         render_feedback(feedback)
         if feedback.offer_cache or feedback.offer_local:
             st.session_state["ingest_timeout_command"] = command
         return
     st.session_state.pop("ingest_timeout_command", None)
-    _render_stages(stage_states("completed"))
+    _render_stages(stage_states("completed"), target=stage_target)
     _render_report(report, sandbox=command.is_sandbox)
 
 
 def _render_report(report: IngestReport, *, sandbox: bool) -> None:
     badge, _ = result_badge(report.result_mode.value)
+    if report.audit_reconciliation_pending:
+        st.warning("导入已完成；本地审计 JSONL 待下次启动自动对账。")
     if report.result_mode.value == "cache":
         generated = (
             report.cache_generated_at.isoformat(timespec="seconds")
@@ -390,11 +430,14 @@ def _render_report(report: IngestReport, *, sandbox: bool) -> None:
         st.button("完成并返回首页", type="primary", key="ingest_finish")
 
 
-def _render_stages(states: list[IngestStageState]) -> None:
+def _render_stages(states: list[IngestStageState], *, target: Any | None = None) -> None:
     icons = {
         "waiting": "○",
         "processing": "◉",
         "completed": "✓",
         "failed": "!",
     }
-    st.markdown("　".join(f"{icons[item.status]} {item.label} · {item.status}" for item in states))
+    renderer = st if target is None else target
+    renderer.markdown(
+        "　".join(f"{icons[item.status]} {item.label} · {item.status}" for item in states)
+    )

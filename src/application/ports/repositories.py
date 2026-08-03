@@ -101,7 +101,7 @@ class IngestUnitOfWork(Protocol):
         relations: list[Relation],
         issues: list[IssueCard],
         event: EventLog,
-    ) -> None: ...
+    ) -> bool: ...
 
     def duplicate_report(
         self,
