@@ -33,7 +33,6 @@ def get_page_definitions() -> list[PageDefinition]:
 
 
 def build_navigation(container: AppContainer) -> Any:
-    render_sidebar_chrome()
     pages = [
         st.Page(
             partial(definition.render, container),
@@ -42,4 +41,6 @@ def build_navigation(container: AppContainer) -> Any:
         )
         for definition in get_page_definitions()
     ]
-    return st.navigation(pages, position="sidebar")
+    navigation = st.navigation(pages, position="sidebar")
+    render_sidebar_chrome()
+    return navigation
