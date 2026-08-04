@@ -18,6 +18,7 @@ from src.domain.enums import (
     IssueStatus,
     KnowledgeStatus,
 )
+from src.domain.errors import DomainError, ErrorCode
 from src.domain.models import (
     Baseline,
     ChangeRequest,
@@ -32,6 +33,7 @@ from src.domain.models import (
     Relation,
     SourceRecord,
 )
+from src.domain.policies.state_transition import ensure_change_transition
 from src.infrastructure.db.connection import connect
 from src.infrastructure.observability.event_logger import (
     AuditDurabilityUncertainError,
@@ -775,6 +777,27 @@ class SqliteChangeRepository:
             ).fetchall()
         return [self._to_model(row) for row in rows]
 
+    def list_release_candidates(self, project_id: str) -> list[ChangeRequest]:
+        """List publish-retry approved changes first, then pending, then needs_info."""
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM change_requests
+                WHERE project_id = ? AND status IN (?, ?, ?)
+                ORDER BY CASE status WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END,
+                         created_at, id
+                """,
+                (
+                    project_id,
+                    ChangeStatus.APPROVED.value,
+                    ChangeStatus.PENDING_APPROVAL.value,
+                    ChangeStatus.NEEDS_INFO.value,
+                    ChangeStatus.APPROVED.value,
+                    ChangeStatus.PENDING_APPROVAL.value,
+                ),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
     def find_by_decision_id(self, decision_id: str) -> ChangeRequest | None:
         with connect(self.db_path) as connection:
             row = connection.execute(
@@ -1122,3 +1145,196 @@ class SqliteIngestUnitOfWork:
             cache_generated_at=cache_generated_at,
             result_items=result_items,
         )
+
+
+class SqliteReviewUnitOfWork:
+    """Atomically record a human review and its audit event in one transaction."""
+
+    def __init__(self, db_path: Path, event_logger: EventLogger | None = None) -> None:
+        self.db_path = db_path
+        self.event_logger = event_logger or EventLogger(db_path)
+
+    def record_review(
+        self,
+        *,
+        change_id: str,
+        action: ChangeReviewAction,
+        reviewed_by: str,
+        comment: str,
+        idempotency_key: str,
+        reviewed_at: datetime,
+        expected_status: ChangeStatus,
+        target_status: ChangeStatus,
+        event: EventLog,
+    ) -> ChangeRequest:
+        prepared = self.event_logger.prepare(event)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = connect(self.db_path)
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM change_requests WHERE id = ?", (change_id,)
+            ).fetchone()
+            if row is None:
+                raise DomainError(ErrorCode.CHANGE_NOT_REVIEWABLE, "CHANGE_NOT_FOUND")
+            if row["review_idempotency_key"] is not None:
+                if row["review_idempotency_key"] == idempotency_key:
+                    connection.commit()
+                    return SqliteChangeRepository._to_model(row)
+                raise DomainError(ErrorCode.CHANGE_NOT_REVIEWABLE, "ALREADY_REVIEWED")
+            current_status = ChangeStatus(row["status"])
+            if current_status != expected_status:
+                raise DomainError(ErrorCode.CHANGE_NOT_REVIEWABLE)
+            ensure_change_transition(current_status, target_status)
+            conflict = connection.execute(
+                "SELECT id FROM change_requests WHERE review_idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if conflict is not None:
+                raise DomainError(ErrorCode.REVIEW_IDEMPOTENCY_CONFLICT)
+            updated = connection.execute(
+                """
+                UPDATE change_requests
+                SET status = ?, review_action = ?, reviewed_by = ?, review_comment = ?,
+                    review_idempotency_key = ?, reviewed_at = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    target_status.value,
+                    action.value,
+                    reviewed_by,
+                    comment,
+                    idempotency_key,
+                    reviewed_at.isoformat(),
+                    reviewed_at.isoformat(),
+                    change_id,
+                    expected_status.value,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise DomainError(ErrorCode.CHANGE_NOT_REVIEWABLE)
+            stored_row = connection.execute(
+                "SELECT * FROM change_requests WHERE id = ?", (change_id,)
+            ).fetchone()
+            self.event_logger.insert_prepared(connection, prepared)
+            connection.commit()
+            reviewed = SqliteChangeRepository._to_model(stored_row)
+        except sqlite3.Error as error:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.rollback()
+            raise DomainError(ErrorCode.REVIEW_PERSISTENCE_FAILED) from error
+        except BaseException:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.close()
+        try:
+            self.event_logger.append_committed(prepared)
+        except AuditDurabilityUncertainError:
+            pass
+        return reviewed
+
+
+class SqliteReleaseUnitOfWork:
+    """Own the single SQLite transaction that mirrors a freshly effective manifest."""
+
+    def __init__(self, db_path: Path, event_logger: EventLogger | None = None) -> None:
+        self.db_path = db_path
+        self.event_logger = event_logger or EventLogger(db_path)
+
+    def publish(
+        self,
+        *,
+        superseded_baseline_id: str,
+        new_baseline: Baseline,
+        change_id: str,
+        change_updated_at: datetime,
+        project_id: str,
+        event: EventLog,
+    ) -> bool:
+        prepared = self.event_logger.prepare(event)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = connect(self.db_path)
+            connection.execute("BEGIN IMMEDIATE")
+            change_row = connection.execute(
+                "SELECT status FROM change_requests WHERE id = ?", (change_id,)
+            ).fetchone()
+            if change_row is None or change_row["status"] != ChangeStatus.APPROVED.value:
+                raise DomainError(ErrorCode.CHANGE_NOT_APPROVED, "MIRROR_PRECONDITION_FAILED")
+            superseded = connection.execute(
+                "UPDATE baselines SET status = ? WHERE id = ? AND status = ?",
+                (
+                    BaselineStatus.SUPERSEDED.value,
+                    superseded_baseline_id,
+                    BaselineStatus.EFFECTIVE.value,
+                ),
+            )
+            if superseded.rowcount != 1:
+                raise DomainError(ErrorCode.RELEASE_FAILED, "SUPERSEDED_BASELINE_NOT_EFFECTIVE")
+            connection.execute(
+                """
+                INSERT INTO baselines (
+                    id, project_id, version, parent_baseline_id, status,
+                    full_document_path, card_snapshot_path, manifest_sha256,
+                    change_request_id, approved_by, effective_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_baseline.id,
+                    new_baseline.project_id,
+                    new_baseline.version,
+                    new_baseline.parent_baseline_id,
+                    new_baseline.status.value,
+                    new_baseline.full_document_path,
+                    new_baseline.card_snapshot_path,
+                    new_baseline.manifest_sha256,
+                    new_baseline.change_request_id,
+                    new_baseline.approved_by,
+                    _iso_or_none(new_baseline.effective_at),
+                    new_baseline.created_at.isoformat(),
+                ),
+            )
+            updated_change = connection.execute(
+                "UPDATE change_requests SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (
+                    ChangeStatus.PUBLISHED.value,
+                    change_updated_at.isoformat(),
+                    change_id,
+                    ChangeStatus.APPROVED.value,
+                ),
+            )
+            if updated_change.rowcount != 1:
+                raise DomainError(ErrorCode.CHANGE_NOT_APPROVED, "MIRROR_PRECONDITION_FAILED")
+            updated_project = connection.execute(
+                "UPDATE projects SET current_baseline_id = ?, updated_at = ? WHERE id = ?",
+                (new_baseline.id, change_updated_at.isoformat(), project_id),
+            )
+            if updated_project.rowcount != 1:
+                raise DomainError(ErrorCode.RELEASE_PROJECT_MISMATCH, "PROJECT_NOT_FOUND")
+            self.event_logger.insert_prepared(connection, prepared)
+            connection.commit()
+        except sqlite3.Error as error:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.rollback()
+            raise DomainError(ErrorCode.RELEASE_FAILED, "MIRROR_WRITE_FAILED") from error
+        except BaseException:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.close()
+        try:
+            self.event_logger.append_committed(prepared)
+        except AuditDurabilityUncertainError:
+            return True
+        return False

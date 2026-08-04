@@ -49,4 +49,6 @@ def build_navigation(container: AppContainer) -> Any:
     st.session_state["_pi_release_page"] = next(
         page for page in pages if page.url_path == "release"
     )
+    st.session_state["_pi_home_page"] = next(page for page in pages if page.url_path == "home")
+    st.session_state["_pi_trace_page"] = next(page for page in pages if page.url_path == "trace")
     return st.navigation(pages, position="sidebar")

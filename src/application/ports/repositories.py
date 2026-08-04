@@ -93,6 +93,8 @@ class ChangeRepository(Protocol):
 
     def list_pending(self, project_id: str) -> list[ChangeRequest]: ...
 
+    def list_release_candidates(self, project_id: str) -> list[ChangeRequest]: ...
+
     def find_by_decision_id(self, decision_id: str) -> ChangeRequest | None: ...
 
 
@@ -107,6 +109,35 @@ class DecisionUnitOfWork(Protocol):
         issue_updated_at: datetime,
         change_request: ChangeRequest | None,
     ) -> DecisionResult: ...
+
+
+class ReviewUnitOfWork(Protocol):
+    def record_review(
+        self,
+        *,
+        change_id: str,
+        action: ChangeReviewAction,
+        reviewed_by: str,
+        comment: str,
+        idempotency_key: str,
+        reviewed_at: datetime,
+        expected_status: ChangeStatus,
+        target_status: ChangeStatus,
+        event: EventLog,
+    ) -> ChangeRequest: ...
+
+
+class ReleaseUnitOfWork(Protocol):
+    def publish(
+        self,
+        *,
+        superseded_baseline_id: str,
+        new_baseline: Baseline,
+        change_id: str,
+        change_updated_at: datetime,
+        project_id: str,
+        event: EventLog,
+    ) -> bool: ...
 
 
 class BaselineRepository(Protocol):

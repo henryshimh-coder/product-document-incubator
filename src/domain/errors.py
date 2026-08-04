@@ -43,6 +43,11 @@ class ErrorCode(StrEnum):
     LINT_SOURCE_REQUIRED = "LINT_SOURCE_REQUIRED"
     LINT_SOURCE_NOT_COMPARABLE = "LINT_SOURCE_NOT_COMPARABLE"
     LINT_DETERMINISTIC_LIMIT_EXCEEDED = "LINT_DETERMINISTIC_LIMIT_EXCEEDED"
+    CHANGE_NOT_REVIEWABLE = "CHANGE_NOT_REVIEWABLE"
+    REVIEW_IDEMPOTENCY_CONFLICT = "REVIEW_IDEMPOTENCY_CONFLICT"
+    REVIEW_PERSISTENCE_FAILED = "REVIEW_PERSISTENCE_FAILED"
+    RELEASE_BLOCKED = "RELEASE_BLOCKED"
+    RELEASE_MIRROR_REPAIR_REQUIRED = "RELEASE_MIRROR_REPAIR_REQUIRED"
 
 
 @dataclass(frozen=True)
@@ -100,6 +105,19 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
     ErrorCode.LINT_SOURCE_NOT_COMPARABLE: ErrorDefinition("指定资料没有可比较的候选或冲突卡片"),
     ErrorCode.LINT_DETERMINISTIC_LIMIT_EXCEEDED: ErrorDefinition(
         "本地确定性问题超过单次安全自检上限"
+    ),
+    ErrorCode.CHANGE_NOT_REVIEWABLE: ErrorDefinition("变更当前状态不允许复核"),
+    ErrorCode.REVIEW_IDEMPOTENCY_CONFLICT: ErrorDefinition("重复提交键对应的复核内容不一致"),
+    ErrorCode.REVIEW_PERSISTENCE_FAILED: ErrorDefinition(
+        "复核结果未能安全写入，变更状态不受影响",
+        retryable=True,
+    ),
+    ErrorCode.RELEASE_BLOCKED: ErrorDefinition(
+        "发布已暂停：本地镜像与权威基线不一致，请先完成恢复",
+        retryable=True,
+    ),
+    ErrorCode.RELEASE_MIRROR_REPAIR_REQUIRED: ErrorDefinition(
+        "新版本已生效，但本地镜像修复失败，请重新校验后再试"
     ),
 }
 

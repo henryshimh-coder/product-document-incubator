@@ -16,16 +16,28 @@ from src.application.dto.decision import RecordDecisionInput
 from src.application.dto.ingest import ImportSourceInput
 from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
+from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
+from src.application.use_cases.publish_baseline import PublishBaseline
 from src.application.use_cases.record_decision import RecordDecision
+from src.application.use_cases.review_change_request import ReviewChangeRequest
 from src.application.use_cases.run_lint import (
     DeterministicLintRunner,
     RunLint,
     SafeLintComparisonBuilder,
 )
 from src.application.use_cases.run_query import RunQuery
-from src.domain.models import DecisionResult, IngestReport, IssueCard, LintReport, QueryResponse
+from src.domain.models import (
+    Baseline,
+    ChangeRequest,
+    DecisionResult,
+    IngestReport,
+    IssueCard,
+    LintReport,
+    QueryResponse,
+    RepairResult,
+)
 from src.infrastructure.cache.ai_cache import AiCache
 from src.infrastructure.db.lint_fact_reader import SqliteLintFactReader
 from src.infrastructure.db.migrations import migrate
@@ -38,6 +50,8 @@ from src.infrastructure.db.repositories import (
     SqliteIssueRepository,
     SqliteKnowledgeRepository,
     SqliteProjectRepository,
+    SqliteReleaseUnitOfWork,
+    SqliteReviewUnitOfWork,
     SqliteSourceRepository,
 )
 from src.infrastructure.files.archive import SourceArchive
@@ -49,6 +63,8 @@ from src.infrastructure.files.query_material_reader import LocalQueryMaterialRea
 from src.infrastructure.gateways.composition import DifyGatewaySettings, build_workflow_gateways
 from src.infrastructure.observability.event_logger import EventLogger
 from src.infrastructure.observability.model_call_logger import ModelCallLogger
+from src.infrastructure.recovery.reconciliation_service import ReconciliationService
+from src.infrastructure.recovery.release_guard import ReleaseGuard
 
 
 class ImportSourceService(Protocol):
@@ -79,6 +95,24 @@ class DecisionService(Protocol):
     def execute(self, command: RecordDecisionInput) -> DecisionResult: ...
 
 
+class ReviewService(Protocol):
+    def execute(self, command: ReviewChangeRequestInput) -> ChangeRequest: ...
+
+
+class PublishService(Protocol):
+    def execute(self, command: PublishBaselineInput) -> Baseline: ...
+
+
+class ReleaseCandidateService(Protocol):
+    def list_release_candidates(self, project_id: str) -> list[ChangeRequest]: ...
+
+
+class ReconciliationPort(Protocol):
+    def validate_manifest_mirror(self) -> RepairResult: ...
+
+    def rebuild_current_from_manifest(self) -> RepairResult: ...
+
+
 class ConfigurationError(ValueError):
     """Raised when application configuration cannot establish a valid contract."""
 
@@ -104,6 +138,11 @@ class AppContainer:
     query: QueryService | None = None
     lint: LintService | None = None
     record_decision: DecisionService | None = None
+    review_change_request: ReviewService | None = None
+    publish_baseline: PublishService | None = None
+    release_candidates: ReleaseCandidateService | None = None
+    release_guard: ReleaseGuard | None = None
+    reconciliation: ReconciliationPort | None = None
 
 
 def _load_settings(app_path: Path, schema_path: Path) -> tuple[AppSettings, bool]:
@@ -146,8 +185,21 @@ def build_container(
     if not manifest_path.is_file():
         return AppContainer(settings=settings)
     migrate(db_path)
+    manifest_store = ManifestStore(manifest_path, project_root=project_root)
+    markdown_store = MarkdownStore(project_root)
+    reconciliation = ReconciliationService(
+        manifest_store=manifest_store,
+        db_path=db_path,
+        project_root=project_root,
+    )
+    release_guard = ReleaseGuard()
+    if not reconciliation.validate_manifest_mirror().success:
+        repaired = reconciliation.rebuild_current_from_manifest()
+        if not repaired.success:
+            release_guard.block(repaired.error_code or "manifest_sqlite_mismatch")
+    event_logger = EventLogger(db_path)
     dashboard = GetDashboard(
-        manifest=ManifestStore(manifest_path),
+        manifest=manifest_store,
         integrity=ManifestIntegrityChecker(
             project_root=project_root,
             db_path=db_path,
@@ -161,11 +213,41 @@ def build_container(
     )
     decision_service = RecordDecision(
         issues=SqliteIssueRepository(db_path),
-        manifest=ManifestStore(manifest_path),
+        manifest=manifest_store,
         knowledge=SqliteKnowledgeRepository(db_path),
         unit_of_work=SqliteDecisionUnitOfWork(db_path),
         now=lambda: datetime.now(UTC),
     )
+    review_service = ReviewChangeRequest(
+        changes=SqliteChangeRepository(db_path),
+        unit_of_work=SqliteReviewUnitOfWork(db_path, event_logger=event_logger),
+        now=lambda: datetime.now(UTC),
+    )
+    publish_service = PublishBaseline(
+        manifest_store=manifest_store,
+        markdown_store=markdown_store,
+        changes=SqliteChangeRepository(db_path),
+        baselines=SqliteBaselineRepository(db_path),
+        integrity=ManifestIntegrityChecker(
+            project_root=project_root,
+            db_path=db_path,
+            manifest_path=manifest_path,
+        ),
+        release_uow=SqliteReleaseUnitOfWork(db_path, event_logger=event_logger),
+        reconciliation=reconciliation,
+        guard=release_guard,
+        lock_path=(project_root / "data/local_state/locks" / f"{settings.project_id}.release.lock"),
+        now=lambda: datetime.now(UTC),
+    )
+    local_services = {
+        "dashboard": dashboard,
+        "record_decision": decision_service,
+        "review_change_request": review_service,
+        "publish_baseline": publish_service,
+        "release_candidates": SqliteChangeRepository(db_path),
+        "release_guard": release_guard,
+        "reconciliation": reconciliation,
+    }
     runtime = os.environ if environ is None else environ
     required = (
         runtime.get("DIFY_BASE_URL", "").strip(),
@@ -174,11 +256,7 @@ def build_container(
         runtime.get("DIFY_LINT_API_KEY", "").strip(),
     )
     if not all(required):
-        return AppContainer(
-            settings=settings,
-            dashboard=dashboard,
-            record_decision=decision_service,
-        )
+        return AppContainer(settings=settings, **local_services)
     if not has_explicit_lint_contract:
         raise ConfigurationError(
             "Live Lint deployment requires explicit "
@@ -194,7 +272,6 @@ def build_container(
         gateway_settings,
         http_factory=http_factory or httpx.Client,
     )
-    event_logger = EventLogger(db_path)
     event_logger.reconcile()
 
     def dictionary(name: str) -> tuple[str, ...]:
@@ -237,19 +314,19 @@ def build_container(
         unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
         schema_version=settings.schema_version,
     )
-    manifest_store = ManifestStore(manifest_path)
+    lint_store = ManifestStore(manifest_path)
     card_store = MarkdownStore(project_root)
     material_reader = LocalQueryMaterialReader(project_root)
     lint_service = RunLint(
         local_lint=DeterministicLintRunner(
-            manifest=manifest_store,
+            manifest=lint_store,
             card_store=card_store,
             projects=SqliteProjectRepository(db_path),
             sources=SqliteSourceRepository(db_path),
             fact_reader=SqliteLintFactReader(db_path),
         ),
         comparison_builder=SafeLintComparisonBuilder(
-            manifest=manifest_store,
+            manifest=lint_store,
             projects=SqliteProjectRepository(db_path),
             knowledge=SqliteKnowledgeRepository(db_path),
             sources=SqliteSourceRepository(db_path),
@@ -269,8 +346,7 @@ def build_container(
     return AppContainer(
         settings=settings,
         import_source=import_service,
-        dashboard=dashboard,
         query=query_service,
         lint=lint_service,
-        record_decision=decision_service,
+        **local_services,
     )

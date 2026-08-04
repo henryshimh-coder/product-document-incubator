@@ -1,0 +1,449 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from unittest.mock import Mock
+from uuid import uuid4
+
+import pytest
+from filelock import FileLock
+from pydantic import ValidationError
+
+from src.application.dto.release import PublishBaselineInput
+from src.domain.enums import BaselineStatus, ChangeStatus
+from src.domain.errors import DomainError, ErrorCode
+from src.infrastructure.files.manifest_store import ManifestDurabilityUncertainError
+from tests.integration.release_env import (
+    CURRENT_BASELINE_ID,
+    CURRENT_VERSION,
+    NOW,
+    PROJECT_ID,
+    RELEASE_NOTE,
+    REVIEWER,
+    TARGET_BASELINE_ID,
+    TARGET_VERSION,
+    build_release_environment,
+    make_change,
+)
+
+
+def _use_case(env, **overrides):
+    from src.application.use_cases.publish_baseline import PublishBaseline
+    from src.infrastructure.db.repositories import SqliteReleaseUnitOfWork
+    from src.infrastructure.files.manifest_integrity import ManifestIntegrityChecker
+    from src.infrastructure.recovery.reconciliation_service import ReconciliationService
+    from src.infrastructure.recovery.release_guard import ReleaseGuard
+
+    kwargs = {
+        "manifest_store": env.manifest_store,
+        "markdown_store": env.markdown_store,
+        "changes": env.changes,
+        "baselines": env.baselines,
+        "integrity": ManifestIntegrityChecker(
+            project_root=env.project_root,
+            db_path=env.db_path,
+            manifest_path=env.manifest_path,
+        ),
+        "release_uow": SqliteReleaseUnitOfWork(env.db_path, event_logger=env.event_logger),
+        "reconciliation": ReconciliationService(
+            manifest_store=env.manifest_store,
+            db_path=env.db_path,
+            project_root=env.project_root,
+        ),
+        "guard": ReleaseGuard(),
+        "lock_path": env.project_root / "data/local_state/locks" / f"{PROJECT_ID}.release.lock",
+        "now": lambda: NOW,
+        "event_id_factory": lambda: f"EVENT-{uuid4().hex.upper()}",
+    }
+    kwargs.update(overrides)
+    return PublishBaseline(**kwargs)
+
+
+def _approved_env(tmp_path):
+    return build_release_environment(tmp_path, change=make_change(ChangeStatus.APPROVED))
+
+
+def _command(**updates) -> PublishBaselineInput:
+    base = {
+        "project_id": PROJECT_ID,
+        "change_request_id": "CHANGE-001",
+        "approved_by": REVIEWER,
+        "impact_reviewed": True,
+        "release_note": RELEASE_NOTE,
+    }
+    base.update(updates)
+    return PublishBaselineInput(**base)
+
+
+def test_publish_success_replaces_manifest_and_mirrors_atomically(tmp_path) -> None:
+    """Catches the happy path leaving either the old manifest or an inconsistent mirror."""
+    env = _approved_env(tmp_path)
+    use_case = _use_case(env)
+
+    baseline = use_case.execute(_command())
+
+    assert baseline.id == TARGET_BASELINE_ID
+    assert baseline.status == BaselineStatus.EFFECTIVE
+    assert baseline.parent_baseline_id == CURRENT_BASELINE_ID
+    assert baseline.version == TARGET_VERSION
+    assert baseline.approved_by == REVIEWER
+    manifest = env.manifest_store.read_and_validate()
+    assert manifest.current_version == TARGET_VERSION
+    assert manifest.parent_baseline_id == CURRENT_BASELINE_ID
+    assert manifest.change_request_id == "CHANGE-001"
+    version_dir = env.project_root / "data/obsidian_vault/02_Current_Baseline" / TARGET_VERSION
+    assert (version_dir / "full.md").is_file()
+    assert (version_dir / "cards.json").is_file()
+    assert (version_dir / "diff.md").is_file()
+    release_record = json.loads((version_dir / "release.json").read_text(encoding="utf-8"))
+    assert release_record["parent_version"] == CURRENT_VERSION
+    assert release_record["target_version"] == TARGET_VERSION
+    assert release_record["change_request_id"] == "CHANGE-001"
+    assert release_record["approved_by"] == REVIEWER
+    assert release_record["release_note"] == RELEASE_NOTE
+    full_text = (version_dir / "full.md").read_text(encoding="utf-8")
+    assert "收紧后的目标客群仅覆盖高净值存量客户。" in full_text
+    assert "当前目标客群是符合准入要求的存量客户。" not in full_text
+    cards = {card["id"]: card for card in json.loads((version_dir / "cards.json").read_text())}
+    assert cards["RULE-001"]["product_version"] == TARGET_VERSION
+    assert cards["API-CUSTOMER"]["product_version"] == CURRENT_VERSION
+    assert env.baselines.get(CURRENT_BASELINE_ID).status == BaselineStatus.SUPERSEDED
+    assert env.changes.get("CHANGE-001").status == ChangeStatus.PUBLISHED
+    assert env.projects.get(PROJECT_ID).current_baseline_id == TARGET_BASELINE_ID
+    with sqlite3.connect(env.db_path) as connection:
+        events = connection.execute(
+            "SELECT event_type, entity_id FROM event_logs WHERE event_type = 'baseline_published'"
+        ).fetchall()
+    assert events == [("baseline_published", TARGET_BASELINE_ID)]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        ChangeStatus.PENDING_APPROVAL,
+        ChangeStatus.REJECTED,
+        ChangeStatus.DEFERRED,
+        ChangeStatus.NEEDS_INFO,
+    ],
+)
+def test_publish_rejects_unapproved_change(tmp_path, status) -> None:
+    """Catches publishing a change that has no human approval."""
+    env = build_release_environment(tmp_path, change=make_change(status))
+    use_case = _use_case(env)
+
+    with pytest.raises(DomainError, match="CHANGE_NOT_APPROVED"):
+        use_case.execute(_command())
+
+
+def test_publish_requires_impact_review(tmp_path) -> None:
+    """Catches publishing without the human impact check."""
+    env = _approved_env(tmp_path)
+    use_case = _use_case(env)
+
+    with pytest.raises(DomainError, match="IMPACT_REVIEW_REQUIRED"):
+        use_case.execute(_command(impact_reviewed=False))
+
+
+def test_publish_rejects_invalid_release_note() -> None:
+    """Catches an out-of-range release note passing the input contract."""
+    with pytest.raises(ValidationError):
+        _command(release_note="太短")
+    with pytest.raises(ValidationError):
+        _command(release_note="长" * 201)
+
+
+def test_publish_rejects_when_manifest_integrity_fails(tmp_path) -> None:
+    """Catches publishing on top of a corrupted current baseline asset."""
+    env = _approved_env(tmp_path)
+    full_path = env.project_root / ("data/obsidian_vault/02_Current_Baseline/LLD-724_1/full.md")
+    full_path.write_text(full_path.read_text(encoding="utf-8") + "篡改", encoding="utf-8")
+    use_case = _use_case(env)
+
+    with pytest.raises(DomainError, match="BASELINE_INTEGRITY_FAILED"):
+        use_case.execute(_command())
+
+
+def test_publish_rejects_when_target_version_dir_exists(tmp_path) -> None:
+    """Catches overwriting an already present target version directory."""
+    env = _approved_env(tmp_path)
+    env.markdown_store.write_baseline(TARGET_VERSION, "# 旧版本\n", [])
+    use_case = _use_case(env)
+
+    with pytest.raises(DomainError, match="TARGET_VERSION_ALREADY_EXISTS"):
+        use_case.execute(_command())
+
+
+def test_publish_rejects_when_change_missing(tmp_path) -> None:
+    """Catches publishing a change request that does not exist."""
+    env = _approved_env(tmp_path)
+    use_case = _use_case(env)
+
+    with pytest.raises(DomainError, match="RELEASE_CHANGE_MISMATCH"):
+        use_case.execute(_command(change_request_id="CHANGE-MISSING"))
+
+
+def test_publish_rejects_approver_mismatch(tmp_path) -> None:
+    """Catches an approver identity that does not come from the human review record."""
+    env = _approved_env(tmp_path)
+    use_case = _use_case(env)
+
+    with pytest.raises(DomainError) as raised:
+        use_case.execute(_command(approved_by="其他操作员"))
+
+    assert raised.value.code == ErrorCode.RELEASE_CHANGE_MISMATCH.value
+    assert raised.value.detail == "APPROVER_MISMATCH"
+
+
+def test_full_document_generation_failure_keeps_old_manifest(tmp_path) -> None:
+    """Catches a file staging failure leaving the current manifest untouched."""
+    env = _approved_env(tmp_path)
+    before = env.manifest_store.read_and_validate()
+    use_case = _use_case(env)
+    use_case.markdown_store = Mock(wraps=env.markdown_store)
+    use_case.markdown_store.build_release_full_document = Mock(side_effect=OSError("disk full"))
+
+    with pytest.raises(OSError):
+        use_case.execute(_command())
+
+    assert env.manifest_store.read_and_validate() == before
+    release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
+    assert [item.name for item in release_root.iterdir()] == [CURRENT_VERSION]
+
+
+def test_candidate_validation_failure_keeps_old_manifest(tmp_path) -> None:
+    """Catches a candidate manifest mismatch leaving the current manifest untouched."""
+    env = _approved_env(tmp_path)
+    before = env.manifest_store.read_and_validate()
+    use_case = _use_case(env)
+    use_case.manifest_store = Mock(wraps=env.manifest_store)
+    use_case.manifest_store.validate_candidate = Mock(
+        side_effect=DomainError(ErrorCode.RELEASE_FAILED, "CANDIDATE_FULL_HASH_MISMATCH")
+    )
+
+    with pytest.raises(DomainError, match="RELEASE_FAILED"):
+        use_case.execute(_command())
+
+    assert env.manifest_store.read_and_validate() == before
+    release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
+    assert [item.name for item in release_root.iterdir()] == [CURRENT_VERSION]
+
+
+def test_commit_failure_keeps_old_manifest(tmp_path) -> None:
+    """Catches a final directory commit failure leaving the current manifest untouched."""
+    env = _approved_env(tmp_path)
+    before = env.manifest_store.read_and_validate()
+    use_case = _use_case(env)
+    use_case.markdown_store = Mock(wraps=env.markdown_store)
+    use_case.markdown_store.commit_release_dir = Mock(side_effect=OSError("disk full"))
+
+    with pytest.raises(OSError):
+        use_case.execute(_command())
+
+    assert env.manifest_store.read_and_validate() == before
+    release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
+    assert [item.name for item in release_root.iterdir()] == [CURRENT_VERSION]
+
+
+def test_manifest_replace_failure_quarantines_unreferenced_dir(tmp_path) -> None:
+    """Catches a confirmed manifest replacement failure silently dropping audit evidence."""
+    env = _approved_env(tmp_path)
+    before = env.manifest_store.read_and_validate()
+    use_case = _use_case(env)
+    use_case.manifest_store = Mock(wraps=env.manifest_store)
+    use_case.manifest_store.atomic_replace = Mock(side_effect=OSError("rename failed"))
+
+    with pytest.raises(OSError):
+        use_case.execute(_command())
+
+    assert env.manifest_store.read_and_validate() == before
+    release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
+    assert [item.name for item in release_root.iterdir()] == [CURRENT_VERSION]
+    quarantine = env.project_root / "data/obsidian_vault/99_Quarantine"
+    quarantined = list(quarantine.iterdir())
+    assert len(quarantined) == 1
+    assert quarantined[0].name.startswith(f"{TARGET_VERSION}-quarantined-")
+    assert (quarantined[0] / "release.json").is_file()
+    assert env.changes.get("CHANGE-001").status == ChangeStatus.APPROVED
+
+
+def test_manifest_durability_uncertain_with_old_manifest_quarantines(tmp_path) -> None:
+    """Catches guessing the manifest state from the durability exception type."""
+    env = _approved_env(tmp_path)
+    before = env.manifest_store.read_and_validate()
+    use_case = _use_case(env)
+    original = env.manifest_store.atomic_replace
+
+    def uncertain_without_replace(manifest):
+        raise ManifestDurabilityUncertainError("fsync unconfirmed")
+
+    use_case.manifest_store = Mock(wraps=env.manifest_store)
+    use_case.manifest_store.atomic_replace = Mock(side_effect=uncertain_without_replace)
+
+    with pytest.raises(DomainError) as raised:
+        use_case.execute(_command())
+
+    assert raised.value.code == ErrorCode.RELEASE_FAILED.value
+    assert raised.value.detail == "MANIFEST_REPLACE_UNCERTAIN"
+    assert env.manifest_store.read_and_validate() == before
+    release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
+    assert [item.name for item in release_root.iterdir()] == [CURRENT_VERSION]
+    assert original is not None
+
+
+def test_manifest_durability_uncertain_with_new_manifest_continues(tmp_path) -> None:
+    """Catches treating a confirmed replacement as a failure after the uncertain signal."""
+    env = _approved_env(tmp_path)
+    use_case = _use_case(env)
+    real_replace = env.manifest_store.atomic_replace
+
+    def replace_then_uncertain(manifest):
+        real_replace(manifest)
+        raise ManifestDurabilityUncertainError("fsync unconfirmed")
+
+    use_case.manifest_store = Mock(wraps=env.manifest_store)
+    use_case.manifest_store.atomic_replace = Mock(side_effect=replace_then_uncertain)
+
+    baseline = use_case.execute(_command())
+
+    assert baseline.version == TARGET_VERSION
+    assert env.manifest_store.read_and_validate().current_version == TARGET_VERSION
+    assert env.projects.get(PROJECT_ID).current_baseline_id == TARGET_BASELINE_ID
+
+
+def test_release_lock_conflict_returns_stable_error(tmp_path) -> None:
+    """Catches a concurrent publish creating staging directories or partial state."""
+    env = _approved_env(tmp_path)
+    lock_path = env.project_root / "data/local_state/locks" / f"{PROJECT_ID}.release.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    held = FileLock(str(lock_path))
+    held.acquire(timeout=0)
+    try:
+        use_case = _use_case(env)
+        with pytest.raises(DomainError, match="RELEASE_LOCKED"):
+            use_case.execute(_command())
+    finally:
+        held.release()
+    release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
+    assert [item.name for item in release_root.iterdir()] == [CURRENT_VERSION]
+
+
+def test_duplicate_publish_is_blocked_after_success(tmp_path) -> None:
+    """Catches a repeated publish click creating a duplicate version or approval."""
+    env = _approved_env(tmp_path)
+    use_case = _use_case(env)
+    use_case.execute(_command())
+
+    with pytest.raises(DomainError, match="CHANGE_NOT_APPROVED"):
+        use_case.execute(_command())
+
+    assert env.manifest_store.read_and_validate().current_version == TARGET_VERSION
+
+
+def test_ambiguous_full_document_target_fails_closed(tmp_path) -> None:
+    """Catches a blind global replace when the before-content is not unique."""
+    env = _approved_env(tmp_path)
+    full_path = env.project_root / ("data/obsidian_vault/02_Current_Baseline/LLD-724_1/full.md")
+    full_path.write_text(
+        full_path.read_text(encoding="utf-8") + "\n当前目标客群是符合准入要求的存量客户。\n",
+        encoding="utf-8",
+    )
+    # Re-sign the manifest so asset hashes pass, and stub the SQLite mirror check
+    # so the test isolates the ambiguous before-content guard.
+    env.manifest_store.atomic_replace(
+        env.manifest_store.read_and_validate().model_copy(
+            update={
+                "full_document_sha256": env.markdown_store.sha256_for(
+                    "data/obsidian_vault/02_Current_Baseline/LLD-724_1/full.md"
+                )
+            }
+        )
+    )
+    use_case = _use_case(env, integrity=Mock(validate=Mock(return_value=True)))
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        use_case.execute(_command())
+
+    assert raised.value.code == ErrorCode.RELEASE_FAILED.value
+    assert raised.value.detail.startswith("FULL_DOCUMENT_TARGET_NOT_UNIQUE")
+    assert env.manifest_store.read_and_validate() == before
+
+
+def test_sqlite_mirror_failure_repaired_returns_success(tmp_path) -> None:
+    """Catches a mirror failure being repaired from the effective manifest."""
+    env = _approved_env(tmp_path)
+    from src.infrastructure.recovery.reconciliation_service import ReconciliationService
+
+    reconciliation = ReconciliationService(
+        manifest_store=env.manifest_store,
+        db_path=env.db_path,
+        project_root=env.project_root,
+    )
+    use_case = _use_case(env, reconciliation=reconciliation)
+    original_publish = use_case.release_uow.publish
+    calls = {"count": 0}
+
+    def fail_once(**kwargs):
+        calls["count"] += 1
+        raise sqlite3.OperationalError("locked")
+
+    use_case.release_uow = Mock(wraps=use_case.release_uow)
+    use_case.release_uow.publish = Mock(side_effect=fail_once)
+    reconciliation.rebuild_current_from_manifest = Mock(
+        wraps=reconciliation.rebuild_current_from_manifest
+    )
+
+    baseline = use_case.execute(_command())
+
+    assert baseline.status == BaselineStatus.EFFECTIVE
+    assert calls["count"] == 1
+    reconciliation.rebuild_current_from_manifest.assert_called_once()
+    assert env.projects.get(PROJECT_ID).current_baseline_id == TARGET_BASELINE_ID
+    assert env.changes.get("CHANGE-001").status == ChangeStatus.PUBLISHED
+    assert original_publish is not None
+
+
+def test_sqlite_mirror_failure_unrepaired_blocks_and_reports(tmp_path) -> None:
+    """Catches an unrepaired mirror mismatch allowing further publishes."""
+    env = _approved_env(tmp_path)
+    from src.domain.models import RepairResult
+    from src.infrastructure.recovery.reconciliation_service import ReconciliationService
+    from src.infrastructure.recovery.release_guard import ReleaseGuard
+
+    guard = ReleaseGuard()
+    reconciliation = ReconciliationService(
+        manifest_store=env.manifest_store,
+        db_path=env.db_path,
+        project_root=env.project_root,
+    )
+    reconciliation.rebuild_current_from_manifest = Mock(
+        return_value=RepairResult(
+            success=False, repaired_entities=[], error_code="REPAIR_WRITE_FAILED"
+        )
+    )
+    use_case = _use_case(env, reconciliation=reconciliation, guard=guard)
+    use_case.release_uow = Mock(wraps=use_case.release_uow)
+    use_case.release_uow.publish = Mock(side_effect=sqlite3.OperationalError("locked"))
+
+    with pytest.raises(DomainError, match="RELEASE_MIRROR_REPAIR_REQUIRED"):
+        use_case.execute(_command())
+
+    assert env.manifest_store.read_and_validate().current_version == TARGET_VERSION
+    assert guard.is_blocked
+    with pytest.raises(DomainError, match="RELEASE_BLOCKED"):
+        use_case.execute(_command())
+
+
+def test_publish_failure_keeps_change_approved_for_retry(tmp_path) -> None:
+    """Catches a retry creating a second approval record after a file failure."""
+    env = _approved_env(tmp_path)
+    use_case = _use_case(env)
+    use_case.markdown_store = Mock(wraps=env.markdown_store)
+    use_case.markdown_store.commit_release_dir = Mock(side_effect=OSError("disk full"))
+
+    with pytest.raises(OSError):
+        use_case.execute(_command())
+
+    change = env.changes.get("CHANGE-001")
+    assert change.status == ChangeStatus.APPROVED
+    assert change.review_idempotency_key == "REVIEW-KEY-001"
