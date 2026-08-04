@@ -5,7 +5,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.domain.enums import EvidenceSide, IssueSeverity, KnowledgeStatus
+from src.domain.enums import IssueSeverity, KnowledgeStatus
 from src.domain.models import Baseline, IssueEvidence, KnowledgeCard
 
 
@@ -23,11 +23,21 @@ class DeterministicFinding(BaseModel):
     target_rule_id: str | None = None
 
 
+class DeterministicRuleFacts(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    unauthorized_model_call: bool = False
+    change_mapping_exists: bool | None = None
+    cost_recalculation_exists: bool | None = None
+
+
 def run_rule(
     rule_id: str,
     *,
     card: KnowledgeCard,
     baseline: Baseline,
+    known_source_ids: set[str] | None = None,
+    facts: DeterministicRuleFacts | None = None,
 ) -> DeterministicFinding | None:
     """Run one card-scoped deterministic rule without any model dependency."""
 
@@ -36,37 +46,51 @@ def run_rule(
     if rule_id == "GOV-001":
         if card.status == KnowledgeStatus.EFFECTIVE:
             return None
-        source_ref = card.source_refs[0] if card.source_refs else card.id
-        source_id = source_ref.partition(":")[0]
-        return DeterministicFinding(
-            rule_id=rule_id,
-            issue_type="conflict",
+        return _information_finding(
+            rule_id,
+            card,
+            "非生效内容进入当前基线",
             severity=IssueSeverity.BLOCKING,
-            title="非生效内容进入当前基线",
+            issue_type="conflict",
             description=f"卡片 {card.id} 的状态为 {card.status.value}，不得进入当前基线。",
-            evidence=[
-                IssueEvidence(
-                    source_id=baseline.id,
-                    citation_id=f"CIT-{baseline.id}",
-                    excerpt=f"当前基线版本为 {baseline.version}。",
-                    document_version=baseline.version,
-                    page_or_section="Baseline Manifest",
-                    side=EvidenceSide.CURRENT_BASELINE,
-                ),
-                IssueEvidence(
-                    source_id=source_id,
-                    citation_id=source_ref,
-                    excerpt=card.content,
-                    document_version=card.product_version,
-                    page_or_section=card.title,
-                    side=EvidenceSide.CHALLENGING_SOURCE,
-                ),
-            ],
-            impacted_domains=[card.owner],
-            target_rule_id=card.id,
         )
     if rule_id == "STR-001" and not card.source_refs:
         return _information_finding(rule_id, card, "知识卡缺少来源")
+    if rule_id == "STR-002" and known_source_ids is not None:
+        missing = [ref for ref in card.source_refs if ref.partition(":")[0] not in known_source_ids]
+        if missing:
+            return _information_finding(
+                rule_id,
+                card,
+                "当前卡片引用不存在",
+                description=f"卡片 {card.id} 引用的来源不存在：{', '.join(missing)}。",
+            )
+    if rule_id == "GOV-002" and facts is not None and facts.unauthorized_model_call:
+        return _information_finding(
+            rule_id,
+            card,
+            "未授权资料禁止外部模型调用",
+            severity=IssueSeverity.BLOCKING,
+            issue_type="insufficient_evidence",
+            description="已根据项目与资料安全属性确认本次外调未获授权。",
+        )
+    if (
+        rule_id == "GOV-003"
+        and card.card_type
+        in {
+            "formal_decision",
+            "meeting_decision",
+        }
+        and facts is not None
+    ):
+        if facts.change_mapping_exists is False:
+            return _information_finding(
+                rule_id,
+                card,
+                "正式会议决定未映射到产品变更",
+                severity=IssueSeverity.PENDING_DECISION,
+                issue_type="not_synchronized",
+            )
     if rule_id == "VER-001" and card.product_version != baseline.version:
         return _major_finding(
             rule_id,
@@ -89,6 +113,19 @@ def run_rule(
         )
     if rule_id == "MKT-001" and card.card_type == "market_judgment" and not card.source_refs:
         return _information_finding(rule_id, card, "市场判断没有证据或验证计划")
+    if (
+        rule_id == "COST-001"
+        and card.card_type == "cost_parameter_change"
+        and facts is not None
+        and facts.cost_recalculation_exists is False
+    ):
+        return _information_finding(
+            rule_id,
+            card,
+            "影响成本的产品参数变化后未重算",
+            severity=IssueSeverity.PENDING_DECISION,
+            issue_type="not_synchronized",
+        )
     return None
 
 
@@ -98,16 +135,23 @@ def _information_finding(
     title: str,
     *,
     severity: IssueSeverity = IssueSeverity.PENDING_INFO,
+    issue_type: str | None = None,
+    description: str | None = None,
 ) -> DeterministicFinding:
     return DeterministicFinding(
         rule_id=rule_id,
-        issue_type="insufficient_evidence" if severity == IssueSeverity.PENDING_INFO else "stale",
+        issue_type=issue_type
+        or ("insufficient_evidence" if severity == IssueSeverity.PENDING_INFO else "stale"),
         severity=severity,
         title=title,
-        description=f"卡片 {card.id} 未通过 {rule_id} 确定性检查。",
+        description=description or f"卡片 {card.id} 未通过 {rule_id} 确定性检查。",
         evidence=[],
         impacted_domains=[card.owner],
-        uncertainty=title,
+        uncertainty=(
+            "该结果是基线快照规则事实，缺少独立挑战依据"
+            if rule_id in {"GOV-001", "VER-001", "VER-002"}
+            else title
+        ),
         target_rule_id=card.id,
     )
 
@@ -120,37 +164,15 @@ def _major_finding(
     *,
     severity: IssueSeverity,
 ) -> DeterministicFinding:
-    source_ref = card.source_refs[0] if card.source_refs else f"CARD-{card.id}"
-    source_id = source_ref.partition(":")[0]
-    if source_id == baseline.id:
-        source_id = f"CARD-{card.id}"
-    return DeterministicFinding(
-        rule_id=rule_id,
-        issue_type="stale",
+    return _information_finding(
+        rule_id,
+        card,
+        title,
         severity=severity,
-        title=title,
-        description=f"卡片 {card.id} 的版本 {card.product_version} 与 {baseline.version} 不一致。",
-        evidence=[
-            IssueEvidence(
-                source_id=baseline.id,
-                citation_id=f"CIT-{baseline.id}",
-                excerpt=f"当前基线版本为 {baseline.version}。",
-                document_version=baseline.version,
-                page_or_section="Baseline Manifest",
-                side=EvidenceSide.CURRENT_BASELINE,
-            ),
-            IssueEvidence(
-                source_id=source_id,
-                citation_id=source_ref,
-                excerpt=card.content,
-                document_version=card.product_version,
-                page_or_section=card.title,
-                side=EvidenceSide.CHALLENGING_SOURCE,
-            ),
-        ],
-        impacted_domains=[card.owner],
-        uncertainty=None,
-        target_rule_id=card.id,
+        issue_type="stale",
+        description=(
+            f"卡片 {card.id} 的版本 {card.product_version} 与 {baseline.version} 不一致。"
+        ),
     )
 
 

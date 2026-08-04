@@ -104,6 +104,8 @@ CREATE TABLE IF NOT EXISTS issue_cards (
     ai_confidence REAL,
     uncertainty TEXT,
     validation_note TEXT,
+    raw_severity TEXT,
+    deterministic_rule_id TEXT,
     fingerprint TEXT,
     target_rule_id TEXT,
     owner TEXT,
@@ -209,8 +211,6 @@ CREATE INDEX IF NOT EXISTS idx_card_project_status
     ON knowledge_cards(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_issue_project_status
     ON issue_cards(project_id, status, severity);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_fingerprint
-    ON issue_cards(fingerprint) WHERE fingerprint IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_change_project_status
     ON change_requests(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_event_entity
@@ -238,6 +238,8 @@ def migrate(db_path: Path) -> None:
         _add_column_if_missing(connection, "model_call_logs", "correlation_id", "TEXT")
         _add_column_if_missing(connection, "event_logs", "correlation_id", "TEXT")
         _add_column_if_missing(connection, "issue_cards", "validation_note", "TEXT")
+        _add_column_if_missing(connection, "issue_cards", "raw_severity", "TEXT")
+        _add_column_if_missing(connection, "issue_cards", "deterministic_rule_id", "TEXT")
         _add_column_if_missing(connection, "issue_cards", "fingerprint", "TEXT")
         _add_column_if_missing(connection, "issue_cards", "target_rule_id", "TEXT")
         _add_column_if_missing(
@@ -264,9 +266,10 @@ def migrate(db_path: Path) -> None:
             "CREATE INDEX IF NOT EXISTS idx_event_correlation "
             "ON event_logs(project_id, correlation_id, created_at)"
         )
+        connection.execute("DROP INDEX IF EXISTS idx_issue_fingerprint")
         connection.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_fingerprint "
-            "ON issue_cards(fingerprint) WHERE fingerprint IS NOT NULL"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_project_fingerprint "
+            "ON issue_cards(project_id, fingerprint) WHERE fingerprint IS NOT NULL"
         )
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.0",))
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.1",))

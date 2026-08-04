@@ -209,6 +209,7 @@ def _ingest_output() -> dict[str, Any]:
 def _lint_input() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
+        "input_contract_version": "2.0",
         "project_id": "LLD",
         "baseline_version": "LLD-724_1",
         "task_id": "TASK-001",
@@ -645,8 +646,14 @@ def test_gateway_rejects_overlong_input_collection_before_external_call(
     proof = _outbound_proof(name, inputs)
     if collection == "deterministic_findings":
         item = {
-            **deepcopy(inputs["comparison_items"][0]),
-            "side": "challenging_source",
+            "id": "FACT-GOV-001-RULE-001",
+            "rule_id": "GOV-001",
+            "issue_type": "conflict",
+            "severity": "blocking",
+            "title": "非生效内容进入当前基线",
+            "description": "卡片状态不是 effective。",
+            "target_identity": "RULE-001",
+            "locally_validated": True,
         }
     elif collection == "allowed_issue_types":
         item = "conflict"
@@ -712,6 +719,74 @@ def test_query_gateway_rejects_unknown_citation():
 
     with pytest.raises(OutputValidationError, match="UNKNOWN_CITATION"):
         _run_gateway("query", FakeDifyClient(output), _query_input())
+
+
+def test_lint_gateway_never_grants_local_fact_citation_authority() -> None:
+    """Catches a deterministic fact id being added to the trusted citation universe."""
+    inputs = _lint_input()
+    inputs["deterministic_findings"] = [
+        {
+            "id": "FACT-GOV-001-RULE-001",
+            "rule_id": "GOV-001",
+            "issue_type": "conflict",
+            "severity": "blocking",
+            "title": "非生效内容进入当前基线",
+            "description": "卡片状态不是 effective。",
+            "target_identity": "RULE-001",
+            "locally_validated": True,
+        }
+    ]
+    output = _lint_output()
+    output["issues"][0]["evidence"][0].update(
+        {
+            "source_id": "FACT-GOV-001-RULE-001",
+            "citation_id": "FACT-GOV-001-RULE-001",
+            "excerpt": "卡片状态不是 effective。",
+            "document_version": "LLD-724_1",
+            "page_or_section": "local fact",
+        }
+    )
+
+    with pytest.raises(OutputValidationError, match="UNKNOWN_CITATION"):
+        _run_gateway("lint", FakeDifyClient(output), inputs)
+
+
+def test_lint_gateway_rejects_v1_input_contract_before_external_call() -> None:
+    """Catches an old Dify Lint workflow silently receiving the breaking v2 shape."""
+    inputs = _lint_input()
+    proof = _outbound_proof("lint", inputs)
+    inputs["input_contract_version"] = "1.0"
+    client = FakeDifyClient(_lint_output())
+
+    with pytest.raises(GatewayError, match="LINT_INPUT_INVALID"):
+        _gateway("lint", client).run(inputs, safety_proof=proof)
+
+    assert client.calls == 0
+
+
+def test_lint_gateway_rejects_citation_fields_on_structured_local_fact() -> None:
+    """Catches local facts regaining provenance fields through an extra-input loophole."""
+    inputs = _lint_input()
+    inputs["deterministic_findings"] = [
+        {
+            "id": "FACT-GOV-001-RULE-001",
+            "rule_id": "GOV-001",
+            "issue_type": "conflict",
+            "severity": "blocking",
+            "title": "非生效内容进入当前基线",
+            "description": "卡片状态不是 effective。",
+            "target_identity": "RULE-001",
+            "locally_validated": True,
+        }
+    ]
+    proof = _outbound_proof("lint", inputs)
+    inputs["deterministic_findings"][0]["citation_id"] = "CIT-FORGED"
+    client = FakeDifyClient(_lint_output())
+
+    with pytest.raises(GatewayError, match="LINT_INPUT_INVALID"):
+        _gateway("lint", client).run(inputs, safety_proof=proof)
+
+    assert client.calls == 0
 
 
 def test_query_gateway_rejects_notice_content_promoted_into_answer():

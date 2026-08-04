@@ -1,5 +1,6 @@
 schema_version: "1.0"
 dify_output_version: "1.0"
+lint_input_contract_version: "2.0"
 
 objects:
   - project
@@ -50,6 +51,7 @@ relation_types:
   - supersedes
   - impacts
   - to_be_verified_by
+  - recalculated_by
 
 evidence_sides:
   - current_baseline

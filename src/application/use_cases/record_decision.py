@@ -7,7 +7,12 @@ from datetime import datetime
 from uuid import uuid4
 
 from src.application.dto.decision import RecordDecisionInput
-from src.application.ports.repositories import DecisionUnitOfWork, IssueRepository
+from src.application.ports.dashboard import ManifestReader
+from src.application.ports.repositories import (
+    DecisionUnitOfWork,
+    IssueRepository,
+    KnowledgeRepository,
+)
 from src.application.use_cases.create_change_request import CreateChangeRequest
 from src.domain.enums import DecisionAction, IssueStatus
 from src.domain.errors import DomainError, ErrorCode
@@ -19,6 +24,8 @@ class RecordDecision:
         self,
         *,
         issues: IssueRepository,
+        manifest: ManifestReader,
+        knowledge: KnowledgeRepository,
         unit_of_work: DecisionUnitOfWork,
         now: Callable[[], datetime],
         decision_id_factory: Callable[[], str] | None = None,
@@ -33,6 +40,8 @@ class RecordDecision:
         self.change_factory = CreateChangeRequest(
             id_factory=change_id_factory or (lambda: f"CHANGE-{uuid4().hex.upper()}"),
             now=now,
+            manifest=manifest,
+            knowledge=knowledge,
         )
 
     def execute(self, command: RecordDecisionInput) -> DecisionResult:

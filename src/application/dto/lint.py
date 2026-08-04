@@ -17,6 +17,19 @@ class RunLintInput(LintDto):
     source_id: str | None = None
 
 
+class ListLintIssuesInput(LintDto):
+    project_id: str
+    view: Literal[
+        "all_open",
+        "blocking",
+        "pending_decision",
+        "pending_info",
+        "processed",
+        "false_positive",
+    ] = "all_open"
+    sort_by: Literal["severity", "updated"] = "severity"
+
+
 class LintComparisonPackage(LintDto):
     inputs: dict[str, Any]
     source_total_chars: int

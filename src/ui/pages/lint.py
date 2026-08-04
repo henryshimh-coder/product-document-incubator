@@ -5,8 +5,8 @@ from html import escape
 import streamlit as st
 
 from src.application.container import AppContainer
-from src.application.dto.lint import RunLintInput
-from src.domain.enums import EvidenceSide
+from src.application.dto.lint import ListLintIssuesInput, RunLintInput
+from src.domain.enums import EvidenceSide, IssueStatus
 from src.domain.errors import AppError
 from src.domain.models import IssueCard, IssueEvidence
 from src.ui.components.decision_bar import clear_decision_idempotency, render_decision_bar
@@ -18,16 +18,29 @@ _SCOPE_LABELS = {
     "all_current_sources": "全部当前资料",
 }
 
+_VIEW_LABELS = {
+    "all_open": "全部开放",
+    "blocking": "阻断",
+    "pending_decision": "待决策",
+    "pending_info": "待补充",
+    "processed": "已处理",
+    "false_positive": "误报",
+}
+
 
 def render(container: AppContainer) -> None:
     st.title("一键自检")
     st.caption(f"检查项目 {container.settings.project_id} 的规则冲突和治理问题")
-    flash = st.session_state.pop("lint_decision_flash", None)
+    flash = st.session_state.get("lint_decision_flash")
     if flash is not None:
         st.success("会议结论已记录，问题状态已更新。")
         if flash.get("change_id"):
             st.info(f"已生成待审批变更 {flash['change_id']}。可从左侧导航前往“变更发布”。")
-            st.button("前往变更发布", key="lint_go_release", type="tertiary")
+            if st.button("前往变更发布", key="lint_go_release", type="tertiary"):
+                st.session_state.pop("lint_decision_flash", None)
+                _go_to_release()
+        else:
+            st.session_state.pop("lint_decision_flash", None)
     st.markdown('<div data-layout="38-62"></div>', unsafe_allow_html=True)
     left, right = st.columns([38, 62], gap="large")
     service_available = container.lint is not None
@@ -42,6 +55,18 @@ def render(container: AppContainer) -> None:
         source_id = None
         if scope == "current_plus_source":
             source_id = st.text_input("本次资料 ID *", key="lint_source_id")
+        view = st.selectbox(
+            "问题视图",
+            options=list(_VIEW_LABELS),
+            format_func=_VIEW_LABELS.__getitem__,
+            key="lint_view",
+        )
+        sort_by = st.selectbox(
+            "排序",
+            options=("severity", "updated"),
+            format_func={"severity": "严重度", "updated": "最近更新"}.__getitem__,
+            key="lint_sort",
+        )
         run_clicked = st.button(
             "启动一键自检",
             type="primary",
@@ -68,7 +93,13 @@ def render(container: AppContainer) -> None:
                 except (KeyError, OSError, ValueError):
                     st.error("自检未完成，请检查当前基线和比较资料。")
             try:
-                issues = container.lint.list_open(container.settings.project_id)
+                issues = container.lint.list_issues(
+                    ListLintIssuesInput(
+                        project_id=container.settings.project_id,
+                        view=view,
+                        sort_by=sort_by,
+                    )
+                )
             except (KeyError, OSError, ValueError):
                 issues = []
                 st.warning("问题列表暂时不可读取。")
@@ -80,6 +111,9 @@ def render(container: AppContainer) -> None:
             st.info("选择一个问题后查看双方依据并记录会议结论。")
             return
         _render_issue(selected)
+        if selected.status != IssueStatus.OPEN:
+            st.info("该问题已处理，可查看历史依据与结论。")
+            return
         if container.record_decision is None:
             st.info("会议决定服务尚未就绪。")
             return
@@ -99,6 +133,13 @@ def render(container: AppContainer) -> None:
             "change_id": None if result.change_request is None else result.change_request.id
         }
         st.rerun()
+
+
+def _go_to_release() -> None:
+    release_page = st.session_state.get("_pi_release_page")
+    if release_page is None:
+        raise RuntimeError("release page is not registered")
+    st.switch_page(release_page)
 
 
 def _render_issue(issue: IssueCard) -> None:
@@ -124,6 +165,13 @@ def _render_issue(issue: IssueCard) -> None:
     )
     recommendation = issue.ai_recommendation or "暂无"
     _section("AI 选项和建议", f"{options}\n\nAI 建议：{recommendation}")
+    if issue.deterministic_rule_id is not None and issue.raw_severity is not None:
+        _section(
+            "确定性审计",
+            f"确定性规则：{issue.deterministic_rule_id}\n"
+            f"原始严重度：{issue.raw_severity.value}\n"
+            f"当前严重度：{issue.severity.value}",
+        )
     uncertainty = issue.uncertainty or "暂无"
     if issue.validation_note:
         uncertainty = f"{uncertainty}；校验说明：{issue.validation_note}"

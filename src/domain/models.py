@@ -113,6 +113,7 @@ class Relation(DomainModel):
         "supersedes",
         "impacts",
         "to_be_verified_by",
+        "recalculated_by",
     ]
     target_id: NonEmptyStr
     source_ref: NonEmptyStr | None
@@ -158,6 +159,8 @@ class IssueCard(DomainModel):
     ai_confidence: float | None = Field(default=None, ge=0, le=1)
     uncertainty: NonEmptyStr | None
     validation_note: NonEmptyStr | None = None
+    raw_severity: IssueSeverity | None = None
+    deterministic_rule_id: NonEmptyStr | None = None
     fingerprint: NonEmptyStr | None = None
     target_rule_id: NonEmptyStr | None = None
     owner: NonEmptyStr | None

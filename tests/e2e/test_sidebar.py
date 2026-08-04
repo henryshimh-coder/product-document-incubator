@@ -96,6 +96,8 @@ def test_every_real_page_callable_renders_chrome_inside_page_run_boundary(
     )
     monkeypatch.setattr(navigation_module, "get_page_definitions", lambda: definitions)
     monkeypatch.setattr(navigation_module.st, "navigation", capture_navigation)
+    session_state: dict[str, Any] = {}
+    monkeypatch.setattr(navigation_module.st, "session_state", session_state)
     monkeypatch.setattr(
         navigation_module,
         "render_sidebar_chrome",
@@ -106,6 +108,7 @@ def test_every_real_page_callable_renders_chrome_inside_page_run_boundary(
     calls.clear()
 
     assert len(captured_pages) == 6
+    assert session_state["_pi_release_page"] is captured_pages[4]
     for route, page in zip(
         ["home", "ingest", "query", "lint", "release", "trace"],
         captured_pages,

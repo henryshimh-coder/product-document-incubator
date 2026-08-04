@@ -39,7 +39,10 @@ class ErrorCode(StrEnum):
     DECISION_FIELDS_REQUIRED = "DECISION_FIELDS_REQUIRED"
     CHANGE_FIELDS_REQUIRED = "CHANGE_FIELDS_REQUIRED"
     DECISION_IDEMPOTENCY_CONFLICT = "DECISION_IDEMPOTENCY_CONFLICT"
+    DECISION_PERSISTENCE_FAILED = "DECISION_PERSISTENCE_FAILED"
     LINT_SOURCE_REQUIRED = "LINT_SOURCE_REQUIRED"
+    LINT_SOURCE_NOT_COMPARABLE = "LINT_SOURCE_NOT_COMPARABLE"
+    LINT_DETERMINISTIC_LIMIT_EXCEEDED = "LINT_DETERMINISTIC_LIMIT_EXCEEDED"
 
 
 @dataclass(frozen=True)
@@ -89,7 +92,15 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
     ErrorCode.DECISION_FIELDS_REQUIRED: ErrorDefinition("会议决定缺少当前操作的必填信息"),
     ErrorCode.CHANGE_FIELDS_REQUIRED: ErrorDefinition("变更单缺少修改前后、依据或目标版本"),
     ErrorCode.DECISION_IDEMPOTENCY_CONFLICT: ErrorDefinition("重复提交键对应的会议结论不一致"),
+    ErrorCode.DECISION_PERSISTENCE_FAILED: ErrorDefinition(
+        "会议决定未能安全写入，原问题状态不受影响",
+        retryable=True,
+    ),
     ErrorCode.LINT_SOURCE_REQUIRED: ErrorDefinition("当前自检范围需要指定比较资料"),
+    ErrorCode.LINT_SOURCE_NOT_COMPARABLE: ErrorDefinition("指定资料没有可比较的候选或冲突卡片"),
+    ErrorCode.LINT_DETERMINISTIC_LIMIT_EXCEEDED: ErrorDefinition(
+        "本地确定性问题超过单次安全自检上限"
+    ),
 }
 
 

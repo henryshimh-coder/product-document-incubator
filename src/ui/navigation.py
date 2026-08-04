@@ -46,4 +46,7 @@ def build_navigation(container: AppContainer) -> Any:
         )
         for definition in get_page_definitions()
     ]
+    st.session_state["_pi_release_page"] = next(
+        page for page in pages if page.url_path == "release"
+    )
     return st.navigation(pages, position="sidebar")

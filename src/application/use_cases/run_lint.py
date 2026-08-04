@@ -3,13 +3,18 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from pydantic import ValidationError
 
-from src.application.dto.lint import LintComparisonPackage, RunLintInput
+from src.application.dto.lint import (
+    LintComparisonPackage,
+    ListLintIssuesInput,
+    RunLintInput,
+)
 from src.application.ports.dashboard import ManifestReader
+from src.application.ports.lint_facts import LintFactReader
 from src.application.ports.repositories import (
     IssueRepository,
     KnowledgeRepository,
@@ -90,17 +95,19 @@ class LintIssueValidator:
                 }
                 or len(sources) < 2
             ):
+                raw_severity = severity
                 severity = IssueSeverity.PENDING_INFO
-                validation_note = "缺少对方依据"
+                validation_note = f"严重度由 {raw_severity.value} 降级为 pending_info：缺少对方依据"
                 uncertainty = "缺少对方依据"
         if severity == IssueSeverity.PENDING_INFO and not uncertainty:
             uncertainty = "需要补充信息"
         evidence = [IssueEvidence.model_validate(item.model_dump()) for item in issue.evidence]
         fingerprint = issue_fingerprint(
+            project_id=project_id,
             issue_type=issue.issue_type,
             evidence=evidence,
             impacted_domains=list(issue.impacted_domains),
-            target_rule_id=target_rule_id,
+            target_identity=target_rule_id or issue.title,
         )
         timestamp = self.now()
         return IssueCard(
@@ -127,18 +134,41 @@ class LintIssueValidator:
         )
 
     def validate_finding(self, finding: DeterministicFinding, *, project_id: str) -> IssueCard:
+        severity = finding.severity
+        uncertainty = finding.uncertainty
+        validation_note = None
+        if severity in {IssueSeverity.BLOCKING, IssueSeverity.PENDING_DECISION}:
+            sides = {item.side for item in finding.evidence}
+            sources = {item.source_id for item in finding.evidence}
+            if (
+                sides
+                != {
+                    EvidenceSide.CURRENT_BASELINE,
+                    EvidenceSide.CHALLENGING_SOURCE,
+                }
+                or len(sources) < 2
+            ):
+                raw_severity = severity
+                severity = IssueSeverity.PENDING_INFO
+                uncertainty = "缺少独立挑战依据"
+                validation_note = (
+                    f"严重度由 {raw_severity.value} 降级为 pending_info：缺少独立挑战依据"
+                )
+        if severity == IssueSeverity.PENDING_INFO and not uncertainty:
+            uncertainty = "需要补充信息"
         fingerprint = issue_fingerprint(
+            project_id=project_id,
             issue_type=finding.issue_type,
             evidence=finding.evidence,
             impacted_domains=finding.impacted_domains,
-            target_rule_id=finding.target_rule_id or finding.rule_id,
+            target_identity=(f"{finding.rule_id}:{finding.target_rule_id or finding.title}"),
         )
         timestamp = self.now()
         return IssueCard(
             id=f"ISSUE-{fingerprint[:20].upper()}",
             project_id=project_id,
             issue_type=finding.issue_type,
-            severity=finding.severity,
+            severity=severity,
             status=IssueStatus.OPEN,
             title=finding.title,
             description=finding.description,
@@ -147,8 +177,10 @@ class LintIssueValidator:
             options=[],
             ai_recommendation=None,
             ai_confidence=None,
-            uncertainty=finding.uncertainty,
-            validation_note=None,
+            uncertainty=uncertainty,
+            validation_note=validation_note,
+            raw_severity=finding.severity,
+            deterministic_rule_id=finding.rule_id,
             fingerprint=fingerprint,
             target_rule_id=finding.target_rule_id or finding.rule_id,
             owner=None,
@@ -250,6 +282,45 @@ class RunLint:
     def list_open(self, project_id: str) -> list[IssueCard]:
         return self.issues.list_open(project_id)
 
+    def list_all(self, project_id: str) -> list[IssueCard]:
+        return self.issues.list_all(project_id)
+
+    def list_issues(self, command: ListLintIssuesInput) -> list[IssueCard]:
+        issues = self.issues.list_all(command.project_id)
+        if command.view == "all_open":
+            filtered = [issue for issue in issues if issue.status == IssueStatus.OPEN]
+        elif command.view in {
+            "blocking",
+            "pending_decision",
+            "pending_info",
+        }:
+            severity = IssueSeverity(command.view)
+            filtered = [
+                issue
+                for issue in issues
+                if issue.status == IssueStatus.OPEN and issue.severity == severity
+            ]
+        elif command.view == "processed":
+            filtered = [
+                issue
+                for issue in issues
+                if issue.status in {IssueStatus.DECIDED, IssueStatus.DEFERRED, IssueStatus.CLOSED}
+            ]
+        else:
+            filtered = [issue for issue in issues if issue.status == IssueStatus.FALSE_POSITIVE]
+        if command.sort_by == "updated":
+            return sorted(filtered, key=lambda issue: issue.updated_at, reverse=True)
+        severity_rank = {
+            IssueSeverity.BLOCKING: 3,
+            IssueSeverity.PENDING_DECISION: 2,
+            IssueSeverity.PENDING_INFO: 1,
+        }
+        return sorted(
+            filtered,
+            key=lambda issue: (severity_rank[issue.severity], issue.updated_at),
+            reverse=True,
+        )
+
 
 class DeterministicLintRunner:
     def __init__(
@@ -257,9 +328,15 @@ class DeterministicLintRunner:
         *,
         manifest: ManifestReader,
         card_store: MarkdownStore,
+        projects: ProjectRepository | None = None,
+        sources: SourceRepository | None = None,
+        fact_reader: LintFactReader | None = None,
     ) -> None:
         self.manifest = manifest
         self.card_store = card_store
+        self.projects = projects
+        self.sources = sources
+        self.fact_reader = fact_reader
 
     def run(self, command: RunLintInput) -> list[DeterministicFinding]:
         snapshot = self.manifest.read_snapshot()
@@ -285,10 +362,41 @@ class DeterministicLintRunner:
             effective_at=manifest.published_at,
             created_at=manifest.published_at,
         )
+        known_source_ids: set[str] | None = None
+        source_records = []
+        if self.sources is not None:
+            source_records = self.sources.list_for_project(command.project_id)
+            known_source_ids = {baseline.id, *(source.id for source in source_records)}
         findings: list[DeterministicFinding] = []
         for card in self.card_store.read_cards(manifest.card_snapshot_path):
-            for rule_id in ("GOV-001", "STR-001", "VER-001", "VER-002", "MKT-001"):
-                finding = run_rule(rule_id, card=card, baseline=baseline)
+            facts = (
+                None
+                if self.fact_reader is None
+                else self.fact_reader.for_card(
+                    project_id=command.project_id,
+                    baseline_version=baseline.version,
+                    card_id=card.id,
+                    source_ids=tuple(ref.partition(":")[0] for ref in card.source_refs),
+                )
+            )
+            for rule_id in (
+                "STR-001",
+                "STR-002",
+                "GOV-001",
+                "GOV-002",
+                "GOV-003",
+                "VER-001",
+                "VER-002",
+                "MKT-001",
+                "COST-001",
+            ):
+                finding = run_rule(
+                    rule_id,
+                    card=card,
+                    baseline=baseline,
+                    known_source_ids=known_source_ids,
+                    facts=facts,
+                )
                 if finding is not None:
                     findings.append(finding)
         return findings
@@ -306,6 +414,7 @@ class SafeLintComparisonBuilder:
         material_reader: LocalQueryMaterialReader,
         task_id_factory: Callable[[], str] | None = None,
         schema_version: str = "1.0",
+        input_contract_version: Literal["2.0"] = "2.0",
     ) -> None:
         self.manifest = manifest
         self.projects = projects
@@ -315,6 +424,7 @@ class SafeLintComparisonBuilder:
         self.material_reader = material_reader
         self.task_id_factory = task_id_factory or (lambda: f"TASK-LINT-{uuid4().hex.upper()}")
         self.schema_version = schema_version
+        self.input_contract_version = input_contract_version
 
     def build_minimum(
         self,
@@ -363,6 +473,28 @@ class SafeLintComparisonBuilder:
                 }
             )
 
+        materials = [baseline_material]
+        selected_source = None
+        selected_material = None
+        if command.scope == "current_plus_source":
+            source_id = command.source_id or ""
+            try:
+                selected_source = self.sources.get(source_id)
+            except KeyError as error:
+                raise DomainError(ErrorCode.CITATION_INVALID, "LINT_SOURCE_NOT_FOUND") from error
+            if (
+                selected_source.project_id != project.id
+                or selected_source.applicable_baseline_version != manifest.current_version
+                or selected_source.ingest_status != "completed"
+                or not can_call_external_model(project, selected_source)
+            ):
+                raise DomainError(
+                    ErrorCode.EXTERNAL_CALL_DENIED,
+                    f"LINT_SOURCE_NOT_AUTHORIZED:{selected_source.id}",
+                )
+            selected_material = self.material_reader.read_source(selected_source)
+            materials.append(selected_material)
+
         notices = self.knowledge.list_notices(command.project_id, manifest.current_version)
         if command.scope == "current":
             notices = []
@@ -373,25 +505,40 @@ class SafeLintComparisonBuilder:
                 for card in notices
                 if any(ref.partition(":")[0] == source_id for ref in card.source_refs)
             ]
+            if not notices:
+                raise DomainError(ErrorCode.LINT_SOURCE_NOT_COMPARABLE)
         comparison_items: list[dict[str, str]] = []
-        materials = [baseline_material]
         for index, card in enumerate(notices[:50], start=1):
-            source_id = card.source_refs[0].partition(":")[0] if card.source_refs else ""
-            try:
-                source = self.sources.get(source_id)
-            except KeyError as error:
-                raise DomainError(ErrorCode.CITATION_INVALID, "LINT_SOURCE_NOT_FOUND") from error
-            if (
-                source.project_id != project.id
-                or source.applicable_baseline_version != manifest.current_version
-                or source.ingest_status != "completed"
-                or not can_call_external_model(project, source)
-            ):
-                raise DomainError(
-                    ErrorCode.EXTERNAL_CALL_DENIED,
-                    f"LINT_SOURCE_NOT_AUTHORIZED:{source.id}",
-                )
-            material = self.material_reader.read_source(source)
+            source_id = (
+                selected_source.id
+                if selected_source is not None
+                else (card.source_refs[0].partition(":")[0] if card.source_refs else "")
+            )
+            if selected_source is not None and source_id == selected_source.id:
+                source = selected_source
+                material = selected_material
+            else:
+                try:
+                    source = self.sources.get(source_id)
+                except KeyError as error:
+                    raise DomainError(
+                        ErrorCode.CITATION_INVALID,
+                        "LINT_SOURCE_NOT_FOUND",
+                    ) from error
+                if (
+                    source.project_id != project.id
+                    or source.applicable_baseline_version != manifest.current_version
+                    or source.ingest_status != "completed"
+                    or not can_call_external_model(project, source)
+                ):
+                    raise DomainError(
+                        ErrorCode.EXTERNAL_CALL_DENIED,
+                        f"LINT_SOURCE_NOT_AUTHORIZED:{source.id}",
+                    )
+                material = self.material_reader.read_source(source)
+                materials.append(material)
+            if material is None:
+                raise DomainError(ErrorCode.CITATION_INVALID, "LINT_SOURCE_NOT_FOUND")
             fragment = next(
                 (item for item in material.fragments if card.content in item.text),
                 None,
@@ -401,7 +548,6 @@ class SafeLintComparisonBuilder:
                     ErrorCode.CITATION_INVALID,
                     f"LINT_COMPARISON_TEXT_MISMATCH:{card.id}",
                 )
-            materials.append(material)
             comparison_items.append(
                 {
                     "id": card.id,
@@ -416,27 +562,31 @@ class SafeLintComparisonBuilder:
         for item in deterministic:
             if not isinstance(item, DeterministicFinding):
                 continue
-            for evidence in item.evidence:
-                deterministic_inputs.append(
-                    {
-                        "id": item.rule_id,
-                        "source_id": evidence.source_id,
-                        "citation_id": evidence.citation_id,
-                        "document_version": evidence.document_version,
-                        "page_or_section": evidence.page_or_section,
-                        "excerpt": evidence.excerpt,
-                        "side": evidence.side.value,
-                    }
-                )
+            target_identity = item.target_rule_id or item.rule_id
+            deterministic_inputs.append(
+                {
+                    "id": f"FACT-{item.rule_id}-{target_identity}",
+                    "rule_id": item.rule_id,
+                    "issue_type": item.issue_type,
+                    "severity": item.severity.value,
+                    "title": item.title,
+                    "description": item.description,
+                    "target_identity": target_identity,
+                    "locally_validated": True,
+                }
+            )
+        if len(deterministic_inputs) > 50:
+            raise DomainError(ErrorCode.LINT_DETERMINISTIC_LIMIT_EXCEEDED)
         inputs = LintWorkflowInput(
             schema_version=self.schema_version,
+            input_contract_version=self.input_contract_version,
             project_id=command.project_id,
             baseline_version=manifest.current_version,
             task_id=self.task_id_factory(),
             language="zh-CN",
             baseline_rules=baseline_rules,
             comparison_items=comparison_items,
-            deterministic_findings=deterministic_inputs[:50],
+            deterministic_findings=deterministic_inputs,
             allowed_issue_types=[
                 "conflict",
                 "omission",
@@ -459,17 +609,19 @@ class SafeLintComparisonBuilder:
 
 def issue_fingerprint(
     *,
+    project_id: str,
     issue_type: str,
     evidence: Sequence[IssueEvidence],
     impacted_domains: Sequence[str],
-    target_rule_id: str | None,
+    target_identity: str,
 ) -> str:
+    # Evidence and display-domain enrichment must not create a new logical issue.
+    del evidence, impacted_domains
     normalized = "\n".join(
         (
+            project_id.strip().casefold(),
             issue_type.strip().casefold(),
-            "|".join(sorted(item.citation_id for item in evidence)),
-            "|".join(sorted(domain.strip().casefold() for domain in impacted_domains)),
-            (target_rule_id or "").strip().casefold(),
+            target_identity.strip().casefold(),
         )
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -477,7 +629,17 @@ def issue_fingerprint(
 
 def _deduplicate(issues: Sequence[IssueCard]) -> list[IssueCard]:
     by_fingerprint: dict[str, IssueCard] = {}
+    severity_rank = {
+        IssueSeverity.PENDING_INFO: 0,
+        IssueSeverity.PENDING_DECISION: 1,
+        IssueSeverity.BLOCKING: 2,
+    }
     for issue in issues:
         key = issue.fingerprint or issue.id
-        by_fingerprint[key] = issue
+        current = by_fingerprint.get(key)
+        if current is None or (severity_rank[issue.severity], len(issue.evidence)) > (
+            severity_rank[current.severity],
+            len(current.evidence),
+        ):
+            by_fingerprint[key] = issue
     return list(by_fingerprint.values())

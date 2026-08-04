@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import sqlite3
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from src.domain.models import (
     ChangeRequest,
     Decision,
     IssueCard,
+    IssueEvidence,
     KnowledgeCard,
     Project,
     SourceRecord,
@@ -351,6 +354,8 @@ def test_issue_repository_upserts_repeated_lint_fingerprint_without_losing_creat
         ai_recommendation=None,
         ai_confidence=None,
         uncertainty="缺少市场依据",
+        raw_severity=IssueSeverity.BLOCKING,
+        deterministic_rule_id="GOV-001",
         fingerprint="f" * 64,
         owner=None,
         due_at=None,
@@ -373,5 +378,471 @@ def test_issue_repository_upserts_repeated_lint_fingerprint_without_losing_creat
 
     stored = repository.get("ISSUE-FIRST")
     assert stored.title == "再次发现"
+    assert stored.raw_severity == IssueSeverity.BLOCKING
+    assert stored.deterministic_rule_id == "GOV-001"
     assert stored.created_at == NOW
     assert stored.updated_at == NOW + timedelta(minutes=5)
+
+
+def test_issue_repository_scopes_fingerprint_uniqueness_to_project(tmp_path: Path) -> None:
+    """Catches one project's logical finding overwriting another project's issue."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    projects = SqliteProjectRepository(db_path)
+    for project_id in ("LLD", "OTHER"):
+        projects.add(
+            Project(
+                id=project_id,
+                name=project_id,
+                product_line="轻量交付",
+                stage="demo",
+                current_baseline_id=None,
+                allow_external_model=True,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+    base = IssueCard(
+        id="ISSUE-LLD",
+        project_id="LLD",
+        issue_type="stale",
+        severity=IssueSeverity.PENDING_INFO,
+        status=IssueStatus.OPEN,
+        title="版本待核对",
+        description="同一逻辑问题可出现在不同项目。",
+        evidence=[],
+        impacted_domains=["产品"],
+        options=[],
+        ai_recommendation=None,
+        ai_confidence=None,
+        uncertainty="待核对",
+        fingerprint="a" * 64,
+        target_rule_id="RULE-001",
+        owner=None,
+        due_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    repository = SqliteIssueRepository(db_path)
+
+    repository.upsert_all([base])
+    repository.upsert_all([base.model_copy(update={"id": "ISSUE-OTHER", "project_id": "OTHER"})])
+
+    assert repository.get("ISSUE-LLD").project_id == "LLD"
+    assert repository.get("ISSUE-OTHER").project_id == "OTHER"
+
+
+def test_issue_repository_lists_all_statuses_for_review_history(tmp_path: Path) -> None:
+    """Catches decided or closed issues disappearing from application-level filters."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    base = IssueCard(
+        id="ISSUE-OPEN",
+        project_id="LLD",
+        issue_type="information_gap",
+        severity=IssueSeverity.PENDING_INFO,
+        status=IssueStatus.OPEN,
+        title="待处理",
+        description="需要补充信息。",
+        evidence=[],
+        impacted_domains=["产品"],
+        options=[],
+        ai_recommendation=None,
+        ai_confidence=None,
+        uncertainty="待处理",
+        owner=None,
+        due_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    repository = SqliteIssueRepository(db_path)
+    repository.add_many(
+        [
+            base,
+            base.model_copy(
+                update={
+                    "id": "ISSUE-CLOSED",
+                    "status": IssueStatus.CLOSED,
+                    "title": "已关闭",
+                    "updated_at": NOW + timedelta(minutes=1),
+                }
+            ),
+        ]
+    )
+
+    assert {issue.status for issue in repository.list_all("LLD")} == {
+        IssueStatus.OPEN,
+        IssueStatus.CLOSED,
+    }
+
+
+def test_issue_repository_enriches_one_sided_issue_without_creating_a_new_row(
+    tmp_path: Path,
+) -> None:
+    """Catches evidence supplementation changing logical identity across lint runs."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    baseline = IssueEvidence(
+        source_id="BASE-LLD",
+        citation_id="CIT-BASE-001",
+        excerpt="当前客群规则。",
+        document_version="LLD-724_1",
+        page_or_section="目标客群",
+        side="current_baseline",
+    )
+    challenge = IssueEvidence(
+        source_id="SRC-RISK",
+        citation_id="CIT-RISK-001",
+        excerpt="风险意见要求收紧。",
+        document_version="v1.0",
+        page_or_section="客群限制",
+        side="challenging_source",
+    )
+    first = IssueCard(
+        id="ISSUE-FIRST",
+        project_id="LLD",
+        issue_type="conflict",
+        severity=IssueSeverity.PENDING_INFO,
+        status=IssueStatus.OPEN,
+        title="客群依据待补充",
+        description="当前只有一侧依据。",
+        evidence=[baseline],
+        impacted_domains=["产品", "风险"],
+        options=[],
+        ai_recommendation=None,
+        ai_confidence=None,
+        uncertainty="缺少对方依据",
+        fingerprint="e" * 64,
+        target_rule_id="RULE-001",
+        owner=None,
+        due_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    repository = SqliteIssueRepository(db_path)
+    repository.upsert_all([first])
+
+    repository.upsert_all(
+        [
+            first.model_copy(
+                update={
+                    "id": "ISSUE-ENRICHED",
+                    "severity": IssueSeverity.PENDING_DECISION,
+                    "title": "客群边界不一致",
+                    "evidence": [baseline, challenge],
+                    "uncertainty": "需会议确认",
+                    "updated_at": NOW + timedelta(minutes=5),
+                }
+            )
+        ]
+    )
+
+    stored = repository.get("ISSUE-FIRST")
+    assert stored.severity == IssueSeverity.PENDING_DECISION
+    assert stored.evidence == [baseline, challenge]
+    with pytest.raises(KeyError):
+        repository.get("ISSUE-ENRICHED")
+
+
+def _db8_fingerprint(issue: IssueCard) -> str:
+    normalized = "\n".join(
+        (
+            issue.issue_type.casefold(),
+            "|".join(sorted(item.citation_id for item in issue.evidence)),
+            "|".join(sorted(domain.casefold() for domain in issue.impacted_domains)),
+            (issue.target_rule_id or "").casefold(),
+        )
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("legacy_status", [IssueStatus.OPEN, IssueStatus.CLOSED])
+def test_issue_repository_reconciles_unique_db8_fingerprint_and_preserves_state(
+    tmp_path: Path,
+    legacy_status: IssueStatus,
+) -> None:
+    """Catches a db8 logical issue becoming a duplicate after the fingerprint redesign."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    legacy = IssueCard(
+        id="ISSUE-DB8",
+        project_id="LLD",
+        issue_type="stale",
+        severity=IssueSeverity.PENDING_INFO,
+        status=legacy_status,
+        title="当前基线引用历史产品规则",
+        description="db8 时期的确定性问题。",
+        evidence=[],
+        impacted_domains=["产品"],
+        options=[],
+        ai_recommendation=None,
+        ai_confidence=None,
+        uncertainty="缺少独立挑战依据",
+        fingerprint=None,
+        target_rule_id="RULE-001",
+        owner=None,
+        due_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    legacy = legacy.model_copy(update={"fingerprint": _db8_fingerprint(legacy)})
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP INDEX idx_issue_project_fingerprint")
+        connection.execute(
+            "CREATE UNIQUE INDEX idx_issue_fingerprint "
+            "ON issue_cards(fingerprint) WHERE fingerprint IS NOT NULL"
+        )
+    repository = SqliteIssueRepository(db_path)
+    repository.add_many([legacy])
+
+    migrate(db_path)
+    repository.upsert_all(
+        [
+            legacy.model_copy(
+                update={
+                    "id": "ISSUE-NEW",
+                    "status": IssueStatus.OPEN,
+                    "description": "重新自检后的规则事实。",
+                    "raw_severity": IssueSeverity.BLOCKING,
+                    "deterministic_rule_id": "VER-001",
+                    "fingerprint": "1" * 64,
+                    "updated_at": NOW + timedelta(minutes=5),
+                }
+            )
+        ]
+    )
+
+    stored = repository.get("ISSUE-DB8")
+    assert stored.fingerprint == "1" * 64
+    assert stored.status == legacy_status
+    assert stored.created_at == NOW
+    assert stored.updated_at == NOW + timedelta(minutes=5)
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM issue_cards").fetchone()[0] == 1
+
+
+def test_legacy_fingerprint_reconciliation_does_not_merge_distinct_rules(
+    tmp_path: Path,
+) -> None:
+    """Catches VER-002 overwriting an old VER-001 row that targets the same card."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    legacy_ver_001 = IssueCard(
+        id="ISSUE-VER-001-DB8",
+        project_id="LLD",
+        issue_type="stale",
+        severity=IssueSeverity.PENDING_INFO,
+        status=IssueStatus.CLOSED,
+        title="当前基线引用历史产品规则",
+        description="db8 VER-001。",
+        evidence=[],
+        impacted_domains=["产品"],
+        options=[],
+        ai_recommendation=None,
+        ai_confidence=None,
+        uncertainty="规则事实",
+        fingerprint="2" * 64,
+        target_rule_id="RULE-001",
+        owner=None,
+        due_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    new_ver_002 = legacy_ver_001.model_copy(
+        update={
+            "id": "ISSUE-VER-002-NEW",
+            "status": IssueStatus.OPEN,
+            "title": "技术方案对应产品版本落后",
+            "description": "VER-002 规则事实。",
+            "raw_severity": IssueSeverity.PENDING_DECISION,
+            "deterministic_rule_id": "VER-002",
+            "fingerprint": "3" * 64,
+            "updated_at": NOW + timedelta(minutes=1),
+        }
+    )
+    repository = SqliteIssueRepository(db_path)
+    repository.add_many([legacy_ver_001])
+
+    repository.upsert_all([new_ver_002])
+
+    assert repository.get("ISSUE-VER-001-DB8").status == IssueStatus.CLOSED
+    assert repository.get("ISSUE-VER-002-NEW").title == "技术方案对应产品版本落后"
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM issue_cards").fetchone()[0] == 2
+
+
+def test_legacy_fingerprint_reconciliation_rejects_semantic_impersonation(
+    tmp_path: Path,
+) -> None:
+    """Catches a semantic issue taking over an old deterministic row by copied title/target."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    legacy = IssueCard(
+        id="ISSUE-LEGACY-DETERMINISTIC",
+        project_id="LLD",
+        issue_type="stale",
+        severity=IssueSeverity.PENDING_INFO,
+        status=IssueStatus.CLOSED,
+        title="当前基线引用历史产品规则",
+        description="db8 确定性问题。",
+        evidence=[],
+        impacted_domains=["产品"],
+        options=[],
+        ai_recommendation=None,
+        ai_confidence=None,
+        uncertainty="缺少独立挑战依据",
+        fingerprint=None,
+        target_rule_id="RULE-001",
+        owner=None,
+        due_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    legacy = legacy.model_copy(update={"fingerprint": _db8_fingerprint(legacy)})
+    semantic = legacy.model_copy(
+        update={
+            "id": "ISSUE-SEMANTIC",
+            "status": IssueStatus.OPEN,
+            "description": "AI 产生的同名语义问题。",
+            "fingerprint": "4" * 64,
+            "deterministic_rule_id": None,
+            "raw_severity": None,
+            "updated_at": NOW + timedelta(minutes=1),
+        }
+    )
+    repository = SqliteIssueRepository(db_path)
+    repository.add_many([legacy])
+
+    repository.upsert_all([semantic])
+
+    assert repository.get("ISSUE-LEGACY-DETERMINISTIC").status == IssueStatus.CLOSED
+    assert repository.get("ISSUE-SEMANTIC").description.startswith("AI ")
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM issue_cards").fetchone()[0] == 2
+
+
+def test_issue_upsert_acquires_immediate_transaction_before_identity_lookup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Catches two writers racing between fingerprint lookup and insert."""
+    repositories = __import__(
+        "src.infrastructure.db.repositories", fromlist=["SqliteIssueRepository"]
+    )
+    real_connect = __import__("src.infrastructure.db.connection", fromlist=["connect"]).connect
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="LLD",
+            name="产品智策",
+            product_line="轻量交付",
+            stage="demo",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    statements: list[str] = []
+
+    def traced_connect(path):
+        connection = real_connect(path)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(repositories, "connect", traced_connect)
+    issue = IssueCard(
+        id="ISSUE-ATOMIC",
+        project_id="LLD",
+        issue_type="insufficient_evidence",
+        severity=IssueSeverity.PENDING_INFO,
+        status=IssueStatus.OPEN,
+        title="缺少来源",
+        description="需补充来源。",
+        evidence=[],
+        impacted_domains=["产品"],
+        options=[],
+        ai_recommendation=None,
+        ai_confidence=None,
+        uncertainty="需补充来源",
+        raw_severity=IssueSeverity.PENDING_INFO,
+        deterministic_rule_id="STR-001",
+        fingerprint="5" * 64,
+        target_rule_id="RULE-001",
+        owner=None,
+        due_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    repositories.SqliteIssueRepository(db_path).upsert_all([issue])
+
+    normalized = [statement.strip().upper() for statement in statements]
+    begin_index = normalized.index("BEGIN IMMEDIATE")
+    select_index = next(
+        index
+        for index, statement in enumerate(normalized)
+        if statement.startswith("SELECT ID, CREATED_AT FROM ISSUE_CARDS")
+    )
+    assert begin_index < select_index

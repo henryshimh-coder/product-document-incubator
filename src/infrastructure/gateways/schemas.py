@@ -142,11 +142,25 @@ class LintCitationInput(WorkflowOutput):
     excerpt: MaterialFragment
 
 
-class LintDeterministicFindingInput(LintCitationInput):
-    side: EvidenceSide
+class LintDeterministicFindingInput(WorkflowOutput):
+    id: IdentifierStr
+    rule_id: IdentifierStr
+    issue_type: Literal[
+        "conflict",
+        "omission",
+        "stale",
+        "not_synchronized",
+        "insufficient_evidence",
+    ]
+    severity: IssueSeverity
+    title: MetadataStr
+    description: MaterialFragment
+    target_identity: IdentifierStr
+    locally_validated: Literal[True]
 
 
 class LintWorkflowInput(CommonWorkflowInput):
+    input_contract_version: Literal["2.0"]
     baseline_rules: list[LintCitationInput] = Field(max_length=MAX_CITATION_COLLECTION_ITEMS)
     comparison_items: list[LintCitationInput] = Field(max_length=MAX_CITATION_COLLECTION_ITEMS)
     deterministic_findings: list[LintDeterministicFindingInput] = Field(

@@ -209,3 +209,70 @@ def test_migrate_repairs_null_and_blank_event_correlations_despite_1_2_marker(
         ("EVENT-VALID", "CORR-VALID"),
     ]
     assert versions == [("1.0",), ("1.1",), ("1.2",)]
+
+
+def test_migrate_upgrades_legacy_issue_table_before_creating_fingerprint_index(
+    tmp_path: Path,
+) -> None:
+    """Catches an index referencing a column that has not yet been added to an old DB."""
+    db_path = tmp_path / "product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE issue_cards (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                issue_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                status TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                impacted_domains_json TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                ai_recommendation TEXT,
+                ai_confidence REAL,
+                uncertainty TEXT,
+                owner TEXT,
+                due_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO issue_cards VALUES (
+                'ISSUE-LEGACY', 'LLD', 'conflict', 'blocking', 'open',
+                '历史冲突', '保留的历史问题', '[]', '["产品"]', '[]',
+                NULL, NULL, NULL, NULL, NULL,
+                '2026-07-29T00:00:00+00:00', '2026-07-29T00:00:00+00:00'
+            );
+            """
+        )
+
+    migrate(db_path)
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(issue_cards)")}
+        row = connection.execute(
+            "SELECT id, title, description FROM issue_cards WHERE id = 'ISSUE-LEGACY'"
+        ).fetchone()
+        index_columns = [
+            item[2]
+            for item in connection.execute(
+                "PRAGMA index_info(idx_issue_project_fingerprint)"
+            ).fetchall()
+        ]
+        legacy_index = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_issue_fingerprint",),
+        ).fetchone()
+
+    assert {
+        "validation_note",
+        "fingerprint",
+        "target_rule_id",
+        "raw_severity",
+        "deterministic_rule_id",
+    } <= columns
+    assert row == ("ISSUE-LEGACY", "历史冲突", "保留的历史问题")
+    assert index_columns == ["project_id", "fingerprint"]
+    assert legacy_index is None

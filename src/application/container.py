@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.application.dto.dashboard import DashboardView, GetDashboardInput
 from src.application.dto.decision import RecordDecisionInput
 from src.application.dto.ingest import ImportSourceInput
-from src.application.dto.lint import RunLintInput
+from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
@@ -27,6 +27,7 @@ from src.application.use_cases.run_lint import (
 from src.application.use_cases.run_query import RunQuery
 from src.domain.models import DecisionResult, IngestReport, IssueCard, LintReport, QueryResponse
 from src.infrastructure.cache.ai_cache import AiCache
+from src.infrastructure.db.lint_fact_reader import SqliteLintFactReader
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
     SqliteBaselineRepository,
@@ -69,6 +70,10 @@ class LintService(Protocol):
 
     def list_open(self, project_id: str) -> list[IssueCard]: ...
 
+    def list_all(self, project_id: str) -> list[IssueCard]: ...
+
+    def list_issues(self, command: ListLintIssuesInput) -> list[IssueCard]: ...
+
 
 class DecisionService(Protocol):
     def execute(self, command: RecordDecisionInput) -> DecisionResult: ...
@@ -88,6 +93,7 @@ class AppSettings(BaseModel):
     accepted_extensions: tuple[str, ...] = Field(min_length=1)
     demo_mode: bool
     schema_version: str = Field(min_length=1)
+    lint_input_contract_version: Literal["2.0"] = "2.0"
 
 
 @dataclass(frozen=True)
@@ -100,15 +106,30 @@ class AppContainer:
     record_decision: DecisionService | None = None
 
 
-def load_settings(app_path: Path, schema_path: Path) -> AppSettings:
+def _load_settings(app_path: Path, schema_path: Path) -> tuple[AppSettings, bool]:
     try:
         app_document = yaml.safe_load(app_path.read_text(encoding="utf-8"))
         schema_document = yaml.safe_load(schema_path.read_text(encoding="utf-8"))
         app_data = app_document["app"]
         schema_version = schema_document["schema_version"]
-        return AppSettings(**app_data, schema_version=schema_version)
+        has_explicit_lint_contract = "lint_input_contract_version" in schema_document
+        lint_input_contract_version = schema_document.get(
+            "lint_input_contract_version",
+            "2.0",
+        )
+        settings = AppSettings(
+            **app_data,
+            schema_version=schema_version,
+            lint_input_contract_version=lint_input_contract_version,
+        )
+        return settings, has_explicit_lint_contract
     except (OSError, KeyError, TypeError, yaml.YAMLError, ValidationError) as error:
         raise ConfigurationError(f"Invalid application configuration: {error}") from error
+
+
+def load_settings(app_path: Path, schema_path: Path) -> AppSettings:
+    settings, _ = _load_settings(app_path, schema_path)
+    return settings
 
 
 def build_container(
@@ -118,7 +139,7 @@ def build_container(
     environ: Mapping[str, str] | None = None,
     http_factory=None,
 ) -> AppContainer:
-    settings = load_settings(app_path, schema_path)
+    settings, has_explicit_lint_contract = _load_settings(app_path, schema_path)
     project_root = app_path.resolve().parent.parent
     db_path = project_root / "data/local_state/product_intelligence.db"
     manifest_path = project_root / "data/local_state/current_baseline.json"
@@ -140,6 +161,8 @@ def build_container(
     )
     decision_service = RecordDecision(
         issues=SqliteIssueRepository(db_path),
+        manifest=ManifestStore(manifest_path),
+        knowledge=SqliteKnowledgeRepository(db_path),
         unit_of_work=SqliteDecisionUnitOfWork(db_path),
         now=lambda: datetime.now(UTC),
     )
@@ -155,6 +178,11 @@ def build_container(
             settings=settings,
             dashboard=dashboard,
             record_decision=decision_service,
+        )
+    if not has_explicit_lint_contract:
+        raise ConfigurationError(
+            "Live Lint deployment requires explicit "
+            "lint_input_contract_version: '2.0' in schema configuration"
         )
     gateway_settings = DifyGatewaySettings(
         base_url=required[0],
@@ -216,6 +244,9 @@ def build_container(
         local_lint=DeterministicLintRunner(
             manifest=manifest_store,
             card_store=card_store,
+            projects=SqliteProjectRepository(db_path),
+            sources=SqliteSourceRepository(db_path),
+            fact_reader=SqliteLintFactReader(db_path),
         ),
         comparison_builder=SafeLintComparisonBuilder(
             manifest=manifest_store,
@@ -225,6 +256,7 @@ def build_container(
             card_store=card_store,
             material_reader=material_reader,
             schema_version=settings.schema_version,
+            input_contract_version=settings.lint_input_contract_version,
         ),
         gateway=gateways.lint,
         issues=SqliteIssueRepository(db_path),

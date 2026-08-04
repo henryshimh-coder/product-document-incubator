@@ -49,8 +49,6 @@ class LintGateway:
             for item in validated_inputs.get(collection_name, []):
                 if isinstance(item, Mapping) and item.get("citation_id"):
                     trusted[item["citation_id"]] = (item, expected_side)
-        for item in validated_inputs["deterministic_findings"]:
-            trusted[item["citation_id"]] = (item, item["side"])
         for issue in output.issues:
             for evidence in issue.evidence:
                 trusted_evidence = trusted.get(evidence.citation_id)

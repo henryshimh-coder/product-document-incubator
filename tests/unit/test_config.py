@@ -5,6 +5,23 @@ import importlib
 import pytest
 
 
+def test_app_settings_defaults_lint_contract_for_non_lint_construction():
+    """Catches a Lint-only setting breaking Home, Ingest, or Query test containers."""
+    container = importlib.import_module("src.application.container")
+
+    settings = container.AppSettings(
+        name="产品智策",
+        project_id="LLD",
+        default_query_scope="effective",
+        max_upload_mb=20,
+        accepted_extensions=("pdf", "docx", "txt", "md"),
+        demo_mode=True,
+        schema_version="1.0",
+    )
+
+    assert settings.lint_input_contract_version == "2.0"
+
+
 def test_load_settings_rejects_invalid_schema_version(tmp_path):
     """Catches accepting an empty schema version and starting with an undefined contract."""
     container = importlib.import_module("src.application.container")
@@ -22,10 +39,103 @@ app:
 """.strip(),
         encoding="utf-8",
     )
-    schema_yaml.write_text("schema_version: ''\n", encoding="utf-8")
+    schema_yaml.write_text(
+        "schema_version: ''\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(container.ConfigurationError, match="schema_version"):
         container.load_settings(app_yaml, schema_yaml)
+
+
+def test_load_settings_rejects_legacy_lint_input_contract(tmp_path):
+    """Catches deploying the v2 local shape against an old v1 Dify Lint workflow."""
+    container = importlib.import_module("src.application.container")
+    app_yaml = tmp_path / "app.yaml"
+    schema_yaml = tmp_path / "schema.yaml"
+    app_yaml.write_text(
+        """
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions: [pdf, docx, txt, md]
+  demo_mode: true
+""".strip(),
+        encoding="utf-8",
+    )
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '1.0'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(container.ConfigurationError, match="lint_input_contract_version"):
+        container.load_settings(app_yaml, schema_yaml)
+
+
+def test_load_settings_defaults_missing_lint_contract_for_local_only_config(tmp_path):
+    """Catches a legacy local dashboard schema becoming unusable after Lint v2."""
+    container = importlib.import_module("src.application.container")
+    app_yaml = tmp_path / "app.yaml"
+    schema_yaml = tmp_path / "schema.yaml"
+    app_yaml.write_text(
+        """
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions: [pdf, docx, txt, md]
+  demo_mode: true
+""".strip(),
+        encoding="utf-8",
+    )
+    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+
+    settings = container.load_settings(app_yaml, schema_yaml)
+
+    assert settings.lint_input_contract_version == "2.0"
+
+
+def test_build_container_requires_explicit_lint_contract_for_live_composition(tmp_path):
+    """Catches silently connecting the structured v2 input to a legacy Dify workflow."""
+    from scripts.bootstrap_demo import bootstrap
+
+    container = importlib.import_module("src.application.container")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    app_yaml = config_dir / "app.yaml"
+    schema_yaml = config_dir / "schema.yaml"
+    app_yaml.write_text(
+        """
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions: [pdf, docx, txt, md]
+  demo_mode: true
+""".strip(),
+        encoding="utf-8",
+    )
+    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+    bootstrap(tmp_path)
+
+    with pytest.raises(
+        container.ConfigurationError,
+        match="Live Lint deployment requires explicit lint_input_contract_version",
+    ):
+        container.build_container(
+            app_yaml,
+            schema_yaml,
+            environ={
+                "DIFY_BASE_URL": "https://dify.example.test/v1",
+                "DIFY_INGEST_API_KEY": "app-ingest-secret",
+                "DIFY_QUERY_API_KEY": "app-query-secret",
+                "DIFY_LINT_API_KEY": "app-lint-secret",
+            },
+        )
 
 
 def test_build_container_loads_valid_app_and_schema_configuration(tmp_path):
@@ -45,7 +155,10 @@ app:
 """.strip(),
         encoding="utf-8",
     )
-    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
 
     result = container_module.build_container(app_yaml, schema_yaml)
 
@@ -57,6 +170,7 @@ app:
         "accepted_extensions": ("pdf", "docx", "txt", "md"),
         "demo_mode": True,
         "schema_version": "1.0",
+        "lint_input_contract_version": "2.0",
     }
     assert result.import_source is None
     assert result.lint is None
@@ -85,7 +199,10 @@ app:
 """.strip(),
         encoding="utf-8",
     )
-    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
     bootstrap(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -106,6 +223,7 @@ app:
     assert result.query.__class__.__name__ == "RunQuery"
     assert result.lint is not None
     assert result.lint.__class__.__name__ == "RunLint"
+    assert result.lint.comparison_builder.input_contract_version == "2.0"
     assert result.record_decision is not None
     assert result.record_decision.__class__.__name__ == "RecordDecision"
 
@@ -147,7 +265,10 @@ app:
 """.strip(),
         encoding="utf-8",
     )
-    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
     bootstrap(tmp_path)
     monkeypatch.chdir(tmp_path)
     now = datetime(2026, 7, 29, 7, 0, tzinfo=UTC)
@@ -288,7 +409,10 @@ app:
 """.strip(),
         encoding="utf-8",
     )
-    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
     db_path = tmp_path / "data/local_state/product_intelligence.db"
     db_path.parent.mkdir(parents=True)
     with sqlite3.connect(db_path) as connection:
@@ -370,7 +494,10 @@ app:
 """.strip(),
         encoding="utf-8",
     )
-    schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
     bootstrap(tmp_path)
     db_path = tmp_path / "data/local_state/product_intelligence.db"
     with sqlite3.connect(db_path) as connection:
