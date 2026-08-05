@@ -257,7 +257,8 @@ def test_dashboard_counts_and_recent_events_are_scoped_to_requested_project(
 
     assert view.open_issue_count == 2
     assert view.candidate_change_count == 1
-    assert view.source_count == 2
+    # 两个新增来源 + bootstrap 归档的基座材料（SRC-LLD-BASE）；OTHER 项目不得计入。
+    assert view.source_count == 3
     assert [event["id"] for event in view.recent_events] == [
         "EVENT-LLD-01",
         "EVENT-LLD-00",

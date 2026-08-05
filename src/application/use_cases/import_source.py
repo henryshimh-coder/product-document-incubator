@@ -707,6 +707,19 @@ class ImportSource:
             )
             for index, relation in enumerate(result.relations, start=1)
         ]
+        card_id_set = {card.id for card in cards}
+        relations.extend(
+            Relation(
+                id=f"REL-{_stable_id(source.id, 'derived_from', card_id)}",
+                project_id=source.project_id,
+                source_id=source.id,
+                relation_type="derived_from",
+                target_id=card_id,
+                source_ref=source.id,
+                created_at=now,
+            )
+            for card_id in sorted(card_id_set)
+        )
         return cards, relations, issues
 
     def _cache_identity(self, digest: str, baseline_version: str) -> CacheIdentity:

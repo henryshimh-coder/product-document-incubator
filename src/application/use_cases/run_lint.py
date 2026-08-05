@@ -18,6 +18,7 @@ from src.application.ports.lint_facts import LintFactReader
 from src.application.ports.repositories import (
     IssueRepository,
     KnowledgeRepository,
+    LintUnitOfWork,
     ProjectRepository,
     SourceRepository,
 )
@@ -30,7 +31,7 @@ from src.domain.enums import (
     SecurityLevel,
 )
 from src.domain.errors import DomainError, ErrorCode, OutputValidationError
-from src.domain.models import Baseline, IssueCard, IssueEvidence, LintReport
+from src.domain.models import Baseline, IssueCard, IssueEvidence, LintReport, Relation
 from src.domain.policies.security_policy import can_call_external_model
 from src.domain.services.deterministic_lint import DeterministicFinding, run_rule
 from src.infrastructure.files.markdown_store import MarkdownStore
@@ -198,6 +199,7 @@ class RunLint:
         comparison_builder: ComparisonBuilder,
         gateway: LintWorkflowGateway,
         issues: IssueRepository,
+        unit_of_work: LintUnitOfWork,
         customer_names: Iterable[str],
         strategy_terms: Iterable[str],
         financial_terms: Iterable[str],
@@ -209,6 +211,7 @@ class RunLint:
         self.comparison_builder = comparison_builder
         self.gateway = gateway
         self.issues = issues
+        self.unit_of_work = unit_of_work
         self.customer_names = tuple(customer_names)
         self.strategy_terms = tuple(strategy_terms)
         self.financial_terms = tuple(financial_terms)
@@ -270,7 +273,20 @@ class RunLint:
                 )
             )
         deduplicated = _deduplicate(validated)
-        self.issues.upsert_all(deduplicated)
+        relations = [
+            Relation(
+                id=f"REL-{issue.target_rule_id}-CONFLICTS-WITH-{issue.id}",
+                project_id=command.project_id,
+                source_id=issue.target_rule_id or "",
+                relation_type="conflicts_with",
+                target_id=issue.id,
+                source_ref=None,
+                created_at=issue.updated_at,
+            )
+            for issue in deduplicated
+            if issue.target_rule_id
+        ]
+        self.unit_of_work.apply(issues=deduplicated, relations=relations)
         return LintReport(
             issues=deduplicated,
             deterministic_count=len(deterministic),

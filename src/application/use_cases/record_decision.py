@@ -16,7 +16,7 @@ from src.application.ports.repositories import (
 from src.application.use_cases.create_change_request import CreateChangeRequest
 from src.domain.enums import DecisionAction, IssueStatus
 from src.domain.errors import DomainError, ErrorCode
-from src.domain.models import Decision, DecisionResult
+from src.domain.models import Decision, DecisionResult, Relation
 
 
 class RecordDecision:
@@ -69,6 +69,29 @@ class RecordDecision:
                 issue=issue,
                 decision=decision,
             )
+        relations = [
+            Relation(
+                id=f"REL-{issue.id}-RESOLVED-BY-{decision.id}",
+                project_id=issue.project_id,
+                source_id=issue.id,
+                relation_type="resolved_by",
+                target_id=decision.id,
+                source_ref=None,
+                created_at=created_at,
+            )
+        ]
+        if change is not None:
+            relations.append(
+                Relation(
+                    id=f"REL-{decision.id}-PROPOSES-CHANGE-{change.id}",
+                    project_id=issue.project_id,
+                    source_id=decision.id,
+                    relation_type="proposes_change_to",
+                    target_id=change.id,
+                    source_ref=None,
+                    created_at=created_at,
+                )
+            )
         return self.unit_of_work.record(
             decision=decision,
             idempotency_key=command.idempotency_key or "",
@@ -76,6 +99,7 @@ class RecordDecision:
             issue_status=_issue_status(command.action),
             issue_updated_at=created_at,
             change_request=change,
+            relations=relations,
         )
 
     @staticmethod

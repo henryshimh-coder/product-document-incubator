@@ -310,3 +310,29 @@ def test_release_page_without_services_degrades_without_exception() -> None:
 
     assert not page.exception
     assert any("发布服务尚未就绪" in item.value for item in page.info)
+
+
+def test_publish_success_trace_jump_hands_off_target_card() -> None:
+    """Catches the post-publish trace jump losing the target card hand-off."""
+    import streamlit as st
+
+    page = AppTest.from_function(_render, args=([make_change(ChangeStatus.APPROVED)],)).run()
+    page.checkbox(key="release_checked_CHANGE-001").check()
+    page.text_area(key="release_note_CHANGE-001").input("验证通过后发布，保留版本差异与追溯依据。")
+    page.button(key="release_publish_CHANGE-001").click().run()
+    page.button(key="release_confirm_yes").click().run()
+    assert not page.exception
+
+    switches: list[str] = []
+    original_switch = st.switch_page
+    st.switch_page = lambda target: switches.append(str(target))
+    try:
+        page.session_state["_pi_trace_page"] = "pages/trace.py"
+        page.button(key="release_go_trace").click().run()
+    finally:
+        st.switch_page = original_switch
+
+    assert not page.exception
+    assert page.session_state["trace_target_card_id"] == "RULE-001"
+    assert switches == ["pages/trace.py"]
+    assert "release_flash" not in page.session_state

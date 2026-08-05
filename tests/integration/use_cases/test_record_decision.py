@@ -444,6 +444,7 @@ def test_decision_uow_maps_connection_open_failure_to_stable_domain_error(tmp_pa
             issue_status=IssueStatus.CLOSED,
             issue_updated_at=NOW,
             change_request=None,
+            relations=[],
         )
 
     assert raised.value.code == ErrorCode.DECISION_PERSISTENCE_FAILED.value
@@ -489,6 +490,7 @@ def test_decision_uow_cleanup_failures_preserve_original_sqlite_cause(
             issue_status=IssueStatus.CLOSED,
             issue_updated_at=NOW,
             change_request=None,
+            relations=[],
         )
 
     assert raised.value.code == ErrorCode.DECISION_PERSISTENCE_FAILED.value
@@ -539,6 +541,7 @@ def test_decision_uow_cleanup_failures_preserve_stable_domain_error(monkeypatch)
             issue_status=IssueStatus.CLOSED,
             issue_updated_at=NOW,
             change_request=None,
+            relations=[],
         )
 
     assert raised.value.code == ErrorCode.DECISION_INVALID.value

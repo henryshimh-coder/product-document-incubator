@@ -48,6 +48,11 @@ class ErrorCode(StrEnum):
     REVIEW_PERSISTENCE_FAILED = "REVIEW_PERSISTENCE_FAILED"
     RELEASE_BLOCKED = "RELEASE_BLOCKED"
     RELEASE_MIRROR_REPAIR_REQUIRED = "RELEASE_MIRROR_REPAIR_REQUIRED"
+    COST_SOURCE_REQUIRED = "COST_SOURCE_REQUIRED"
+    COST_INPUT_INCOMPLETE = "COST_INPUT_INCOMPLETE"
+    LINT_PERSISTENCE_FAILED = "LINT_PERSISTENCE_FAILED"
+    RELATION_CONFLICT = "RELATION_CONFLICT"
+    NOT_FOUND = "NOT_FOUND"
 
 
 @dataclass(frozen=True)
@@ -119,6 +124,11 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
     ErrorCode.RELEASE_MIRROR_REPAIR_REQUIRED: ErrorDefinition(
         "新版本已生效，但本地镜像修复失败，请重新校验后再试"
     ),
+    ErrorCode.COST_SOURCE_REQUIRED: ErrorDefinition("成本参数缺少来源"),
+    ErrorCode.COST_INPUT_INCOMPLETE: ErrorDefinition("成本参数不完整，无法计算"),
+    ErrorCode.LINT_PERSISTENCE_FAILED: ErrorDefinition("自检结果写入失败，请重试", retryable=True),
+    ErrorCode.RELATION_CONFLICT: ErrorDefinition("追溯关系数据冲突，已阻断写入"),
+    ErrorCode.NOT_FOUND: ErrorDefinition("未找到目标记录"),
 }
 
 

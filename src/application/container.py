@@ -17,6 +17,8 @@ from src.application.dto.ingest import ImportSourceInput
 from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
+from src.application.dto.trace import BuildTraceInput
+from src.application.use_cases.build_trace import BuildTrace
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
 from src.application.use_cases.publish_baseline import PublishBaseline
@@ -31,12 +33,20 @@ from src.application.use_cases.run_query import RunQuery
 from src.domain.models import (
     Baseline,
     ChangeRequest,
+    CostImpactInput,
+    CostImpactResult,
     DecisionResult,
     IngestReport,
     IssueCard,
+    KnowledgeCard,
     LintReport,
+    MarketEvidenceGap,
+    ModelCallLog,
     QueryResponse,
     RepairResult,
+    SourceRecord,
+    TraceView,
+    ValueMetric,
 )
 from src.infrastructure.cache.ai_cache import AiCache
 from src.infrastructure.db.lint_fact_reader import SqliteLintFactReader
@@ -44,12 +54,16 @@ from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
     SqliteBaselineRepository,
     SqliteChangeRepository,
+    SqliteDecisionRepository,
     SqliteDecisionUnitOfWork,
     SqliteEventRepository,
     SqliteIngestUnitOfWork,
     SqliteIssueRepository,
     SqliteKnowledgeRepository,
+    SqliteLintUnitOfWork,
+    SqliteModelCallLogRepository,
     SqliteProjectRepository,
+    SqliteRelationRepository,
     SqliteReleaseUnitOfWork,
     SqliteReviewUnitOfWork,
     SqliteSourceRepository,
@@ -114,6 +128,26 @@ class ReconciliationPort(Protocol):
     def rebuild_current_from_manifest(self) -> RepairResult: ...
 
 
+class TraceService(Protocol):
+    def execute(self, command: BuildTraceInput) -> TraceView: ...
+
+    def list_entry_cards(self, project_id: str) -> list[KnowledgeCard]: ...
+
+    def list_model_calls(self, project_id: str, *, limit: int) -> list[ModelCallLog]: ...
+
+    def value_metrics(self, project_id: str) -> list[ValueMetric]: ...
+
+    def market_evidence_gaps(self, project_id: str) -> list[MarketEvidenceGap]: ...
+
+    def list_cost_sources(self, project_id: str) -> list[SourceRecord]: ...
+
+    def calculate_cost_impact(
+        self,
+        project_id: str,
+        command: CostImpactInput,
+    ) -> CostImpactResult: ...
+
+
 class ConfigurationError(ValueError):
     """Raised when application configuration cannot establish a valid contract."""
 
@@ -144,6 +178,7 @@ class AppContainer:
     release_candidates: ReleaseCandidateService | None = None
     release_guard: ReleaseGuard | None = None
     reconciliation: ReconciliationPort | None = None
+    trace: TraceService | None = None
 
 
 def _load_settings(app_path: Path, schema_path: Path) -> tuple[AppSettings, bool]:
@@ -242,6 +277,11 @@ def build_container(
         lock_path=(project_root / "data/local_state/locks" / f"{settings.project_id}.release.lock"),
         now=lambda: datetime.now(UTC),
     )
+    runtime = os.environ if environ is None else environ
+
+    def dictionary(name: str) -> tuple[str, ...]:
+        return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
+
     local_services = {
         "dashboard": dashboard,
         "record_decision": decision_service,
@@ -250,8 +290,25 @@ def build_container(
         "release_candidates": SqliteChangeRepository(db_path),
         "release_guard": release_guard,
         "reconciliation": reconciliation,
+        "trace": BuildTrace(
+            manifest=manifest_store,
+            baseline_cards=LocalBaselineCardReader(project_root),
+            relations=SqliteRelationRepository(db_path),
+            knowledge=SqliteKnowledgeRepository(db_path),
+            sources=SqliteSourceRepository(db_path),
+            issues=SqliteIssueRepository(db_path),
+            decisions=SqliteDecisionRepository(db_path),
+            changes=SqliteChangeRepository(db_path),
+            baselines=SqliteBaselineRepository(db_path),
+            model_calls=SqliteModelCallLogRepository(db_path),
+            material_reader=LocalQueryMaterialReader(project_root),
+            customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
+            strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
+            financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
+            leader_names=dictionary("REDACTION_LEADER_NAMES"),
+            unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
+        ),
     }
-    runtime = os.environ if environ is None else environ
     required = (
         runtime.get("DIFY_BASE_URL", "").strip(),
         runtime.get("DIFY_INGEST_API_KEY", "").strip(),
@@ -276,9 +333,6 @@ def build_container(
         http_factory=http_factory or httpx.Client,
     )
     event_logger.reconcile()
-
-    def dictionary(name: str) -> tuple[str, ...]:
-        return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
 
     import_service = ImportSource(
         projects=SqliteProjectRepository(db_path),
@@ -341,6 +395,7 @@ def build_container(
         ),
         gateway=gateways.lint,
         issues=SqliteIssueRepository(db_path),
+        unit_of_work=SqliteLintUnitOfWork(db_path),
         customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
         strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
         financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),

@@ -188,6 +188,7 @@ def test_lint_golden_runs_independent_inputs_through_the_real_use_case() -> None
             comparison_builder=Builder(inputs),
             gateway=Gateway(case["name"]),
             issues=Issues(),
+            unit_of_work=type("LintUoW", (), {"apply": lambda self, *, issues, relations: None})(),
             customer_names=(),
             strategy_terms=(),
             financial_terms=(),

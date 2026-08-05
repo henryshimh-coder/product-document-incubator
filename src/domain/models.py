@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -108,6 +109,7 @@ class Relation(DomainModel):
         "derived_from",
         "supports",
         "conflicts_with",
+        "resolved_by",
         "proposes_change_to",
         "approved_as",
         "supersedes",
@@ -413,3 +415,67 @@ class EventLog(DomainModel):
         if value.tzinfo is None or value.utcoffset() != timedelta(0):
             raise ValueError("event created_at must be an aware UTC datetime")
         return value
+
+
+class TraceNode(DomainModel):
+    kind: Literal["source", "knowledge", "issue", "decision", "change", "baseline"]
+    entity_id: NonEmptyStr
+    label: NonEmptyStr
+    status: NonEmptyStr
+    happened_at: datetime
+    summary: NonEmptyStr
+    is_sandbox: bool = False
+    verification: Literal["verified", "unverifiable", "not_applicable"] = "not_applicable"
+    excerpt: NonEmptyStr | None = None
+
+
+class TraceEdge(DomainModel):
+    source_id: NonEmptyStr
+    target_id: NonEmptyStr
+    relation_type: Literal[
+        "derived_from",
+        "conflicts_with",
+        "resolved_by",
+        "proposes_change_to",
+        "approved_as",
+        "supersedes",
+    ]
+
+
+class TraceView(DomainModel):
+    main_chain: list[TraceNode]
+    edges: list[TraceEdge]
+    missing_links: list[NonEmptyStr]
+
+
+class MarketEvidenceGap(DomainModel):
+    claim: NonEmptyStr
+    classification: Literal["evidence_supported", "validation_planned", "unvalidated_assumption"]
+    evidence_sufficiency: Literal["sufficient", "partial", "insufficient"]
+    evidence_refs: list[NonEmptyStr]
+    missing_materials: list[NonEmptyStr]
+    suggested_validation: NonEmptyStr | None
+
+
+class CostImpactInput(DomainModel):
+    parameter_name: str | None = None
+    old_value: Decimal | None = None
+    new_value: Decimal | None = None
+    projected_valid_referrals: int | None = None
+    source_refs: list[NonEmptyStr] = Field(default_factory=list)
+
+
+class CostImpactResult(DomainModel):
+    formula: NonEmptyStr
+    old_cost: Decimal
+    new_cost: Decimal
+    delta: Decimal
+    source_refs: list[NonEmptyStr]
+    disclaimer: NonEmptyStr
+    is_simulation: bool = True
+
+
+class ValueMetric(DomainModel):
+    label: NonEmptyStr
+    value: NonEmptyStr
+    source_note: NonEmptyStr

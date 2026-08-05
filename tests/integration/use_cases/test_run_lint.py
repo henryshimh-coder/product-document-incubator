@@ -256,12 +256,20 @@ def test_run_lint_orders_governed_pipeline_and_downgrades_one_sided_major_issue(
             events.append("upsert")
             self.saved = deepcopy(issues)
 
+    class LintUoW:
+        def apply(self, *, issues, relations):
+            events.append("upsert")
+            self.saved = deepcopy(issues)
+            self.saved_relations = relations
+
     issues = Issues()
+    lint_uow = LintUoW()
     use_case = module.RunLint(
         local_lint=Local(),
         comparison_builder=Builder(),
         gateway=Gateway(),
         issues=issues,
+        unit_of_work=lint_uow,
         customer_names=(),
         strategy_terms=(),
         financial_terms=(),
@@ -285,7 +293,7 @@ def test_run_lint_orders_governed_pipeline_and_downgrades_one_sided_major_issue(
         "严重度由 blocking 降级为 pending_info：缺少对方依据"
     )
     assert report.issues[0].uncertainty == "缺少对方依据"
-    assert issues.saved == report.issues
+    assert lint_uow.saved == report.issues
 
 
 def test_run_lint_deduplicates_same_fingerprint_before_upsert() -> None:
@@ -313,12 +321,18 @@ def test_run_lint_deduplicates_same_fingerprint_before_upsert() -> None:
         def upsert_all(self, issues):
             self.saved = issues
 
+    class LintUoW:
+        def apply(self, *, issues, relations):
+            self.saved = issues
+
     issues = Issues()
+    lint_uow = LintUoW()
     report = module.RunLint(
         local_lint=Local(),
         comparison_builder=Builder(),
         gateway=Gateway(),
         issues=issues,
+        unit_of_work=lint_uow,
         customer_names=(),
         strategy_terms=(),
         financial_terms=(),
@@ -329,7 +343,7 @@ def test_run_lint_deduplicates_same_fingerprint_before_upsert() -> None:
 
     assert len(report.issues) == 1
     assert report.issues[0].fingerprint
-    assert len(issues.saved) == 1
+    assert len(lint_uow.saved) == 1
 
 
 @pytest.mark.parametrize(
@@ -412,6 +426,7 @@ def test_list_lint_issues_exposes_six_semantic_views(view: str, expected_ids: li
         comparison_builder=object(),
         gateway=object(),
         issues=Issues(),
+        unit_of_work=type("LintUoW", (), {"apply": lambda self, *, issues, relations: None})(),
         customer_names=(),
         strategy_terms=(),
         financial_terms=(),
@@ -460,6 +475,7 @@ def test_list_lint_issues_can_sort_a_semantic_view_by_most_recent_update() -> No
         comparison_builder=object(),
         gateway=object(),
         issues=Issues(),
+        unit_of_work=type("LintUoW", (), {"apply": lambda self, *, issues, relations: None})(),
         customer_names=(),
         strategy_terms=(),
         financial_terms=(),
@@ -803,6 +819,7 @@ def test_run_lint_fails_closed_instead_of_truncating_deterministic_facts(
         comparison_builder=builder,
         gateway=Gateway(),
         issues=type("Issues", (), {"upsert_all": lambda *args: None})(),
+        unit_of_work=type("LintUoW", (), {"apply": lambda self, *, issues, relations: None})(),
         customer_names=(),
         strategy_terms=(),
         financial_terms=(),

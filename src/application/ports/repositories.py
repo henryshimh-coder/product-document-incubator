@@ -13,6 +13,7 @@ from src.domain.models import (
     IngestReport,
     IssueCard,
     KnowledgeCard,
+    ModelCallLog,
     Project,
     Relation,
     SourceRecord,
@@ -70,6 +71,8 @@ class DecisionRepository(Protocol):
 
     def find_by_idempotency_key(self, idempotency_key: str) -> Decision | None: ...
 
+    def list_for_project(self, project_id: str) -> list[Decision]: ...
+
 
 class ChangeRepository(Protocol):
     def add(self, change: ChangeRequest) -> None: ...
@@ -97,6 +100,8 @@ class ChangeRepository(Protocol):
 
     def find_by_decision_id(self, decision_id: str) -> ChangeRequest | None: ...
 
+    def list_for_project(self, project_id: str) -> list[ChangeRequest]: ...
+
 
 class DecisionUnitOfWork(Protocol):
     def record(
@@ -108,6 +113,7 @@ class DecisionUnitOfWork(Protocol):
         issue_status: IssueStatus,
         issue_updated_at: datetime,
         change_request: ChangeRequest | None,
+        relations: list[Relation],
     ) -> DecisionResult: ...
 
 
@@ -175,3 +181,30 @@ class IngestUnitOfWork(Protocol):
         source: SourceRecord,
         command_fingerprint: str,
     ) -> IngestReport: ...
+
+
+class ModelCallLogRepository(Protocol):
+    def list_for_project(self, project_id: str, *, limit: int) -> list[ModelCallLog]: ...
+
+
+class RelationRepository(Protocol):
+    """Read the persisted relation graph; lifecycle relations are written by UoWs."""
+
+    def load_connected(
+        self,
+        project_id: str,
+        entity_id: str,
+        *,
+        max_depth: int = 6,
+    ) -> list[Relation]: ...
+
+
+class LintUnitOfWork(Protocol):
+    """Atomically persist lint issue upserts and their knowledge->issue relations."""
+
+    def apply(
+        self,
+        *,
+        issues: list[IssueCard],
+        relations: list[Relation],
+    ) -> None: ...

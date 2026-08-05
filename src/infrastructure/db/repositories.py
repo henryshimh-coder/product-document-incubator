@@ -29,6 +29,7 @@ from src.domain.models import (
     IngestResultView,
     IssueCard,
     KnowledgeCard,
+    ModelCallLog,
     Project,
     Relation,
     SourceRecord,
@@ -407,6 +408,131 @@ class SqliteKnowledgeRepository:
         return KnowledgeCard.model_validate(data)
 
 
+def _upsert_issue(connection: sqlite3.Connection, issue: IssueCard) -> None:
+    """Insert or refresh one issue row inside an existing transaction."""
+
+    existing = None
+    if issue.fingerprint is not None:
+        existing = connection.execute(
+            "SELECT id, created_at FROM issue_cards WHERE project_id = ? AND fingerprint = ?",
+            (issue.project_id, issue.fingerprint),
+        ).fetchone()
+    legacy_title = _LEGACY_DETERMINISTIC_TITLES.get(issue.deterministic_rule_id or "")
+    if existing is None and issue.target_rule_id is not None and legacy_title == issue.title:
+        candidates = connection.execute(
+            """
+            SELECT id, created_at, fingerprint, issue_type,
+                   evidence_json, impacted_domains_json, target_rule_id,
+                   deterministic_rule_id
+            FROM issue_cards
+            WHERE project_id = ? AND issue_type = ?
+              AND target_rule_id = ? AND title = ?
+              AND fingerprint IS NOT NULL
+            """,
+            (
+                issue.project_id,
+                issue.issue_type,
+                issue.target_rule_id,
+                issue.title,
+            ),
+        ).fetchall()
+        legacy_candidates = [
+            row
+            for row in candidates
+            if row["fingerprint"] == _legacy_issue_fingerprint(row)
+            and row["deterministic_rule_id"] in {None, issue.deterministic_rule_id}
+        ]
+        if len(legacy_candidates) == 1:
+            existing = legacy_candidates[0]
+    stored = issue
+    if existing is not None:
+        stored = issue.model_copy(
+            update={
+                "id": existing["id"],
+                "created_at": datetime.fromisoformat(existing["created_at"]),
+            }
+        )
+    connection.execute(
+        """
+        INSERT INTO issue_cards (
+            id, project_id, issue_type, severity, status, title, description,
+            evidence_json, impacted_domains_json, options_json, ai_recommendation,
+            ai_confidence, uncertainty, validation_note, raw_severity,
+            deterministic_rule_id, fingerprint, target_rule_id, owner, due_at,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            issue_type = excluded.issue_type,
+            severity = excluded.severity,
+            title = excluded.title,
+            description = excluded.description,
+            evidence_json = excluded.evidence_json,
+            impacted_domains_json = excluded.impacted_domains_json,
+            options_json = excluded.options_json,
+            ai_recommendation = excluded.ai_recommendation,
+            ai_confidence = excluded.ai_confidence,
+            uncertainty = excluded.uncertainty,
+            validation_note = excluded.validation_note,
+            raw_severity = excluded.raw_severity,
+            deterministic_rule_id = excluded.deterministic_rule_id,
+            fingerprint = excluded.fingerprint,
+            target_rule_id = excluded.target_rule_id,
+            updated_at = excluded.updated_at
+        """,
+        SqliteIssueRepository._values(stored),
+    )
+
+
+def _insert_relation_guarded(
+    connection: sqlite3.Connection,
+    relation: Relation,
+) -> None:
+    """Insert one relation inside an existing transaction.
+
+    Same id with identical facts is an idempotent skip; same id with divergent
+    facts fails closed instead of being silently swallowed.
+    """
+
+    existing = connection.execute(
+        """
+        SELECT project_id, source_id, relation_type, target_id, source_ref
+        FROM relations
+        WHERE id = ?
+        """,
+        (relation.id,),
+    ).fetchone()
+    if existing is not None:
+        identical = (
+            existing["project_id"] == relation.project_id
+            and existing["source_id"] == relation.source_id
+            and existing["relation_type"] == relation.relation_type
+            and existing["target_id"] == relation.target_id
+            and existing["source_ref"] == relation.source_ref
+        )
+        if not identical:
+            raise DomainError(
+                ErrorCode.RELATION_CONFLICT,
+                f"RELATION_CONFLICT:{relation.id}",
+            )
+        return
+    connection.execute(
+        """
+        INSERT INTO relations (
+            id, project_id, source_id, relation_type, target_id, source_ref, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            relation.id,
+            relation.project_id,
+            relation.source_id,
+            relation.relation_type,
+            relation.target_id,
+            relation.source_ref,
+            relation.created_at.isoformat(),
+        ),
+    )
+
+
 class SqliteIssueRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -454,81 +580,7 @@ class SqliteIssueRepository:
         with connect(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             for issue in issues:
-                existing = None
-                if issue.fingerprint is not None:
-                    existing = connection.execute(
-                        "SELECT id, created_at FROM issue_cards "
-                        "WHERE project_id = ? AND fingerprint = ?",
-                        (issue.project_id, issue.fingerprint),
-                    ).fetchone()
-                legacy_title = _LEGACY_DETERMINISTIC_TITLES.get(issue.deterministic_rule_id or "")
-                if (
-                    existing is None
-                    and issue.target_rule_id is not None
-                    and legacy_title == issue.title
-                ):
-                    candidates = connection.execute(
-                        """
-                        SELECT id, created_at, fingerprint, issue_type,
-                               evidence_json, impacted_domains_json, target_rule_id,
-                               deterministic_rule_id
-                        FROM issue_cards
-                        WHERE project_id = ? AND issue_type = ?
-                          AND target_rule_id = ? AND title = ?
-                          AND fingerprint IS NOT NULL
-                        """,
-                        (
-                            issue.project_id,
-                            issue.issue_type,
-                            issue.target_rule_id,
-                            issue.title,
-                        ),
-                    ).fetchall()
-                    legacy_candidates = [
-                        row
-                        for row in candidates
-                        if row["fingerprint"] == _legacy_issue_fingerprint(row)
-                        and row["deterministic_rule_id"] in {None, issue.deterministic_rule_id}
-                    ]
-                    if len(legacy_candidates) == 1:
-                        existing = legacy_candidates[0]
-                stored = issue
-                if existing is not None:
-                    stored = issue.model_copy(
-                        update={
-                            "id": existing["id"],
-                            "created_at": datetime.fromisoformat(existing["created_at"]),
-                        }
-                    )
-                connection.execute(
-                    """
-                    INSERT INTO issue_cards (
-                        id, project_id, issue_type, severity, status, title, description,
-                        evidence_json, impacted_domains_json, options_json, ai_recommendation,
-                        ai_confidence, uncertainty, validation_note, raw_severity,
-                        deterministic_rule_id, fingerprint, target_rule_id, owner, due_at,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        issue_type = excluded.issue_type,
-                        severity = excluded.severity,
-                        title = excluded.title,
-                        description = excluded.description,
-                        evidence_json = excluded.evidence_json,
-                        impacted_domains_json = excluded.impacted_domains_json,
-                        options_json = excluded.options_json,
-                        ai_recommendation = excluded.ai_recommendation,
-                        ai_confidence = excluded.ai_confidence,
-                        uncertainty = excluded.uncertainty,
-                        validation_note = excluded.validation_note,
-                        raw_severity = excluded.raw_severity,
-                        deterministic_rule_id = excluded.deterministic_rule_id,
-                        fingerprint = excluded.fingerprint,
-                        target_rule_id = excluded.target_rule_id,
-                        updated_at = excluded.updated_at
-                    """,
-                    self._values(stored),
-                )
+                _upsert_issue(connection, issue)
 
     def get(self, issue_id: str) -> IssueCard:
         with connect(self.db_path) as connection:
@@ -686,6 +738,20 @@ class SqliteDecisionRepository:
         data.pop("command_fingerprint", None)
         return Decision.model_validate(data)
 
+    def list_for_project(self, project_id: str) -> list[Decision]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT * FROM decisions WHERE project_id = ? ORDER BY created_at, id",
+                (project_id,),
+            ).fetchall()
+        decisions = []
+        for row in rows:
+            data = _row_data(row)
+            data.pop("idempotency_key")
+            data.pop("command_fingerprint", None)
+            decisions.append(Decision.model_validate(data))
+        return decisions
+
 
 class SqliteChangeRepository:
     def __init__(self, db_path: Path) -> None:
@@ -808,6 +874,14 @@ class SqliteChangeRepository:
             ).fetchone()
         return None if row is None else self._to_model(row)
 
+    def list_for_project(self, project_id: str) -> list[ChangeRequest]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT * FROM change_requests WHERE project_id = ? ORDER BY created_at, id",
+                (project_id,),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
     @staticmethod
     def _values(change: ChangeRequest) -> tuple[Any, ...]:
         return (
@@ -859,6 +933,7 @@ class SqliteDecisionUnitOfWork:
         issue_status: IssueStatus,
         issue_updated_at: datetime,
         change_request: ChangeRequest | None,
+        relations: list[Relation],
     ) -> DecisionResult:
         from src.domain.errors import DomainError, ErrorCode
 
@@ -938,6 +1013,8 @@ class SqliteDecisionUnitOfWork:
                     """,
                     SqliteChangeRepository._values(change_request),
                 )
+            for relation in relations:
+                _insert_relation_guarded(connection, relation)
             connection.commit()
             return DecisionResult(decision=decision, change_request=change_request)
         except sqlite3.Error as error:
@@ -1046,22 +1123,7 @@ class SqliteIngestUnitOfWork:
                     ),
                 )
             for relation in relations:
-                connection.execute(
-                    """
-                    INSERT INTO relations (
-                        id, project_id, source_id, relation_type, target_id, source_ref, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        relation.id,
-                        relation.project_id,
-                        relation.source_id,
-                        relation.relation_type,
-                        relation.target_id,
-                        relation.source_ref,
-                        relation.created_at.isoformat(),
-                    ),
-                )
+                _insert_relation_guarded(connection, relation)
             for issue in issues:
                 connection.execute(
                     """
@@ -1479,3 +1541,122 @@ class SqliteReleaseUnitOfWork:
                     ErrorCode.RELEASE_FAILED,
                     f"RELEASE_MIRROR_RELATION_MISMATCH:{relation.id}",
                 )
+
+
+class SqliteModelCallLogRepository:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def list_for_project(self, project_id: str, *, limit: int) -> list[ModelCallLog]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM model_call_logs
+                WHERE project_id = ?
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
+                """,
+                (project_id, limit),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> ModelCallLog:
+        data = _row_data(row)
+        data["source_ids"] = _json_loads(data.pop("source_ids_json"))
+        data["authorized"] = bool(data["authorized"])
+        data["redacted"] = bool(data["redacted"])
+        return ModelCallLog.model_validate(data)
+
+
+class SqliteLintUnitOfWork:
+    """Atomically persist lint issue upserts and their knowledge->issue relations."""
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def apply(
+        self,
+        *,
+        issues: list[IssueCard],
+        relations: list[Relation],
+    ) -> None:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = connect(self.db_path)
+            connection.execute("BEGIN IMMEDIATE")
+            for issue in issues:
+                _upsert_issue(connection, issue)
+            for relation in relations:
+                _insert_relation_guarded(connection, relation)
+            connection.commit()
+        except sqlite3.Error as error:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.rollback()
+            raise DomainError(ErrorCode.LINT_PERSISTENCE_FAILED) from error
+        except BaseException:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.rollback()
+            raise
+        finally:
+            if connection is not None:
+                with suppress(Exception):
+                    connection.close()
+
+
+class SqliteRelationRepository:
+    """Read the persisted relation graph with project isolation and depth bounds."""
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def load_connected(
+        self,
+        project_id: str,
+        entity_id: str,
+        *,
+        max_depth: int = 6,
+    ) -> list[Relation]:
+        depth = min(max(int(max_depth), 0), 6)
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                WITH RECURSIVE frontier(entity_id, depth) AS (
+                    SELECT ?, 0
+                    UNION
+                    SELECT
+                        CASE
+                            WHEN r.source_id = f.entity_id THEN r.target_id
+                            ELSE r.source_id
+                        END,
+                        f.depth + 1
+                    FROM relations r
+                    JOIN frontier f
+                        ON r.source_id = f.entity_id OR r.target_id = f.entity_id
+                    WHERE r.project_id = ? AND f.depth < ?
+                )
+                SELECT DISTINCT
+                    r.id, r.project_id, r.source_id, r.relation_type,
+                    r.target_id, r.source_ref, r.created_at
+                FROM relations r
+                WHERE r.project_id = ?
+                  AND r.source_id IN (SELECT entity_id FROM frontier)
+                  AND r.target_id IN (SELECT entity_id FROM frontier)
+                ORDER BY r.created_at, r.id
+                """,
+                (entity_id, project_id, depth, project_id),
+            ).fetchall()
+        return [
+            Relation(
+                id=row["id"],
+                project_id=row["project_id"],
+                source_id=row["source_id"],
+                relation_type=row["relation_type"],
+                target_id=row["target_id"],
+                source_ref=row["source_ref"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+            for row in rows
+        ]

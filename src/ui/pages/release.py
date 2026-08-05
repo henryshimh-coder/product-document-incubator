@@ -192,6 +192,7 @@ def _render_actions(container: AppContainer, change: ChangeRequest) -> None:
             "review_key": f"REVIEW-{uuid4().hex.upper()}",
             "before": change.before_content,
             "after": change.after_content,
+            "target_card_id": change.target_card_id,
         }
         st.rerun()
 
@@ -289,6 +290,7 @@ def _execute_publish(container: AppContainer, payload: dict) -> None:
             "approved_by": baseline.approved_by,
             "published_at": baseline.effective_at,
             "change_id": change_id,
+            "target_card_id": str(payload.get("target_card_id") or ""),
             "before": payload.get("before", ""),
             "after": payload.get("after", ""),
         }
@@ -370,7 +372,10 @@ def _render_flash(container: AppContainer) -> None:
                 _switch_to("_pi_home_page")
         with second:
             if st.button("查看完整追溯", key="release_go_trace", type="secondary"):
+                target_card_id = str(flash.get("target_card_id") or "").strip()
                 st.session_state.pop("release_flash", None)
+                if target_card_id:
+                    st.session_state["trace_target_card_id"] = target_card_id
                 _switch_to("_pi_trace_page")
         if st.button("继续处理候选变更", key="release_flash_dismiss", type="tertiary"):
             st.session_state.pop("release_flash", None)

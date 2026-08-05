@@ -297,7 +297,15 @@ def test_import_source_creates_conflict_without_changing_effective_baseline(
             ).fetchone()[0]
             == 1
         )
-        assert connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 2
+        derived = connection.execute(
+            "SELECT source_id, target_id FROM relations WHERE relation_type = 'derived_from'"
+        ).fetchall()
+        assert len(derived) == 1
+        assert derived[0][0].startswith("SRC-")
+        assert derived[0][1] in {
+            row[0] for row in connection.execute("SELECT id FROM knowledge_cards").fetchall()
+        }
         evidence = json.loads(
             connection.execute("SELECT evidence_json FROM issue_cards").fetchone()[0]
         )
@@ -340,7 +348,7 @@ def test_completed_duplicate_returns_original_ids_without_rewriting(
             ).fetchone()[0]
             == 1
         )
-        assert connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM issue_cards").fetchone()[0] == 1
 
 
