@@ -25,6 +25,7 @@ from src.domain.models import (
     BaselineManifest,
     ChangeRequest,
     EventLog,
+    IssueEvidence,
     KnowledgeCard,
     Relation,
     RepairResult,
@@ -37,6 +38,23 @@ from src.infrastructure.files.manifest_store import (
     ManifestStore,
 )
 from src.infrastructure.files.markdown_store import RELEASE_ROOT, MarkdownStore
+from src.infrastructure.files.query_material_reader import VerifiedQueryMaterial
+
+
+class SourceMaterialReader(Protocol):
+    """受控材料读取端口：复用查询侧的路径、SHA-256、大小与片段校验。"""
+
+    def read_source(self, source: SourceRecord) -> VerifiedQueryMaterial: ...
+
+    def read_baseline(
+        self,
+        *,
+        project_id: str,
+        asset_id: str,
+        version: str,
+        relative_path: str,
+        expected_sha256: str,
+    ) -> VerifiedQueryMaterial: ...
 
 
 class Reconciliation(Protocol):
@@ -66,6 +84,7 @@ class PublishBaseline:
         sources: SourceRepository,
         issues: IssueRepository,
         integrity: ManifestIntegrity,
+        material_reader: SourceMaterialReader,
         release_uow: ReleaseUnitOfWork,
         reconciliation: Reconciliation,
         guard: ReleaseGuardState,
@@ -81,6 +100,7 @@ class PublishBaseline:
         self.sources = sources
         self.issues = issues
         self.integrity = integrity
+        self.material_reader = material_reader
         self.release_uow = release_uow
         self.reconciliation = reconciliation
         self.guard = guard
@@ -125,7 +145,7 @@ class PublishBaseline:
         if not approved_by or command.approved_by.strip() != approved_by:
             raise DomainError(ErrorCode.RELEASE_CHANGE_MISMATCH, "APPROVER_MISMATCH")
         parent_cards = self.markdown_store.read_cards(current.card_snapshot_path)
-        self._validate_formal_sources(command, change, parent_cards)
+        self._validate_formal_sources(command, change, parent_cards, current)
         published_at = self.now()
         temp_dir: Path | None = None
         final_dir: Path | None = None
@@ -277,8 +297,13 @@ class PublishBaseline:
         command: PublishBaselineInput,
         change: ChangeRequest,
         parent_cards: list[KnowledgeCard],
+        current: BaselineManifest,
     ) -> None:
-        """Fail closed unless every formal-baseline reference resolves to an eligible source."""
+        """Fail closed unless formal references resolve and citations stay locatable.
+
+        Runs before any release directory is created: archive path/SHA-256/size and
+        citation/chunk location are re-verified through the controlled material reader.
+        """
         for card in parent_cards:
             if card.status != KnowledgeStatus.EFFECTIVE:
                 continue
@@ -287,9 +312,25 @@ class PublishBaseline:
                     ErrorCode.CITATION_INVALID,
                     f"PUBLISH_CARD_SOURCE_REQUIRED:{card.id}",
                 )
+            locatable_citation = False
             for reference in card.source_refs:
-                source_id = _parse_source_ref(reference, card.id)
-                self._require_formal_source(command.project_id, source_id)
+                source_id, citation_id = _parse_source_ref(reference, card.id)
+                source = self._require_formal_source(command.project_id, source_id)
+                if citation_id is None:
+                    # 裸 SOURCE_ID 只保留为补充来源关联，不计入正式证据门槛。
+                    continue
+                material = self._read_source_material(source)
+                if not any(fragment.fragment_id == citation_id for fragment in material.fragments):
+                    raise DomainError(
+                        ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
+                        f"PUBLISH_CITATION_UNVERIFIABLE:{card.id}",
+                    )
+                locatable_citation = True
+            if not locatable_citation:
+                raise DomainError(
+                    ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
+                    f"PUBLISH_CARD_CITATION_REQUIRED:{card.id}",
+                )
         try:
             issue = self.issues.get(change.issue_id)
         except KeyError as error:
@@ -305,7 +346,55 @@ class PublishBaseline:
                     ErrorCode.CITATION_INVALID,
                     f"PUBLISH_EVIDENCE_AMBIGUOUS:{citation_id}",
                 )
-            self._require_formal_source(command.project_id, matches[0].source_id)
+            evidence = matches[0]
+            if evidence.source_id == current.current_baseline_id:
+                self._verify_baseline_evidence(command, current, evidence)
+                continue
+            source = self._require_formal_source(command.project_id, evidence.source_id)
+            material = self._read_source_material(source)
+            fragment = next(
+                (item for item in material.fragments if item.fragment_id == citation_id),
+                None,
+            )
+            if fragment is None or evidence.excerpt not in fragment.text:
+                raise DomainError(
+                    ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
+                    f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{citation_id}",
+                )
+
+    def _verify_baseline_evidence(
+        self,
+        command: PublishBaselineInput,
+        current: BaselineManifest,
+        evidence: IssueEvidence,
+    ) -> None:
+        """Verify an evidence item that cites the current baseline full document."""
+        material = self.material_reader.read_baseline(
+            project_id=command.project_id,
+            asset_id=current.current_baseline_id,
+            version=current.current_version,
+            relative_path=current.full_document_path,
+            expected_sha256=current.full_document_sha256,
+        )
+        fragment = next(
+            (item for item in material.fragments if item.locator == evidence.page_or_section),
+            None,
+        )
+        if fragment is None or evidence.excerpt not in fragment.text:
+            raise DomainError(
+                ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
+                f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{evidence.citation_id}",
+            )
+
+    def _read_source_material(self, source: SourceRecord) -> VerifiedQueryMaterial:
+        """Re-verify archive path/SHA-256/size through the controlled reader."""
+        try:
+            return self.material_reader.read_source(source)
+        except DomainError as error:
+            raise DomainError(
+                ErrorCode.PUBLISH_SOURCE_INTEGRITY_FAILED,
+                f"PUBLISH_SOURCE_INTEGRITY_FAILED:{source.id}",
+            ) from error
 
     def _require_formal_source(self, project_id: str, source_id: str) -> SourceRecord:
         try:
@@ -347,16 +436,17 @@ class PublishBaseline:
             pass
 
 
-def _parse_source_ref(reference: str, card_id: str) -> str:
+def _parse_source_ref(reference: str, card_id: str) -> tuple[str, str | None]:
     """Parse SOURCE_ID or SOURCE_ID:CITATION_ID; every other shape fails closed."""
     head, separator, tail = reference.partition(":")
     source_id = head.strip()
-    if not source_id or (separator and not tail.strip()) or ":" in tail:
+    citation_id = tail.strip()
+    if not source_id or (separator and not citation_id) or ":" in tail:
         raise DomainError(
             ErrorCode.CITATION_INVALID,
             f"PUBLISH_SOURCE_REF_INVALID:{card_id}",
         )
-    return source_id
+    return source_id, citation_id if separator else None
 
 
 def _sha256(path: Path) -> str:

@@ -395,6 +395,7 @@ def test_source_node_excerpt_is_located_and_redacted(tmp_path):
     source_node = trace.main_chain[0]
     assert source_node.entity_id == "SRC-MKT"
     assert source_node.verification == "verified"
+    assert source_node.unverifiable_reason is None
     assert source_node.excerpt is not None
     assert "line:" in source_node.excerpt
     assert "客户普遍接受该奖励机制" in source_node.excerpt
@@ -415,10 +416,12 @@ def test_source_node_unverifiable_when_archive_tampered(tmp_path):
 
     source_node = trace.main_chain[0]
     assert source_node.verification == "unverifiable"
+    assert source_node.unverifiable_reason == "integrity_failed"
     assert source_node.excerpt is None
 
 
 def test_source_node_unverifiable_when_citation_fragment_missing(tmp_path):
+    """V3-A15: 目标 chunk 缺失时仍不可验证，不回退到同来源其他 chunk。"""
     env = _approved_env(tmp_path)
     _add_source(env, "SRC-MKT", "# 客户访谈\n\n客户普遍接受该奖励机制。\n")
     _rewrite_card_refs(env, CARD_ID, ["SRC-MKT:SRC-MKT-9999"])
@@ -426,7 +429,26 @@ def test_source_node_unverifiable_when_citation_fragment_missing(tmp_path):
 
     trace = _use_case(env).execute(BuildTraceInput(entity_id=CARD_ID))
 
-    assert trace.main_chain[0].verification == "unverifiable"
+    source_node = trace.main_chain[0]
+    assert source_node.verification == "unverifiable"
+    assert source_node.unverifiable_reason == "integrity_failed"
+    assert source_node.excerpt is None
+
+
+def test_source_node_unverifiable_when_card_provides_no_citation(tmp_path):
+    """V3-A13: 裸 source ID 保留来源节点但 verification=unverifiable，无 excerpt。"""
+    env = _approved_env(tmp_path)
+    _add_source(env, "SRC-MKT", "# 客户访谈\n\n客户普遍接受该奖励机制。\n")
+    _rewrite_card_refs(env, CARD_ID, ["SRC-MKT"])
+    _add_relation(env, "REL-DERIVED-MKT", "SRC-MKT", "derived_from", CARD_ID)
+
+    trace = _use_case(env).execute(BuildTraceInput(entity_id=CARD_ID))
+
+    source_node = trace.main_chain[0]
+    assert source_node.entity_id == "SRC-MKT"
+    assert source_node.verification == "unverifiable"
+    assert source_node.unverifiable_reason == "no_citation"
+    assert source_node.excerpt is None
 
 
 def test_trace_unknown_card_raises_not_found(tmp_path):

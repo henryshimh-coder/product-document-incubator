@@ -78,10 +78,16 @@ def _render_node(node: TraceNode) -> None:
         )
     verification_badge = ""
     if node.verification == "unverifiable":
-        verification_badge = (
-            '<div style="margin-top:6px;"><span style="background:#FEE4E2;color:#B42318;'
-            'border-radius:4px;padding:1px 6px;font-size:12px;">引用不可验证</span></div>'
-        )
+        if node.unverifiable_reason == "no_citation":
+            verification_badge = (
+                '<div style="margin-top:6px;"><span style="background:#FFF4E5;color:#B54708;'
+                'border-radius:4px;padding:1px 6px;font-size:12px;">未提供可定位引用</span></div>'
+            )
+        else:
+            verification_badge = (
+                '<div style="margin-top:6px;"><span style="background:#FEE4E2;color:#B42318;'
+                'border-radius:4px;padding:1px 6px;font-size:12px;">引用不可验证</span></div>'
+            )
     status = _STATUS_LABELS.get(node.status, node.status)
     happened = node.happened_at.strftime("%Y-%m-%d")
     st.markdown(
@@ -97,6 +103,9 @@ def _render_node(node: TraceNode) -> None:
     with st.expander("详情"):
         st.markdown(escape(node.summary))
         if node.verification == "unverifiable":
-            st.caption("引用不可验证：归档文件或定位片段未通过完整性校验。")
+            if node.unverifiable_reason == "no_citation":
+                st.caption("未提供可定位引用：该来源未给出可定位的引用片段。")
+            else:
+                st.caption("引用不可验证：归档文件或定位片段未通过完整性校验。")
         elif node.excerpt:
             st.caption(f"原文片段（已脱敏）：{node.excerpt}")

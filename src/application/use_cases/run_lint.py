@@ -524,7 +524,7 @@ class SafeLintComparisonBuilder:
             if not notices:
                 raise DomainError(ErrorCode.LINT_SOURCE_NOT_COMPARABLE)
         comparison_items: list[dict[str, str]] = []
-        for index, card in enumerate(notices[:50], start=1):
+        for card in notices[:50]:
             source_id = (
                 selected_source.id
                 if selected_source is not None
@@ -564,11 +564,17 @@ class SafeLintComparisonBuilder:
                     ErrorCode.CITATION_INVALID,
                     f"LINT_COMPARISON_TEXT_MISMATCH:{card.id}",
                 )
+            citation_id = fragment.fragment_id
+            if citation_id is None:
+                raise DomainError(
+                    ErrorCode.CITATION_INVALID,
+                    f"LINT_COMPARISON_CITATION_MISSING:{card.id}",
+                )
             comparison_items.append(
                 {
                     "id": card.id,
                     "source_id": source.id,
-                    "citation_id": f"CIT-COMPARE-{index:03d}",
+                    "citation_id": citation_id,
                     "document_version": source.document_version,
                     "page_or_section": fragment.locator,
                     "excerpt": card.content,

@@ -32,8 +32,10 @@ BASE_SOURCE_ID = "SRC-LLD-BASE"
 BASE_SOURCE_FILENAME = "当前产品方案.md"
 RULE_CARD_ID = "RULE-LLD-001"
 MARKET_CARD_ID = "MKT-LLD-001"
-RULE_CARD_CONTENT = "仅作为脱敏演示基线使用。"
+RULE_CARD_CONTENT = "当前目标客群是符合准入要求的存量客户。"
 MARKET_CARD_CONTENT = "客户普遍接受该奖励机制。"
+# 免责声明只进入附录与基线说明，不作为任何业务卡正文。
+BASELINE_DISCLAIMER = "仅作为脱敏演示基线使用。"
 # 出站安全证明要求查询/自检载荷不超过证据材料总字符的 25%，演示材料需要足够篇幅。
 BASE_SOURCE_BACKGROUND = "\n\n".join(
     f"第{i}段方案背景说明，记录演示产品的业务口径、适用范围与假设条件。" for i in range(1, 201)
@@ -49,7 +51,9 @@ BASE_SOURCE_CONTENT = (
     "## 市场判断\n\n"
     f"{MARKET_CARD_CONTENT}\n\n"
     "## 方案背景\n\n"
-    f"{BASE_SOURCE_BACKGROUND}\n"
+    f"{BASE_SOURCE_BACKGROUND}\n\n"
+    "## 附录\n\n"
+    f"{BASELINE_DISCLAIMER}\n"
 )
 
 
@@ -71,7 +75,7 @@ def bootstrap(project_root: Path) -> BaselineManifest:
             (
                 "# 产品智策初始基线\n\n当前版本：LLD-724_1\n\n## 目标客群\n\n"
                 f"{RULE_CARD_CONTENT}\n\n## 市场判断\n\n{MARKET_CARD_CONTENT}\n\n"
-                f"## 基线说明\n\n{BASELINE_BACKGROUND}\n"
+                f"## 基线说明\n\n{BASELINE_BACKGROUND}\n\n## 附录\n\n{BASELINE_DISCLAIMER}\n"
             ),
             [
                 KnowledgeCard(

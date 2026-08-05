@@ -143,8 +143,13 @@ class BuildTrace:
         if source is None:
             source_node = None
         else:
-            verification, excerpt = self._verify_source_excerpt(source, card)
-            source_node = self._source_node(source, verification=verification, excerpt=excerpt)
+            verification, excerpt, reason = self._verify_source_excerpt(source, card)
+            source_node = self._source_node(
+                source,
+                verification=verification,
+                excerpt=excerpt,
+                unverifiable_reason=reason,
+            )
             nodes.append(source_node)
             edges.append(
                 TraceEdge(
@@ -417,13 +422,18 @@ class BuildTrace:
         self,
         source: SourceRecord,
         card: KnowledgeCard,
-    ) -> tuple[str, str | None]:
-        """Verify archive integrity and locate a minimal redacted excerpt."""
+    ) -> tuple[str, str | None, str | None]:
+        """Verify archive integrity and locate a minimal redacted excerpt.
+
+        三态语义：归档与 citation 均通过才返回 verified；来源存在但卡片未提供
+        可定位 citation 返回 unverifiable/no_citation；归档哈希或 citation 定位
+        失败返回 unverifiable/integrity_failed。不回退到其他片段。
+        """
 
         try:
             material = self.material_reader.read_source(source)
         except DomainError:
-            return "unverifiable", None
+            return "unverifiable", None, "integrity_failed"
         citations = [
             citation
             for ref in card.source_refs
@@ -432,7 +442,7 @@ class BuildTrace:
             and (citation := parsed[1]) is not None
         ]
         if not citations:
-            return "verified", None
+            return "unverifiable", None, "no_citation"
         fragment = next(
             (
                 item
@@ -442,11 +452,11 @@ class BuildTrace:
             None,
         )
         if fragment is None:
-            return "unverifiable", None
+            return "unverifiable", None, "integrity_failed"
         redacted = self._redact(fragment.text, material.security_level)
         if len(redacted) > _EXCERPT_MAX_CHARS:
             redacted = f"{redacted[:_EXCERPT_MAX_CHARS]}…"
-        return "verified", f"{fragment.locator}｜{redacted}"
+        return "verified", f"{fragment.locator}｜{redacted}", None
 
     def _verify_market_ref(
         self,
@@ -503,6 +513,7 @@ class BuildTrace:
         *,
         verification: str = "not_applicable",
         excerpt: str | None = None,
+        unverifiable_reason: str | None = None,
     ) -> TraceNode:
         return TraceNode(
             kind="source",
@@ -516,6 +527,7 @@ class BuildTrace:
             ),
             is_sandbox=source.is_sandbox,
             verification=verification,
+            unverifiable_reason=unverifiable_reason,
             excerpt=excerpt,
         )
 

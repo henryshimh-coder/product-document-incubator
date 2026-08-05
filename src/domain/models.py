@@ -426,6 +426,7 @@ class TraceNode(DomainModel):
     summary: NonEmptyStr
     is_sandbox: bool = False
     verification: Literal["verified", "unverifiable", "not_applicable"] = "not_applicable"
+    unverifiable_reason: Literal["no_citation", "integrity_failed"] | None = None
     excerpt: NonEmptyStr | None = None
 
 

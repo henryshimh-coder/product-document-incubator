@@ -271,6 +271,7 @@ def build_container(
             db_path=db_path,
             manifest_path=manifest_path,
         ),
+        material_reader=LocalQueryMaterialReader(project_root),
         release_uow=SqliteReleaseUnitOfWork(db_path, event_logger=event_logger),
         reconciliation=reconciliation,
         guard=release_guard,

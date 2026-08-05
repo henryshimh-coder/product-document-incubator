@@ -40,6 +40,7 @@ from src.infrastructure.db.repositories import (
     SqliteProjectRepository,
     SqliteSourceRepository,
 )
+from src.infrastructure.files.extractor import extract_document_bytes
 from src.infrastructure.files.manifest_store import ManifestStore
 from src.infrastructure.files.markdown_store import MarkdownStore
 from src.infrastructure.observability.event_logger import EventLogger
@@ -85,6 +86,27 @@ _SOURCE_DOCUMENTS: dict[str, tuple[str, AuthorityLevel, str, str]] = {
     ),
 }
 
+
+def _chunk_id_for(source_id: str, marker: str) -> str:
+    """Locate the real chunk id of a marker text inside a source archive fixture."""
+    filename, _, _, content = _SOURCE_DOCUMENTS[source_id]
+    extracted = extract_document_bytes(
+        content.encode("utf-8"),
+        filename=filename,
+        source_id=source_id,
+    )
+    chunk = next((item for item in extracted.chunks if marker in item.text), None)
+    if chunk is None:
+        raise ValueError(f"{source_id} archive is missing chunk for: {marker}")
+    return chunk.chunk_id
+
+
+BASE_RULE_CHUNK_ID = _chunk_id_for("SRC-BASE", BEFORE_CONTENT)
+BASE_API_CHUNK_ID = _chunk_id_for("SRC-BASE", "客群接口规则。")
+RISK_CHUNK_ID = _chunk_id_for("SRC-RISK", "风险意见要求收紧客群。")
+RULE_CARD_REF = f"SRC-BASE:{BASE_RULE_CHUNK_ID}"
+API_CARD_REF = f"SRC-BASE:{BASE_API_CHUNK_ID}"
+
 _REVIEWED_FIELDS = {
     ChangeStatus.APPROVED: ChangeReviewAction.APPROVE,
     ChangeStatus.PUBLISHED: ChangeReviewAction.APPROVE,
@@ -126,7 +148,7 @@ def make_change(
         before_content=BEFORE_CONTENT,
         after_content=AFTER_CONTENT,
         rationale="依据风险意见和会议结论调整。",
-        evidence_refs=["CIT-BASE-001", "CIT-RISK-001"],
+        evidence_refs=[BASE_RULE_CHUNK_ID, RISK_CHUNK_ID],
         impacted_objects=["RULE-001", "API-CUSTOMER"],
         responsible_domain="产品",
         required_approver_role="产品经理",
@@ -165,7 +187,7 @@ def build_release_environment(
             status=KnowledgeStatus.EFFECTIVE,
             product_version=CURRENT_VERSION,
             applicable_scope="演示",
-            source_refs=["SRC-BASE"],
+            source_refs=[RULE_CARD_REF],
             authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
             owner="产品",
             created_at=NOW,
@@ -180,7 +202,7 @@ def build_release_environment(
             status=KnowledgeStatus.EFFECTIVE,
             product_version=CURRENT_VERSION,
             applicable_scope="演示",
-            source_refs=["SRC-BASE"],
+            source_refs=[API_CARD_REF],
             authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
             owner="产品",
             created_at=NOW,
@@ -287,7 +309,7 @@ def build_release_environment(
                 evidence=[
                     IssueEvidence(
                         source_id="SRC-BASE",
-                        citation_id="CIT-BASE-001",
+                        citation_id=BASE_RULE_CHUNK_ID,
                         excerpt=BEFORE_CONTENT,
                         document_version="v1.0",
                         page_or_section="目标客群",
@@ -295,7 +317,7 @@ def build_release_environment(
                     ),
                     IssueEvidence(
                         source_id="SRC-RISK",
-                        citation_id="CIT-RISK-001",
+                        citation_id=RISK_CHUNK_ID,
                         excerpt="风险意见要求收紧客群。",
                         document_version="v1.0",
                         page_or_section="客群限制",

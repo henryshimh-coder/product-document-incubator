@@ -14,12 +14,15 @@ from src.domain.enums import BaselineStatus, ChangeStatus
 from src.domain.errors import DomainError, ErrorCode
 from src.infrastructure.files.manifest_store import ManifestDurabilityUncertainError
 from tests.integration.release_env import (
+    BASE_RULE_CHUNK_ID,
+    BEFORE_CONTENT,
     CURRENT_BASELINE_ID,
     CURRENT_VERSION,
     NOW,
     PROJECT_ID,
     RELEASE_NOTE,
     REVIEWER,
+    RULE_CARD_REF,
     TARGET_BASELINE_ID,
     TARGET_VERSION,
     build_release_environment,
@@ -34,6 +37,7 @@ def _use_case(env, **overrides):
         SqliteReleaseUnitOfWork,
     )
     from src.infrastructure.files.manifest_integrity import ManifestIntegrityChecker
+    from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
     from src.infrastructure.recovery.reconciliation_service import ReconciliationService
     from src.infrastructure.recovery.release_guard import ReleaseGuard
 
@@ -49,6 +53,7 @@ def _use_case(env, **overrides):
             db_path=env.db_path,
             manifest_path=env.manifest_path,
         ),
+        "material_reader": LocalQueryMaterialReader(env.project_root),
         "release_uow": SqliteReleaseUnitOfWork(env.db_path, event_logger=env.event_logger),
         "reconciliation": ReconciliationService(
             manifest_store=env.manifest_store,
@@ -510,8 +515,221 @@ def test_publish_failure_keeps_change_approved_for_retry(tmp_path) -> None:
 def _assert_release_tree_and_state_unchanged(env, before) -> None:
     assert env.changes.get("CHANGE-001").status == ChangeStatus.APPROVED
     assert env.manifest_store.read_and_validate() == before
+    assert env.projects.get(PROJECT_ID).current_baseline_id == CURRENT_BASELINE_ID
+    assert env.baselines.get(CURRENT_BASELINE_ID).status == BaselineStatus.EFFECTIVE
     release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
     assert [item.name for item in release_root.iterdir()] == [CURRENT_VERSION]
+
+
+def _tamper_source_archive(env, source_id: str) -> bytes:
+    """Append bytes to a source archive without touching its SourceRecord."""
+    source = env.sources.get(source_id)
+    archive_path = env.project_root / source.archive_path
+    original = archive_path.read_bytes()
+    archive_path.write_bytes(original + "\n被篡改的附加内容。\n".encode())
+    return original
+
+
+def _restore_source_archive(env, source_id: str, payload: bytes) -> None:
+    source = env.sources.get(source_id)
+    (env.project_root / source.archive_path).write_bytes(payload)
+
+
+def test_publish_fails_when_card_source_archive_is_tampered(tmp_path) -> None:
+    """V3-A06: 篡改基线卡来源归档后发布在创建临时发布目录前失败。"""
+    env = _approved_env(tmp_path)
+    _tamper_source_archive(env, "SRC-BASE")
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_SOURCE_INTEGRITY_FAILED.value
+    assert raised.value.detail == "PUBLISH_SOURCE_INTEGRITY_FAILED:SRC-BASE"
+    assert str(env.project_root) not in str(raised.value)
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_fails_when_change_evidence_source_archive_is_tampered(tmp_path) -> None:
+    """V3-A07: 篡改变更证据来源归档后发布失败，批准状态保留。"""
+    env = _approved_env(tmp_path)
+    _tamper_source_archive(env, "SRC-RISK")
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_SOURCE_INTEGRITY_FAILED.value
+    assert raised.value.detail == "PUBLISH_SOURCE_INTEGRITY_FAILED:SRC-RISK"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_fails_when_card_citation_chunk_does_not_exist(tmp_path) -> None:
+    """V3-A08: citation/chunk 不存在时发布失败，不回退到其他片段。"""
+    env = _approved_env(tmp_path)
+    _rewrite_rule_source_refs(env, ["SRC-BASE:SRC-BASE-9999"])
+    use_case = _use_case(env, integrity=Mock(validate=Mock(return_value=True)))
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        use_case.execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == "PUBLISH_CITATION_UNVERIFIABLE:RULE-001"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_fails_when_archive_path_escapes_controlled_root(tmp_path) -> None:
+    """V3-A09: archive 路径越界时发布失败，不读取越界文件。"""
+    env = _approved_env(tmp_path)
+    escaped = env.project_root / "data/source_archive/LLD/SRC-RISK/当前产品方案.md"
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            "UPDATE source_records SET archive_path = ? WHERE id = 'SRC-BASE'",
+            (str(escaped),),
+        )
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_SOURCE_INTEGRITY_FAILED.value
+    assert raised.value.detail == "PUBLISH_SOURCE_INTEGRITY_FAILED:SRC-BASE"
+    assert str(env.project_root) not in str(raised.value)
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_retry_succeeds_after_restoring_source_without_reapproval(tmp_path) -> None:
+    """V3-A10: 恢复合法来源后可直接重试发布，不重复人工审批。"""
+    env = _approved_env(tmp_path)
+    original = _tamper_source_archive(env, "SRC-BASE")
+    use_case = _use_case(env)
+
+    with pytest.raises(DomainError) as raised:
+        use_case.execute(_command())
+    assert raised.value.code == ErrorCode.PUBLISH_SOURCE_INTEGRITY_FAILED.value
+    change = env.changes.get("CHANGE-001")
+    assert change.status == ChangeStatus.APPROVED
+    assert change.review_idempotency_key == "REVIEW-KEY-001"
+
+    _restore_source_archive(env, "SRC-BASE", original)
+    baseline = use_case.execute(_command())
+
+    assert baseline.version == TARGET_VERSION
+    assert env.changes.get("CHANGE-001").status == ChangeStatus.PUBLISHED
+    assert env.manifest_store.read_and_validate().current_version == TARGET_VERSION
+
+
+def test_publish_allows_bare_source_id_alongside_locatable_citation(tmp_path) -> None:
+    """V3-A11: 裸 source ID 只作补充关联，合法 citation 满足正式证据门槛。"""
+    env = _approved_env(tmp_path)
+    _rewrite_rule_source_refs(env, ["SRC-BASE", RULE_CARD_REF])
+    use_case = _use_case(env, integrity=Mock(validate=Mock(return_value=True)))
+
+    baseline = use_case.execute(_command())
+
+    assert baseline.version == TARGET_VERSION
+    assert env.manifest_store.read_and_validate().current_version == TARGET_VERSION
+
+
+def test_publish_fails_when_card_has_only_bare_source_ids(tmp_path) -> None:
+    """V3-A12: 只有裸 source ID 的 effective 卡不满足正式证据门槛。"""
+    env = _approved_env(tmp_path)
+    _rewrite_rule_source_refs(env, ["SRC-BASE"])
+    use_case = _use_case(env, integrity=Mock(validate=Mock(return_value=True)))
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        use_case.execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == "PUBLISH_CARD_CITATION_REQUIRED:RULE-001"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def _baseline_rule_fragment_locator(env) -> str:
+    from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
+
+    manifest = env.manifest_store.read_and_validate()
+    material = LocalQueryMaterialReader(env.project_root).read_baseline(
+        project_id=PROJECT_ID,
+        asset_id=manifest.current_baseline_id,
+        version=manifest.current_version,
+        relative_path=manifest.full_document_path,
+        expected_sha256=manifest.full_document_sha256,
+    )
+    return next(item for item in material.fragments if BEFORE_CONTENT in item.text).locator
+
+
+def _append_issue_evidence(env, evidence: dict) -> None:
+    from src.infrastructure.db.repositories import SqliteIssueRepository
+
+    issue = SqliteIssueRepository(env.db_path).get("ISSUE-001")
+    payload = [item.model_dump(mode="json") for item in issue.evidence]
+    payload.append(evidence)
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            "UPDATE issue_cards SET evidence_json = ? WHERE id = 'ISSUE-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+
+def _add_change_evidence_ref(env, citation_id: str) -> None:
+    change = env.changes.get("CHANGE-001")
+    refs = [*change.evidence_refs, citation_id]
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            "UPDATE change_requests SET evidence_refs_json = ? WHERE id = 'CHANGE-001'",
+            (json.dumps(refs, ensure_ascii=False),),
+        )
+
+
+def test_publish_accepts_baseline_side_evidence_with_locatable_position(tmp_path) -> None:
+    """真实 lint 流程的当前基线侧证据经基线材料定位校验后可发布。"""
+    env = _approved_env(tmp_path)
+    citation_id = "CIT-BASELINE-001"
+    _append_issue_evidence(
+        env,
+        {
+            "source_id": CURRENT_BASELINE_ID,
+            "citation_id": citation_id,
+            "excerpt": BEFORE_CONTENT,
+            "document_version": CURRENT_VERSION,
+            "page_or_section": _baseline_rule_fragment_locator(env),
+            "side": "current_baseline",
+        },
+    )
+    _add_change_evidence_ref(env, citation_id)
+
+    baseline = _use_case(env).execute(_command())
+
+    assert baseline.version == TARGET_VERSION
+
+
+def test_publish_fails_when_baseline_side_evidence_position_is_unlocatable(tmp_path) -> None:
+    """基线侧证据的 locator/excerpt 不对应已验证片段时发布失败。"""
+    env = _approved_env(tmp_path)
+    citation_id = "CIT-BASELINE-001"
+    _append_issue_evidence(
+        env,
+        {
+            "source_id": CURRENT_BASELINE_ID,
+            "citation_id": citation_id,
+            "excerpt": BEFORE_CONTENT,
+            "document_version": CURRENT_VERSION,
+            "page_or_section": "heading:不存在的章节; line:99",
+            "side": "current_baseline",
+        },
+    )
+    _add_change_evidence_ref(env, citation_id)
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{citation_id}"
+    _assert_release_tree_and_state_unchanged(env, before)
 
 
 def test_publish_rejects_sandbox_evidence_source(tmp_path) -> None:
@@ -608,7 +826,7 @@ def test_publish_rejects_ambiguous_issue_evidence_citation(tmp_path) -> None:
     with pytest.raises(DomainError, match="CITATION_INVALID") as raised:
         _use_case(env).execute(_command())
 
-    assert raised.value.detail == "PUBLISH_EVIDENCE_AMBIGUOUS:CIT-BASE-001"
+    assert raised.value.detail == f"PUBLISH_EVIDENCE_AMBIGUOUS:{BASE_RULE_CHUNK_ID}"
     _assert_release_tree_and_state_unchanged(env, before)
 
 

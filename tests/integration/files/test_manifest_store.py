@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -130,6 +131,32 @@ def test_bootstrap_creates_a_verified_baseline_and_is_repeatable(tmp_path: Path)
         baseline_count = connection.execute("SELECT COUNT(*) FROM baselines").fetchone()[0]
     assert mirror == first.current_baseline_id
     assert baseline_count == 1
+
+
+def test_bootstrap_rule_card_carries_business_rule_and_keeps_disclaimer_in_appendix(
+    tmp_path: Path,
+) -> None:
+    """V3-A01: 目标客群卡正文为真实客群规则，免责声明只出现在附录。"""
+    manifest = bootstrap(tmp_path)
+    full_text = (tmp_path / manifest.full_document_path).read_text(encoding="utf-8")
+    cards_payload = json.loads((tmp_path / manifest.card_snapshot_path).read_text(encoding="utf-8"))
+    rule_card = next(card for card in cards_payload if card["id"] == "RULE-LLD-001")
+    assert rule_card["content"] == "当前目标客群是符合准入要求的存量客户。"
+    assert "仅作为脱敏演示基线使用。" not in rule_card["content"]
+
+    target_section = full_text.split("## 目标客群", 1)[1].split("##", 1)[0]
+    assert "当前目标客群是符合准入要求的存量客户。" in target_section
+    assert "仅作为脱敏演示基线使用。" not in target_section
+    appendix = full_text.rsplit("## 附录", 1)[1]
+    assert "仅作为脱敏演示基线使用。" in appendix
+
+    archive_text = (tmp_path / "data/source_archive/LLD/SRC-LLD-BASE/当前产品方案.md").read_text(
+        encoding="utf-8"
+    )
+    archive_target = archive_text.split("## 目标客群", 1)[1].split("##", 1)[0]
+    assert "当前目标客群是符合准入要求的存量客户。" in archive_target
+    assert "仅作为脱敏演示基线使用。" not in archive_target
+    assert "仅作为脱敏演示基线使用。" in archive_text.rsplit("## 附录", 1)[1]
 
 
 def test_bootstrap_preserves_existing_manifest_assets_without_creating_initial_vault(

@@ -12,7 +12,14 @@ NOW = datetime(2026, 8, 3, 7, 0, tzinfo=UTC)
 
 
 def _render(
-    *, gaps=(), logs=(), metrics=(), services=True, trace_error=None, second_card=False
+    *,
+    gaps=(),
+    logs=(),
+    metrics=(),
+    services=True,
+    trace_error=None,
+    second_card=False,
+    bare_source=False,
 ) -> None:
     from datetime import UTC, datetime
 
@@ -51,6 +58,8 @@ def _render(
                 status="completed",
                 happened_at=now,
                 summary="文件版本 v1.0，权威级别 formal_effective",
+                verification="unverifiable" if bare_source else "not_applicable",
+                unverifiable_reason="no_citation" if bare_source else None,
             ),
             TraceNode(
                 kind="knowledge",
@@ -252,6 +261,17 @@ def test_trace_page_shows_six_node_chain_with_relations() -> None:
         "文件版本 v1.0，权威级别 formal_effective",
     ):
         assert text in rendered, text
+
+
+def test_trace_page_marks_bare_source_ref_as_no_locatable_citation() -> None:
+    """V3-A16: 裸来源引用显示“未提供可定位引用”，不显示已验证徽标。"""
+    page = AppTest.from_function(_render, kwargs={"bare_source": True}).run()
+
+    assert not page.exception
+    rendered = _html(page)
+    assert "未提供可定位引用" in rendered
+    assert "引用不可验证" not in rendered
+    assert "已验证" not in rendered
 
 
 def test_trace_page_flags_unvalidated_market_judgment_without_stating_fact() -> None:

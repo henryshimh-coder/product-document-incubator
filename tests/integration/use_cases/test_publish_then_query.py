@@ -80,6 +80,7 @@ def _publish_use_case(env) -> PublishBaseline:
             db_path=env.db_path,
             manifest_path=env.manifest_path,
         ),
+        material_reader=LocalQueryMaterialReader(env.project_root),
         release_uow=SqliteReleaseUnitOfWork(env.db_path, event_logger=env.event_logger),
         reconciliation=ReconciliationService(
             manifest_store=env.manifest_store,

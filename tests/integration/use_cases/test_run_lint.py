@@ -146,7 +146,13 @@ class _Materials:
             document_version=source.document_version,
             sha256=source.sha256,
             text="风险意见要求收紧客群。",
-            fragments=(VerifiedFragment(locator="客群限制", text="风险意见要求收紧客群。"),),
+            fragments=(
+                VerifiedFragment(
+                    locator="客群限制",
+                    text="风险意见要求收紧客群。",
+                    fragment_id=f"{source.id}-0002",
+                ),
+            ),
             authority_level=source.authority_level,
             security_level=source.security_level,
             is_baseline_asset=False,
