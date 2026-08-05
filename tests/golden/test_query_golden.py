@@ -177,11 +177,34 @@ class Baselines:
             full_document_path=f"data/baselines/{version}/full.md",
             card_snapshot_path=f"data/baselines/{version}/cards.json",
             manifest_sha256="d" * 64,
+            full_document_sha256="e" * 64,
+            card_snapshot_sha256="f" * 64,
             change_request_id=None,
             approved_by="产品经理",
             effective_at=NOW,
             created_at=NOW,
         )
+
+    def list_for_project(self, project_id):
+        return [
+            self.get_by_version(project_id, HISTORICAL_VERSION),
+            Baseline(
+                id="BASE-LLD-724_1",
+                project_id=project_id,
+                version=CURRENT_VERSION,
+                parent_baseline_id=None,
+                status="effective",
+                full_document_path=("data/obsidian_vault/02_Current_Baseline/LLD-724_1/full.md"),
+                card_snapshot_path=("data/obsidian_vault/02_Current_Baseline/LLD-724_1/cards.json"),
+                manifest_sha256="d" * 64,
+                full_document_sha256="a" * 64,
+                card_snapshot_sha256="b" * 64,
+                change_request_id=None,
+                approved_by="产品经理",
+                effective_at=NOW,
+                created_at=NOW,
+            ),
+        ]
 
 
 class Projects:
@@ -207,6 +230,20 @@ class Knowledge:
 
     def list_notices(self, project_id, version):
         return list(self.cards)
+
+
+class BaselineCards:
+    """Version-snapshot card reader backed by the fixed corpus, never SQLite."""
+
+    def __init__(self, cards):
+        self.cards = cards
+
+    def read_version_cards(self, *, project_id, version, relative_path, expected_sha256):
+        return [
+            card
+            for card in self.cards
+            if card.project_id == project_id and card.product_version == version
+        ]
 
 
 class Sources:
@@ -328,6 +365,7 @@ def _build_use_case(client):
         projects=Projects(),
         knowledge=Knowledge(cards),
         sources=Sources([_source(row) for row in (*CORPUS, CANDIDATE)]),
+        baseline_cards=BaselineCards(cards),
         material_reader=MaterialReader(),
         gateway=QueryGateway(client),
         customer_names=(),

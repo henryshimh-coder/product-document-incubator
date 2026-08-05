@@ -55,6 +55,7 @@ from src.infrastructure.db.repositories import (
     SqliteSourceRepository,
 )
 from src.infrastructure.files.archive import SourceArchive
+from src.infrastructure.files.baseline_card_reader import LocalBaselineCardReader
 from src.infrastructure.files.extractor import extract_document
 from src.infrastructure.files.manifest_integrity import ManifestIntegrityChecker
 from src.infrastructure.files.manifest_store import ManifestStore
@@ -228,6 +229,8 @@ def build_container(
         markdown_store=markdown_store,
         changes=SqliteChangeRepository(db_path),
         baselines=SqliteBaselineRepository(db_path),
+        sources=SqliteSourceRepository(db_path),
+        issues=SqliteIssueRepository(db_path),
         integrity=ManifestIntegrityChecker(
             project_root=project_root,
             db_path=db_path,
@@ -305,6 +308,7 @@ def build_container(
         projects=SqliteProjectRepository(db_path),
         knowledge=SqliteKnowledgeRepository(db_path),
         sources=SqliteSourceRepository(db_path),
+        baseline_cards=LocalBaselineCardReader(project_root),
         material_reader=LocalQueryMaterialReader(project_root),
         gateway=gateways.query,
         customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),

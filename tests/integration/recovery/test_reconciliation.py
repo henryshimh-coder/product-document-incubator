@@ -29,10 +29,20 @@ def _publish_manifest(env, change) -> None:
     """Move the authoritative manifest to the target version like a real publish."""
     temp_dir = env.markdown_store.create_release_temp_dir()
     current = env.manifest_store.read_and_validate()
-    env.markdown_store.build_release_full_document(current.full_document_path, change, temp_dir)
-    env.markdown_store.build_release_cards(
-        current.card_snapshot_path, change, temp_dir, updated_at=NOW
+    env.markdown_store.build_release_full_document(
+        current.full_document_path,
+        change,
+        temp_dir,
+        parent_version=current.current_version,
     )
+    staged_cards = env.markdown_store.build_release_cards(
+        current.card_snapshot_path,
+        change,
+        temp_dir,
+        parent_version=current.current_version,
+        updated_at=NOW,
+    )
+    assert staged_cards and {card.product_version for card in staged_cards} == {TARGET_VERSION}
     env.markdown_store.write_release_metadata(
         temp_dir,
         change=change,
@@ -97,6 +107,30 @@ def test_rebuild_restores_mirror_from_effective_manifest(tmp_path) -> None:
     assert env.baselines.get(CURRENT_BASELINE_ID).status == BaselineStatus.SUPERSEDED
     assert env.projects.get(PROJECT_ID).current_baseline_id == TARGET_BASELINE_ID
     assert env.changes.get("CHANGE-001").status == ChangeStatus.PUBLISHED
+
+
+def test_mirror_mismatch_on_baseline_hash_drift_is_repaired(tmp_path) -> None:
+    """Catches a tampered baseline hash column passing the manifest mirror check."""
+    env = build_release_environment(tmp_path)
+    reconciliation = _reconciliation(env)
+    assert reconciliation.validate_manifest_mirror().success
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            "UPDATE baselines SET card_snapshot_sha256 = ? WHERE id = ?",
+            ("0" * 64, CURRENT_BASELINE_ID),
+        )
+
+    validation = reconciliation.validate_manifest_mirror()
+    repair = reconciliation.rebuild_current_from_manifest()
+
+    assert not validation.success
+    assert validation.error_code == "MIRROR_MISMATCH"
+    assert repair.success
+    assert reconciliation.validate_manifest_mirror().success
+    baseline = env.baselines.get(CURRENT_BASELINE_ID)
+    manifest = env.manifest_store.read_and_validate()
+    assert baseline.full_document_sha256 == manifest.full_document_sha256
+    assert baseline.card_snapshot_sha256 == manifest.card_snapshot_sha256
 
 
 def test_rebuild_is_idempotent(tmp_path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -13,7 +14,11 @@ if __package__ in {None, ""}:
 from src.domain.enums import AuthorityLevel, BaselineStatus, KnowledgeStatus
 from src.domain.models import Baseline, BaselineManifest, KnowledgeCard, Project
 from src.infrastructure.db.migrations import migrate
-from src.infrastructure.db.repositories import SqliteBaselineRepository, SqliteProjectRepository
+from src.infrastructure.db.repositories import (
+    SqliteBaselineRepository,
+    SqliteKnowledgeRepository,
+    SqliteProjectRepository,
+)
 from src.infrastructure.files.manifest_store import ManifestStore
 from src.infrastructure.files.markdown_store import MarkdownStore
 
@@ -109,6 +114,8 @@ def bootstrap(project_root: Path) -> BaselineManifest:
                     full_document_path=manifest.full_document_path,
                     card_snapshot_path=manifest.card_snapshot_path,
                     manifest_sha256=_sha256(manifest_path),
+                    full_document_sha256=manifest.full_document_sha256,
+                    card_snapshot_sha256=manifest.card_snapshot_sha256,
                     change_request_id=manifest.change_request_id,
                     approved_by=manifest.approved_by,
                     effective_at=manifest.published_at,
@@ -117,10 +124,24 @@ def bootstrap(project_root: Path) -> BaselineManifest:
             )
         projects.update_current_baseline(PROJECT_ID, manifest.current_baseline_id)
     else:
+        _backfill_baseline_hashes(db_path, manifest)
         _validate_sqlite_mirror(db_path, manifest_path, manifest)
+    _mirror_snapshot_cards(project_root, db_path, manifest)
     _validate_manifest_assets(project_root, manifest)
     _validate_sqlite_mirror(db_path, manifest_path, manifest)
     return manifest
+
+
+def _mirror_snapshot_cards(
+    project_root: Path,
+    db_path: Path,
+    manifest: BaselineManifest,
+) -> None:
+    payload = json.loads((project_root / manifest.card_snapshot_path).read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("Demo card snapshot is not a list")
+    cards = [KnowledgeCard.model_validate(item) for item in payload]
+    SqliteKnowledgeRepository(db_path).upsert_cards(cards)
 
 
 def _validate_manifest_assets(project_root: Path, manifest: BaselineManifest) -> None:
@@ -134,6 +155,24 @@ def _validate_manifest_assets(project_root: Path, manifest: BaselineManifest) ->
             raise ValueError(f"Manifest hash mismatch for {relative_path}")
 
 
+def _backfill_baseline_hashes(db_path: Path, manifest: BaselineManifest) -> None:
+    """Backfill asset hashes for pre-upgrade rows that predate the hash columns."""
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE baselines
+            SET full_document_sha256 = ?, card_snapshot_sha256 = ?
+            WHERE id = ?
+              AND (full_document_sha256 IS NULL OR card_snapshot_sha256 IS NULL)
+            """,
+            (
+                manifest.full_document_sha256,
+                manifest.card_snapshot_sha256,
+                manifest.current_baseline_id,
+            ),
+        )
+
+
 def _validate_sqlite_mirror(db_path: Path, manifest_path: Path, manifest: BaselineManifest) -> None:
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
@@ -143,7 +182,9 @@ def _validate_sqlite_mirror(db_path: Path, manifest_path: Path, manifest: Baseli
                 baselines.manifest_sha256,
                 baselines.version,
                 baselines.full_document_path,
-                baselines.card_snapshot_path
+                baselines.card_snapshot_path,
+                baselines.full_document_sha256,
+                baselines.card_snapshot_sha256
             FROM projects
             LEFT JOIN baselines ON baselines.id = projects.current_baseline_id
             WHERE projects.id = ?
@@ -156,6 +197,8 @@ def _validate_sqlite_mirror(db_path: Path, manifest_path: Path, manifest: Baseli
         manifest.current_version,
         manifest.full_document_path,
         manifest.card_snapshot_path,
+        manifest.full_document_sha256,
+        manifest.card_snapshot_sha256,
     )
     if row is None or tuple(row) != expected:
         raise ValueError("SQLite current baseline mirror does not match manifest")

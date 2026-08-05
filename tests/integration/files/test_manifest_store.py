@@ -165,6 +165,34 @@ def test_bootstrap_preserves_existing_manifest_assets_without_creating_initial_v
     assert not (tmp_path / "data/obsidian_vault/02_Current_Baseline/LLD-724_1").exists()
 
 
+def test_bootstrap_backfills_pre_upgrade_baseline_hashes(tmp_path: Path) -> None:
+    """Catches repeat bootstrap leaving pre-upgrade rows without asset hashes."""
+    manifest = bootstrap(tmp_path)
+    db_path = tmp_path / "data/local_state/product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE baselines
+            SET full_document_sha256 = NULL, card_snapshot_sha256 = NULL
+            WHERE id = ?
+            """,
+            (manifest.current_baseline_id,),
+        )
+
+    bootstrap(tmp_path)
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT full_document_sha256, card_snapshot_sha256
+            FROM baselines
+            WHERE id = ?
+            """,
+            (manifest.current_baseline_id,),
+        ).fetchone()
+    assert row == (manifest.full_document_sha256, manifest.card_snapshot_sha256)
+
+
 @pytest.mark.parametrize(
     ("column", "invalid_value"),
     [

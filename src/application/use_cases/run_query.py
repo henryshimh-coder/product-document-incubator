@@ -8,6 +8,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from src.application.dto.query import RunQueryInput
+from src.application.ports.baseline_cards import BaselineCardReader
 from src.application.ports.dashboard import ManifestReader, ManifestSnapshot
 from src.application.ports.repositories import (
     BaselineRepository,
@@ -17,7 +18,14 @@ from src.application.ports.repositories import (
 )
 from src.domain.enums import BaselineStatus, KnowledgeStatus, SecurityLevel
 from src.domain.errors import DomainError, ErrorCode, OutputValidationError
-from src.domain.models import Citation, KnowledgeCard, Project, QueryResponse, SourceRecord
+from src.domain.models import (
+    Baseline,
+    Citation,
+    KnowledgeCard,
+    Project,
+    QueryResponse,
+    SourceRecord,
+)
 from src.domain.policies.security_policy import can_call_external_model
 from src.domain.services.citation_validator import (
     CitationValidator,
@@ -67,6 +75,7 @@ class RunQuery:
         projects: ProjectRepository,
         knowledge: KnowledgeRepository,
         sources: SourceRepository,
+        baseline_cards: BaselineCardReader,
         material_reader: QueryMaterialReader,
         gateway: QueryWorkflowGateway,
         customer_names: Iterable[str],
@@ -82,6 +91,7 @@ class RunQuery:
         self.projects = projects
         self.knowledge = knowledge
         self.sources = sources
+        self.baseline_cards = baseline_cards
         self.material_reader = material_reader
         self.gateway = gateway
         self.customer_names = tuple(customer_names)
@@ -115,19 +125,28 @@ class RunQuery:
                 ErrorCode.BASELINE_INTEGRITY_FAILED,
                 "QUERY_MANIFEST_PROJECT_MISMATCH",
             )
-        version, baseline_material = self._resolve_scope(command, snapshot_before)
-        cards = self._effective_cards(command.project_id, version)
+        version, baseline_material, snapshot_path, snapshot_sha256 = self._resolve_scope(
+            command,
+            snapshot_before,
+        )
+        cards = self._effective_cards(
+            command.project_id,
+            version,
+            relative_path=snapshot_path,
+            expected_sha256=snapshot_sha256,
+        )
+        eligible_versions = self._eligible_source_versions(command.project_id, version)
         notice_cards = self._notice_cards(command, version)
         effective_cards, citations, evidence_materials, card_citation_ids = self._trusted_evidence(
             cards,
             project=project,
-            version=version,
             baseline_material=baseline_material,
+            eligible_versions=eligible_versions,
         )
         notices, notice_materials = self._trusted_notices(
             notice_cards,
             project=project,
-            version=version,
+            eligible_versions=eligible_versions,
         )
         supporting_materials = evidence_materials + notice_materials
         inputs = QueryWorkflowInput(
@@ -175,7 +194,7 @@ class RunQuery:
         self,
         command: RunQueryInput,
         snapshot: ManifestSnapshot,
-    ) -> tuple[str, VerifiedQueryMaterial | None]:
+    ) -> tuple[str, VerifiedQueryMaterial | None, str, str]:
         manifest = snapshot.manifest
         if command.scope == "historical":
             if command.historical_version is None:
@@ -194,7 +213,17 @@ class RunQuery:
                 or baseline.version == manifest.current_version
             ):
                 raise DomainError(ErrorCode.HISTORICAL_VERSION_INVALID)
-            return baseline.version, None
+            if baseline.card_snapshot_sha256 is None:
+                raise DomainError(
+                    ErrorCode.BASELINE_INTEGRITY_FAILED,
+                    "HISTORICAL_ASSET_UNVERIFIABLE",
+                )
+            return (
+                baseline.version,
+                None,
+                baseline.card_snapshot_path,
+                baseline.card_snapshot_sha256,
+            )
 
         baseline_material = self.material_reader.read_baseline(
             project_id=command.project_id,
@@ -203,16 +232,78 @@ class RunQuery:
             relative_path=manifest.full_document_path,
             expected_sha256=manifest.full_document_sha256,
         )
-        return manifest.current_version, baseline_material
+        return (
+            manifest.current_version,
+            baseline_material,
+            manifest.card_snapshot_path,
+            manifest.card_snapshot_sha256,
+        )
 
-    def _effective_cards(self, project_id: str, version: str) -> list[KnowledgeCard]:
+    def _effective_cards(
+        self,
+        project_id: str,
+        version: str,
+        *,
+        relative_path: str,
+        expected_sha256: str,
+    ) -> list[KnowledgeCard]:
+        snapshot_cards = self.baseline_cards.read_version_cards(
+            project_id=project_id,
+            version=version,
+            relative_path=relative_path,
+            expected_sha256=expected_sha256,
+        )
         return [
             card
-            for card in self.knowledge.list_effective(project_id, version)
+            for card in snapshot_cards
             if card.project_id == project_id
             and card.product_version == version
             and card.status == KnowledgeStatus.EFFECTIVE
         ][:20]
+
+    def _eligible_source_versions(self, project_id: str, version: str) -> set[str]:
+        """A source stays eligible for the version it was imported under and for
+        every descendant version whose same-project baseline chain includes it.
+        A broken, cyclic or ambiguous chain fails closed instead of trusting a
+        partial ancestry."""
+        baselines = [
+            baseline
+            for baseline in self.baselines.list_for_project(project_id)
+            if baseline.project_id == project_id
+        ]
+        by_version: dict[str, Baseline] = {}
+        for baseline in baselines:
+            if baseline.version in by_version:
+                raise DomainError(
+                    ErrorCode.BASELINE_INTEGRITY_FAILED,
+                    f"BASELINE_DUPLICATE_VERSION:{baseline.version}",
+                )
+            by_version[baseline.version] = baseline
+        by_id = {baseline.id: baseline for baseline in baselines}
+        current = by_version.get(version)
+        if current is None:
+            raise DomainError(
+                ErrorCode.BASELINE_INTEGRITY_FAILED,
+                f"BASELINE_VERSION_ROW_MISSING:{version}",
+            )
+        eligible = {version}
+        visited = {current.id}
+        while current.parent_baseline_id is not None:
+            parent = by_id.get(current.parent_baseline_id)
+            if parent is None:
+                raise DomainError(
+                    ErrorCode.BASELINE_INTEGRITY_FAILED,
+                    f"BASELINE_PARENT_CHAIN_BROKEN:{current.parent_baseline_id}",
+                )
+            if parent.id in visited:
+                raise DomainError(
+                    ErrorCode.BASELINE_INTEGRITY_FAILED,
+                    f"BASELINE_PARENT_CHAIN_CYCLE:{parent.id}",
+                )
+            visited.add(parent.id)
+            eligible.add(parent.version)
+            current = parent
+        return eligible
 
     def _notice_cards(self, command: RunQueryInput, version: str) -> list[KnowledgeCard]:
         if command.scope != "effective_with_notices":
@@ -233,15 +324,19 @@ class RunQuery:
         cards: list[KnowledgeCard],
         *,
         project: Project,
-        version: str,
         baseline_material: VerifiedQueryMaterial | None,
+        eligible_versions: set[str],
     ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[VerifiedQueryMaterial],
         dict[str, set[str]],
     ]:
-        source_materials = self._verified_source_materials(cards, project=project, version=version)
+        source_materials = self._verified_source_materials(
+            cards,
+            project=project,
+            eligible_versions=eligible_versions,
+        )
         citations: list[dict[str, Any]] = []
         supporting_materials: list[VerifiedQueryMaterial] = []
         card_citation_ids: dict[str, set[str]] = {card.id: set() for card in cards}
@@ -306,9 +401,13 @@ class RunQuery:
         cards: list[KnowledgeCard],
         *,
         project: Project,
-        version: str,
+        eligible_versions: set[str],
     ) -> tuple[list[dict[str, str]], list[VerifiedQueryMaterial]]:
-        source_materials = self._verified_source_materials(cards, project=project, version=version)
+        source_materials = self._verified_source_materials(
+            cards,
+            project=project,
+            eligible_versions=eligible_versions,
+        )
         notices: list[dict[str, str]] = []
         supporting_materials: list[VerifiedQueryMaterial] = []
         for card in cards:
@@ -340,7 +439,7 @@ class RunQuery:
         cards: list[KnowledgeCard],
         *,
         project: Project,
-        version: str,
+        eligible_versions: set[str],
     ) -> dict[str, VerifiedQueryMaterial]:
         materials: dict[str, VerifiedQueryMaterial] = {}
         for card in cards:
@@ -352,7 +451,11 @@ class RunQuery:
                     source = self.sources.get(source_id)
                 except KeyError:
                     continue
-                self._require_source_eligible(source, project=project, version=version)
+                self._require_source_eligible(
+                    source,
+                    project=project,
+                    eligible_versions=eligible_versions,
+                )
                 material = self.material_reader.read_source(source)
                 if (
                     material.source_id != source.id
@@ -373,11 +476,11 @@ class RunQuery:
         source: SourceRecord,
         *,
         project: Project,
-        version: str,
+        eligible_versions: set[str],
     ) -> None:
         if (
             source.project_id != project.id
-            or source.applicable_baseline_version != version
+            or source.applicable_baseline_version not in eligible_versions
             or source.ingest_status != "completed"
             or not can_call_external_model(project, source)
         ):

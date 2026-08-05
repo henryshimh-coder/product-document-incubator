@@ -29,7 +29,10 @@ from tests.integration.release_env import (
 
 def _use_case(env, **overrides):
     from src.application.use_cases.publish_baseline import PublishBaseline
-    from src.infrastructure.db.repositories import SqliteReleaseUnitOfWork
+    from src.infrastructure.db.repositories import (
+        SqliteIssueRepository,
+        SqliteReleaseUnitOfWork,
+    )
     from src.infrastructure.files.manifest_integrity import ManifestIntegrityChecker
     from src.infrastructure.recovery.reconciliation_service import ReconciliationService
     from src.infrastructure.recovery.release_guard import ReleaseGuard
@@ -39,6 +42,8 @@ def _use_case(env, **overrides):
         "markdown_store": env.markdown_store,
         "changes": env.changes,
         "baselines": env.baselines,
+        "sources": env.sources,
+        "issues": SqliteIssueRepository(env.db_path),
         "integrity": ManifestIntegrityChecker(
             project_root=env.project_root,
             db_path=env.db_path,
@@ -78,6 +83,7 @@ def _command(**updates) -> PublishBaselineInput:
 def test_publish_success_replaces_manifest_and_mirrors_atomically(tmp_path) -> None:
     """Catches the happy path leaving either the old manifest or an inconsistent mirror."""
     env = _approved_env(tmp_path)
+    before_manifest = env.manifest_store.read_and_validate()
     use_case = _use_case(env)
 
     baseline = use_case.execute(_command())
@@ -88,6 +94,12 @@ def test_publish_success_replaces_manifest_and_mirrors_atomically(tmp_path) -> N
     assert baseline.version == TARGET_VERSION
     assert baseline.approved_by == REVIEWER
     manifest = env.manifest_store.read_and_validate()
+    assert baseline.full_document_sha256 == manifest.full_document_sha256
+    assert baseline.card_snapshot_sha256 == manifest.card_snapshot_sha256
+    parent = env.baselines.get(CURRENT_BASELINE_ID)
+    assert parent.status == BaselineStatus.SUPERSEDED
+    assert parent.full_document_sha256 == before_manifest.full_document_sha256
+    assert parent.card_snapshot_sha256 == before_manifest.card_snapshot_sha256
     assert manifest.current_version == TARGET_VERSION
     assert manifest.parent_baseline_id == CURRENT_BASELINE_ID
     assert manifest.change_request_id == "CHANGE-001"
@@ -101,20 +113,66 @@ def test_publish_success_replaces_manifest_and_mirrors_atomically(tmp_path) -> N
     assert release_record["change_request_id"] == "CHANGE-001"
     assert release_record["approved_by"] == REVIEWER
     assert release_record["release_note"] == RELEASE_NOTE
+    assert release_record["card_count"] == 2
     full_text = (version_dir / "full.md").read_text(encoding="utf-8")
     assert "收紧后的目标客群仅覆盖高净值存量客户。" in full_text
     assert "当前目标客群是符合准入要求的存量客户。" not in full_text
+    assert full_text.count(f"当前版本：{TARGET_VERSION}") == 1
+    assert f"当前版本：{CURRENT_VERSION}" not in full_text
     cards = {card["id"]: card for card in json.loads((version_dir / "cards.json").read_text())}
     assert cards["RULE-001"]["product_version"] == TARGET_VERSION
-    assert cards["API-CUSTOMER"]["product_version"] == CURRENT_VERSION
-    assert env.baselines.get(CURRENT_BASELINE_ID).status == BaselineStatus.SUPERSEDED
+    assert cards["RULE-001"]["content"] == "收紧后的目标客群仅覆盖高净值存量客户。"
+    assert cards["API-CUSTOMER"]["product_version"] == TARGET_VERSION
+    assert cards["API-CUSTOMER"]["content"] == "客群接口规则。"
     assert env.changes.get("CHANGE-001").status == ChangeStatus.PUBLISHED
     assert env.projects.get(PROJECT_ID).current_baseline_id == TARGET_BASELINE_ID
     with sqlite3.connect(env.db_path) as connection:
         events = connection.execute(
             "SELECT event_type, entity_id FROM event_logs WHERE event_type = 'baseline_published'"
         ).fetchall()
+        mirrored = connection.execute(
+            """
+            SELECT id, product_version, content FROM knowledge_cards
+            WHERE project_id = ? AND status = 'effective' ORDER BY id
+            """,
+            (PROJECT_ID,),
+        ).fetchall()
+        relations = connection.execute(
+            "SELECT source_id, relation_type, target_id FROM relations ORDER BY id"
+        ).fetchall()
     assert events == [("baseline_published", TARGET_BASELINE_ID)]
+    assert [(row[0], row[1], row[2]) for row in mirrored] == [
+        ("API-CUSTOMER", TARGET_VERSION, "客群接口规则。"),
+        ("RULE-001", TARGET_VERSION, "收紧后的目标客群仅覆盖高净值存量客户。"),
+    ]
+    assert relations == [
+        (TARGET_BASELINE_ID, "supersedes", CURRENT_BASELINE_ID),
+        ("CHANGE-001", "approved_as", TARGET_BASELINE_ID),
+    ]
+
+
+def test_publish_backfills_asset_hashes_for_pre_upgrade_parent_row(tmp_path) -> None:
+    """Catches a superseded pre-upgrade baseline staying unverifiable for history queries."""
+    env = _approved_env(tmp_path)
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE baselines
+            SET full_document_sha256 = NULL, card_snapshot_sha256 = NULL
+            WHERE id = ?
+            """,
+            (CURRENT_BASELINE_ID,),
+        )
+    before_manifest = env.manifest_store.read_and_validate()
+
+    baseline = _use_case(env).execute(_command())
+
+    parent = env.baselines.get(CURRENT_BASELINE_ID)
+    assert parent.status == BaselineStatus.SUPERSEDED
+    assert parent.full_document_sha256 == before_manifest.full_document_sha256
+    assert parent.card_snapshot_sha256 == before_manifest.card_snapshot_sha256
+    assert baseline.full_document_sha256 is not None
+    assert baseline.card_snapshot_sha256 is not None
 
 
 @pytest.mark.parametrize(
@@ -447,3 +505,162 @@ def test_publish_failure_keeps_change_approved_for_retry(tmp_path) -> None:
     change = env.changes.get("CHANGE-001")
     assert change.status == ChangeStatus.APPROVED
     assert change.review_idempotency_key == "REVIEW-KEY-001"
+
+
+def _assert_release_tree_and_state_unchanged(env, before) -> None:
+    assert env.changes.get("CHANGE-001").status == ChangeStatus.APPROVED
+    assert env.manifest_store.read_and_validate() == before
+    release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
+    assert [item.name for item in release_root.iterdir()] == [CURRENT_VERSION]
+
+
+def test_publish_rejects_sandbox_evidence_source(tmp_path) -> None:
+    """Catches sandbox material entering the formal baseline through issue evidence."""
+    env = _approved_env(tmp_path)
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute("UPDATE source_records SET is_sandbox = 1 WHERE id = 'SRC-RISK'")
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError, match="SANDBOX_SOURCE_NOT_ALLOWED"):
+        _use_case(env).execute(_command())
+
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_rejects_missing_card_source_and_keeps_old_release_tree(tmp_path) -> None:
+    """Catches a dangling card source reference entering the release staging area."""
+    env = _approved_env(tmp_path)
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute("DELETE FROM source_records WHERE id = 'SRC-BASE'")
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError, match="CITATION_INVALID") as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.detail == "PUBLISH_SOURCE_MISSING:SRC-BASE"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_rejects_unimported_card_source(tmp_path) -> None:
+    """Catches a still-processing source backing a formal baseline card."""
+    env = _approved_env(tmp_path)
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            "UPDATE source_records SET ingest_status = 'processing' WHERE id = 'SRC-BASE'"
+        )
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError, match="CITATION_INVALID") as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.detail == "PUBLISH_SOURCE_NOT_IMPORTED:SRC-BASE"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_rejects_cross_project_evidence_source(tmp_path) -> None:
+    """Catches another project's source backing a formal release."""
+    env = _approved_env(tmp_path)
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute("UPDATE source_records SET project_id = 'OTHER' WHERE id = 'SRC-RISK'")
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError, match="CITATION_INVALID") as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.detail == "PUBLISH_SOURCE_PROJECT_MISMATCH:SRC-RISK"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_rejects_non_formal_evidence_authority(tmp_path) -> None:
+    """Catches professional-opinion material backing a formal baseline."""
+    env = _approved_env(tmp_path)
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE source_records
+            SET authority_level = 'professional_opinion'
+            WHERE id = 'SRC-RISK'
+            """
+        )
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError, match="SOURCE_AUTHORITY_NOT_FORMAL"):
+        _use_case(env).execute(_command())
+
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def test_publish_rejects_ambiguous_issue_evidence_citation(tmp_path) -> None:
+    """Catches duplicate citation ids making evidence matching ambiguous."""
+    from src.infrastructure.db.repositories import SqliteIssueRepository
+
+    env = _approved_env(tmp_path)
+    issue = SqliteIssueRepository(env.db_path).get("ISSUE-001")
+    duplicated = [item.model_dump(mode="json") for item in issue.evidence]
+    duplicated.append(duplicated[0])
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            "UPDATE issue_cards SET evidence_json = ? WHERE id = 'ISSUE-001'",
+            (json.dumps(duplicated, ensure_ascii=False),),
+        )
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError, match="CITATION_INVALID") as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.detail == "PUBLISH_EVIDENCE_AMBIGUOUS:CIT-BASE-001"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+@pytest.mark.parametrize(
+    "refs",
+    [":CIT-BASE-001", "SRC-BASE:", "SRC-BASE:CIT:EXTRA"],
+    ids=["empty-source-id", "empty-citation", "extra-separator"],
+)
+def test_publish_rejects_invalid_card_source_refs(tmp_path, refs) -> None:
+    """Catches malformed source references slipping through publish validation."""
+    env = _approved_env(tmp_path)
+    _rewrite_rule_source_refs(env, [refs])
+    use_case = _use_case(env, integrity=Mock(validate=Mock(return_value=True)))
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError, match="CITATION_INVALID") as raised:
+        use_case.execute(_command())
+
+    assert raised.value.detail == "PUBLISH_SOURCE_REF_INVALID:RULE-001"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+@pytest.mark.parametrize("refs", [[], ["   "]], ids=["empty-refs", "whitespace-ref"])
+def test_publish_rejects_model_invalid_card_source_refs_at_snapshot_boundary(
+    tmp_path,
+    refs,
+) -> None:
+    """Catches blank source references surviving the snapshot model boundary."""
+    env = _approved_env(tmp_path)
+    _rewrite_rule_source_refs(env, refs)
+    use_case = _use_case(env, integrity=Mock(validate=Mock(return_value=True)))
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(ValidationError):
+        use_case.execute(_command())
+
+    _assert_release_tree_and_state_unchanged(env, before)
+
+
+def _rewrite_rule_source_refs(env, refs: list[str]) -> None:
+    cards_path = env.project_root / ("data/obsidian_vault/02_Current_Baseline/LLD-724_1/cards.json")
+    payload = json.loads(cards_path.read_text(encoding="utf-8"))
+    for card in payload:
+        if card["id"] == "RULE-001":
+            card["source_refs"] = refs
+    cards_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    env.manifest_store.atomic_replace(
+        env.manifest_store.read_and_validate().model_copy(
+            update={
+                "card_snapshot_sha256": env.markdown_store.sha256_for(
+                    "data/obsidian_vault/02_Current_Baseline/LLD-724_1/cards.json"
+                )
+            }
+        )
+    )

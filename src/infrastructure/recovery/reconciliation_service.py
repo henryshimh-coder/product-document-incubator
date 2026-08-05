@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from contextlib import suppress
 from pathlib import Path
 
-from src.domain.enums import BaselineStatus, ChangeStatus
-from src.domain.models import Baseline, BaselineManifest, RepairResult
+from src.domain.enums import BaselineStatus, ChangeStatus, KnowledgeStatus
+from src.domain.errors import DomainError
+from src.domain.models import Baseline, BaselineManifest, KnowledgeCard, RepairResult
 from src.infrastructure.db.connection import connect
+from src.infrastructure.files.baseline_card_reader import parse_card_snapshot
 from src.infrastructure.files.manifest_store import ManifestStore
 
 
@@ -34,6 +37,10 @@ class ReconciliationService:
             return RepairResult(
                 success=False, repaired_entities=[], error_code="MANIFEST_ASSETS_INVALID"
             )
+        if self._verified_manifest_cards(manifest) is None:
+            return RepairResult(
+                success=False, repaired_entities=[], error_code="MANIFEST_ASSETS_INVALID"
+            )
         if not self._mirror_matches(manifest, snapshot.sha256):
             return RepairResult(success=False, repaired_entities=[], error_code="MIRROR_MISMATCH")
         return RepairResult(success=True, repaired_entities=[], error_code=None)
@@ -47,6 +54,11 @@ class ReconciliationService:
         if not self._assets_match(manifest):
             return RepairResult(
                 success=False, repaired_entities=[], error_code="MANIFEST_ASSETS_INVALID"
+            )
+        snapshot_cards = self._verified_manifest_cards(manifest)
+        if snapshot_cards is None:
+            return RepairResult(
+                success=False, repaired_entities=[], error_code="CARD_SNAPSHOT_INVALID"
             )
         repaired: list[str] = []
         connection: sqlite3.Connection | None = None
@@ -68,6 +80,8 @@ class ReconciliationService:
                 full_document_path=manifest.full_document_path,
                 card_snapshot_path=manifest.card_snapshot_path,
                 manifest_sha256=snapshot.sha256,
+                full_document_sha256=manifest.full_document_sha256,
+                card_snapshot_sha256=manifest.card_snapshot_sha256,
                 change_request_id=manifest.change_request_id,
                 approved_by=manifest.approved_by,
                 effective_at=manifest.published_at,
@@ -78,8 +92,9 @@ class ReconciliationService:
                 INSERT INTO baselines (
                     id, project_id, version, parent_baseline_id, status,
                     full_document_path, card_snapshot_path, manifest_sha256,
+                    full_document_sha256, card_snapshot_sha256,
                     change_request_id, approved_by, effective_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     project_id = excluded.project_id,
                     version = excluded.version,
@@ -88,6 +103,8 @@ class ReconciliationService:
                     full_document_path = excluded.full_document_path,
                     card_snapshot_path = excluded.card_snapshot_path,
                     manifest_sha256 = excluded.manifest_sha256,
+                    full_document_sha256 = excluded.full_document_sha256,
+                    card_snapshot_sha256 = excluded.card_snapshot_sha256,
                     change_request_id = excluded.change_request_id,
                     approved_by = excluded.approved_by,
                     effective_at = excluded.effective_at
@@ -101,6 +118,8 @@ class ReconciliationService:
                     baseline.full_document_path,
                     baseline.card_snapshot_path,
                     baseline.manifest_sha256,
+                    baseline.full_document_sha256,
+                    baseline.card_snapshot_sha256,
                     baseline.change_request_id,
                     baseline.approved_by,
                     manifest.published_at.isoformat(),
@@ -145,6 +164,52 @@ class ReconciliationService:
                     repaired.append("change_requests")
                 elif change_row["status"] != ChangeStatus.PUBLISHED.value:
                     return self._fail(connection, "CHANGE_NOT_PUBLISHABLE")
+            snapshot_cards_effective = [
+                card for card in snapshot_cards if card.status == KnowledgeStatus.EFFECTIVE
+            ]
+            connection.execute(
+                "DELETE FROM knowledge_cards WHERE project_id = ? AND status = ?",
+                (manifest.project_id, KnowledgeStatus.EFFECTIVE.value),
+            )
+            for card in snapshot_cards_effective:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_cards (
+                        id, project_id, card_type, title, content, status, product_version,
+                        applicable_scope, source_refs_json, authority_level, owner, confidence,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        card_type = excluded.card_type,
+                        title = excluded.title,
+                        content = excluded.content,
+                        status = excluded.status,
+                        product_version = excluded.product_version,
+                        applicable_scope = excluded.applicable_scope,
+                        source_refs_json = excluded.source_refs_json,
+                        authority_level = excluded.authority_level,
+                        owner = excluded.owner,
+                        confidence = excluded.confidence,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        card.id,
+                        card.project_id,
+                        card.card_type,
+                        card.title,
+                        card.content,
+                        card.status.value,
+                        card.product_version,
+                        card.applicable_scope,
+                        json.dumps(card.source_refs, ensure_ascii=False, sort_keys=True),
+                        card.authority_level.value,
+                        card.owner,
+                        card.confidence,
+                        card.created_at.isoformat(),
+                        card.updated_at.isoformat(),
+                    ),
+                )
+            repaired.append("knowledge_cards")
             connection.commit()
         except sqlite3.Error:
             if connection is not None:
@@ -165,19 +230,35 @@ class ReconciliationService:
         return RepairResult(success=False, repaired_entities=[], error_code=error_code)
 
     def _assets_match(self, manifest: BaselineManifest) -> bool:
-        for relative_path, expected in (
-            (manifest.full_document_path, manifest.full_document_sha256),
-            (manifest.card_snapshot_path, manifest.card_snapshot_sha256),
-        ):
-            asset_path = (self.project_root / relative_path).resolve()
-            try:
-                if not asset_path.is_relative_to(self.project_root):
-                    return False
-                if hashlib.sha256(asset_path.read_bytes()).hexdigest() != expected:
-                    return False
-            except OSError:
+        asset_path = (self.project_root / manifest.full_document_path).resolve()
+        try:
+            if not asset_path.is_relative_to(self.project_root):
                 return False
-        return True
+            return (
+                hashlib.sha256(asset_path.read_bytes()).hexdigest() == manifest.full_document_sha256
+            )
+        except OSError:
+            return False
+
+    def _verified_manifest_cards(self, manifest: BaselineManifest) -> list[KnowledgeCard] | None:
+        """Read the snapshot bytes once and drive hash plus structure from them."""
+        asset_path = (self.project_root / manifest.card_snapshot_path).resolve()
+        try:
+            if not asset_path.is_relative_to(self.project_root):
+                return None
+            raw_bytes = asset_path.read_bytes()
+        except OSError:
+            return None
+        if hashlib.sha256(raw_bytes).hexdigest() != manifest.card_snapshot_sha256:
+            return None
+        try:
+            return parse_card_snapshot(
+                raw_bytes,
+                project_id=manifest.project_id,
+                version=manifest.current_version,
+            )
+        except DomainError:
+            return None
 
     def _mirror_matches(self, manifest: BaselineManifest, manifest_sha256: str) -> bool:
         try:
@@ -205,6 +286,8 @@ class ReconciliationService:
                     and baseline_row["full_document_path"] == manifest.full_document_path
                     and baseline_row["card_snapshot_path"] == manifest.card_snapshot_path
                     and baseline_row["manifest_sha256"] == manifest_sha256
+                    and baseline_row["full_document_sha256"] == manifest.full_document_sha256
+                    and baseline_row["card_snapshot_sha256"] == manifest.card_snapshot_sha256
                     and baseline_row["change_request_id"] == manifest.change_request_id
                     and baseline_row["approved_by"] == manifest.approved_by
                     and baseline_row["effective_at"] == manifest.published_at.isoformat()
@@ -217,6 +300,34 @@ class ReconciliationService:
                     ).fetchone()
                     if change_row is None or change_row["status"] != ChangeStatus.PUBLISHED.value:
                         return False
+                snapshot_cards = self._verified_manifest_cards(manifest)
+                if snapshot_cards is None:
+                    return False
+                mirrored_rows = connection.execute(
+                    """
+                    SELECT id, product_version, status, content
+                    FROM knowledge_cards
+                    WHERE project_id = ? AND status = ?
+                    ORDER BY id
+                    """,
+                    (manifest.project_id, KnowledgeStatus.EFFECTIVE.value),
+                ).fetchall()
+                mirrored_fingerprints = sorted(
+                    (
+                        str(row["id"]),
+                        str(row["product_version"]),
+                        str(row["status"]),
+                        str(row["content"]),
+                    )
+                    for row in mirrored_rows
+                )
+                snapshot_fingerprints = sorted(
+                    (card.id, card.product_version, card.status.value, card.content)
+                    for card in snapshot_cards
+                    if card.status == KnowledgeStatus.EFFECTIVE
+                )
+                if mirrored_fingerprints != snapshot_fingerprints:
+                    return False
         except sqlite3.Error:
             return False
         return True

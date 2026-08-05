@@ -233,6 +233,7 @@ def test_build_container_runs_real_query_vertical_slice_with_manifest_and_truste
     monkeypatch,
 ):
     """Catches a page-only query implementation or a composition root bypassing safety proof."""
+    import hashlib
     import json
     import sqlite3
     from datetime import UTC, date, datetime
@@ -304,25 +305,51 @@ app:
             created_at=now,
         )
     )
-    SqliteKnowledgeRepository(db_path).upsert_cards(
-        [
-            KnowledgeCard(
-                id="RULE-LLD-001",
-                project_id="LLD",
-                card_type="rule",
-                title="目标客群",
-                content="当前目标客群是符合准入要求的存量客户。",
-                status=KnowledgeStatus.EFFECTIVE,
-                product_version="LLD-724_1",
-                applicable_scope="当前产品方案 > 目标客群",
-                source_refs=["SRC-001"],
-                authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
-                owner="产品经理",
-                created_at=now,
-                updated_at=now,
-            )
-        ]
+    # The version snapshot is authoritative for queries: replace the demo card in
+    # cards.json, re-sign the manifest, and mirror the new hashes into SQLite.
+    test_card = KnowledgeCard(
+        id="RULE-LLD-001",
+        project_id="LLD",
+        card_type="rule",
+        title="目标客群",
+        content="当前目标客群是符合准入要求的存量客户。",
+        status=KnowledgeStatus.EFFECTIVE,
+        product_version="LLD-724_1",
+        applicable_scope="当前产品方案 > 目标客群",
+        source_refs=["SRC-001"],
+        authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+        owner="产品经理",
+        created_at=now,
+        updated_at=now,
     )
+    SqliteKnowledgeRepository(db_path).upsert_cards([test_card])
+    cards_path = tmp_path / "data/obsidian_vault/02_Current_Baseline/LLD-724_1/cards.json"
+    cards_path.write_text(
+        json.dumps([test_card.model_dump(mode="json")], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    cards_sha256 = hashlib.sha256(cards_path.read_bytes()).hexdigest()
+    from src.infrastructure.files.manifest_store import ManifestStore
+
+    manifest_store = ManifestStore(
+        tmp_path / "data/local_state/current_baseline.json",
+        project_root=tmp_path,
+    )
+    manifest_store.atomic_replace(
+        manifest_store.read_and_validate().model_copy(update={"card_snapshot_sha256": cards_sha256})
+    )
+    manifest_sha256 = hashlib.sha256(
+        (tmp_path / "data/local_state/current_baseline.json").read_bytes()
+    ).hexdigest()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            UPDATE baselines
+            SET card_snapshot_sha256 = ?, manifest_sha256 = ?
+            WHERE id = 'BASE-LLD-724_1'
+            """,
+            (cards_sha256, manifest_sha256),
+        )
 
     def http_factory():
         def handler(request):

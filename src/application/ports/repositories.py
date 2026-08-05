@@ -137,6 +137,10 @@ class ReleaseUnitOfWork(Protocol):
         change_updated_at: datetime,
         project_id: str,
         event: EventLog,
+        new_cards: list[KnowledgeCard],
+        relations: list[Relation],
+        parent_full_document_sha256: str,
+        parent_card_snapshot_sha256: str,
     ) -> bool: ...
 
 

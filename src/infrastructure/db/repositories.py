@@ -247,8 +247,9 @@ class SqliteBaselineRepository:
                 INSERT INTO baselines (
                     id, project_id, version, parent_baseline_id, status,
                     full_document_path, card_snapshot_path, manifest_sha256,
+                    full_document_sha256, card_snapshot_sha256,
                     change_request_id, approved_by, effective_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     baseline.id,
@@ -259,6 +260,8 @@ class SqliteBaselineRepository:
                     baseline.full_document_path,
                     baseline.card_snapshot_path,
                     baseline.manifest_sha256,
+                    baseline.full_document_sha256,
+                    baseline.card_snapshot_sha256,
                     baseline.change_request_id,
                     baseline.approved_by,
                     _iso_or_none(baseline.effective_at),
@@ -1256,7 +1259,19 @@ class SqliteReleaseUnitOfWork:
         change_updated_at: datetime,
         project_id: str,
         event: EventLog,
+        new_cards: list[KnowledgeCard],
+        relations: list[Relation],
+        parent_full_document_sha256: str,
+        parent_card_snapshot_sha256: str,
     ) -> bool:
+        self._validate_mirror_payload(
+            project_id=project_id,
+            new_baseline=new_baseline,
+            change_id=change_id,
+            superseded_baseline_id=superseded_baseline_id,
+            new_cards=new_cards,
+            relations=relations,
+        )
         prepared = self.event_logger.prepare(event)
         connection: sqlite3.Connection | None = None
         try:
@@ -1267,6 +1282,21 @@ class SqliteReleaseUnitOfWork:
             ).fetchone()
             if change_row is None or change_row["status"] != ChangeStatus.APPROVED.value:
                 raise DomainError(ErrorCode.CHANGE_NOT_APPROVED, "MIRROR_PRECONDITION_FAILED")
+            backfilled = connection.execute(
+                """
+                UPDATE baselines
+                SET full_document_sha256 = ?, card_snapshot_sha256 = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (
+                    parent_full_document_sha256,
+                    parent_card_snapshot_sha256,
+                    superseded_baseline_id,
+                    project_id,
+                ),
+            )
+            if backfilled.rowcount != 1:
+                raise DomainError(ErrorCode.RELEASE_FAILED, "PARENT_BASELINE_NOT_FOUND")
             superseded = connection.execute(
                 "UPDATE baselines SET status = ? WHERE id = ? AND status = ?",
                 (
@@ -1282,8 +1312,9 @@ class SqliteReleaseUnitOfWork:
                 INSERT INTO baselines (
                     id, project_id, version, parent_baseline_id, status,
                     full_document_path, card_snapshot_path, manifest_sha256,
+                    full_document_sha256, card_snapshot_sha256,
                     change_request_id, approved_by, effective_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     new_baseline.id,
@@ -1294,6 +1325,8 @@ class SqliteReleaseUnitOfWork:
                     new_baseline.full_document_path,
                     new_baseline.card_snapshot_path,
                     new_baseline.manifest_sha256,
+                    new_baseline.full_document_sha256,
+                    new_baseline.card_snapshot_sha256,
                     new_baseline.change_request_id,
                     new_baseline.approved_by,
                     _iso_or_none(new_baseline.effective_at),
@@ -1317,6 +1350,88 @@ class SqliteReleaseUnitOfWork:
             )
             if updated_project.rowcount != 1:
                 raise DomainError(ErrorCode.RELEASE_PROJECT_MISMATCH, "PROJECT_NOT_FOUND")
+            connection.execute(
+                "DELETE FROM knowledge_cards WHERE project_id = ? AND status = ?",
+                (project_id, KnowledgeStatus.EFFECTIVE.value),
+            )
+            for card in new_cards:
+                connection.execute(
+                    """
+                    INSERT INTO knowledge_cards (
+                        id, project_id, card_type, title, content, status, product_version,
+                        applicable_scope, source_refs_json, authority_level, owner, confidence,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        card_type = excluded.card_type,
+                        title = excluded.title,
+                        content = excluded.content,
+                        status = excluded.status,
+                        product_version = excluded.product_version,
+                        applicable_scope = excluded.applicable_scope,
+                        source_refs_json = excluded.source_refs_json,
+                        authority_level = excluded.authority_level,
+                        owner = excluded.owner,
+                        confidence = excluded.confidence,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        card.id,
+                        card.project_id,
+                        card.card_type,
+                        card.title,
+                        card.content,
+                        card.status.value,
+                        card.product_version,
+                        card.applicable_scope,
+                        _json_dumps(card.source_refs),
+                        card.authority_level.value,
+                        card.owner,
+                        card.confidence,
+                        card.created_at.isoformat(),
+                        card.updated_at.isoformat(),
+                    ),
+                )
+            for relation in relations:
+                existing = connection.execute(
+                    """
+                    SELECT project_id, source_id, relation_type, target_id, source_ref
+                    FROM relations
+                    WHERE id = ?
+                    """,
+                    (relation.id,),
+                ).fetchone()
+                if existing is not None:
+                    identical = (
+                        existing["project_id"] == relation.project_id
+                        and existing["source_id"] == relation.source_id
+                        and existing["relation_type"] == relation.relation_type
+                        and existing["target_id"] == relation.target_id
+                        and existing["source_ref"] == relation.source_ref
+                    )
+                    if not identical:
+                        raise DomainError(
+                            ErrorCode.RELEASE_FAILED,
+                            f"RELEASE_MIRROR_RELATION_CONFLICT:{relation.id}",
+                        )
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO relations (
+                        id, project_id, source_id, relation_type, target_id,
+                        source_ref, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        relation.id,
+                        relation.project_id,
+                        relation.source_id,
+                        relation.relation_type,
+                        relation.target_id,
+                        relation.source_ref,
+                        relation.created_at.isoformat(),
+                    ),
+                )
             self.event_logger.insert_prepared(connection, prepared)
             connection.commit()
         except sqlite3.Error as error:
@@ -1338,3 +1453,29 @@ class SqliteReleaseUnitOfWork:
         except AuditDurabilityUncertainError:
             return True
         return False
+
+    @staticmethod
+    def _validate_mirror_payload(
+        *,
+        project_id: str,
+        new_baseline: Baseline,
+        change_id: str,
+        superseded_baseline_id: str,
+        new_cards: list[KnowledgeCard],
+        relations: list[Relation],
+    ) -> None:
+        """Fail closed before SQL when the mirrored payload leaves the publish context."""
+        for card in new_cards:
+            if card.project_id != project_id or card.product_version != new_baseline.version:
+                raise DomainError(
+                    ErrorCode.RELEASE_FAILED,
+                    f"RELEASE_MIRROR_CARD_MISMATCH:{card.id}",
+                )
+        allowed_endpoints = {change_id, new_baseline.id, superseded_baseline_id}
+        for relation in relations:
+            endpoints = {relation.source_id, relation.target_id}
+            if relation.project_id != project_id or not endpoints <= allowed_endpoints:
+                raise DomainError(
+                    ErrorCode.RELEASE_FAILED,
+                    f"RELEASE_MIRROR_RELATION_MISMATCH:{relation.id}",
+                )

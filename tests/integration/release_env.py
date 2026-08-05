@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from src.domain.enums import (
     IssueSeverity,
     IssueStatus,
     KnowledgeStatus,
+    SecurityLevel,
 )
 from src.domain.models import (
     Baseline,
@@ -26,6 +28,7 @@ from src.domain.models import (
     IssueEvidence,
     KnowledgeCard,
     Project,
+    SourceRecord,
 )
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
@@ -35,6 +38,7 @@ from src.infrastructure.db.repositories import (
     SqliteIssueRepository,
     SqliteKnowledgeRepository,
     SqliteProjectRepository,
+    SqliteSourceRepository,
 )
 from src.infrastructure.files.manifest_store import ManifestStore
 from src.infrastructure.files.markdown_store import MarkdownStore
@@ -63,6 +67,24 @@ CHANGE_ID = "CHANGE-001"
 ISSUE_ID = "ISSUE-001"
 DECISION_ID = "DECISION-001"
 
+_SOURCE_DOCUMENTS: dict[str, tuple[str, AuthorityLevel, str, str]] = {
+    "SRC-BASE": (
+        "当前产品方案.md",
+        AuthorityLevel.FORMAL_EFFECTIVE,
+        "正式基线材料",
+        "# 当前产品方案\n\n## 目标客群\n\n"
+        + BEFORE_CONTENT
+        + "\n\n## 接口约束\n\n客群接口规则。\n\n## 附录\n\n"
+        + "已脱敏的演示补充材料。\n" * 500,
+    ),
+    "SRC-RISK": (
+        "风险意见.md",
+        AuthorityLevel.FORMAL_DECISION,
+        "风险意见",
+        "# 风险意见\n\n## 客群限制\n\n风险意见要求收紧客群。\n",
+    ),
+}
+
 _REVIEWED_FIELDS = {
     ChangeStatus.APPROVED: ChangeReviewAction.APPROVE,
     ChangeStatus.PUBLISHED: ChangeReviewAction.APPROVE,
@@ -82,6 +104,7 @@ class ReleaseEnvironment:
     projects: SqliteProjectRepository
     baselines: SqliteBaselineRepository
     changes: SqliteChangeRepository
+    sources: SqliteSourceRepository
     event_logger: EventLogger
 
 
@@ -142,7 +165,7 @@ def build_release_environment(
             status=KnowledgeStatus.EFFECTIVE,
             product_version=CURRENT_VERSION,
             applicable_scope="演示",
-            source_refs=["SRC-BASE:CIT-BASE-001"],
+            source_refs=["SRC-BASE"],
             authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
             owner="产品",
             created_at=NOW,
@@ -157,7 +180,7 @@ def build_release_environment(
             status=KnowledgeStatus.EFFECTIVE,
             product_version=CURRENT_VERSION,
             applicable_scope="演示",
-            source_refs=["SRC-BASE:CIT-BASE-001"],
+            source_refs=["SRC-BASE"],
             authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
             owner="产品",
             created_at=NOW,
@@ -165,6 +188,8 @@ def build_release_environment(
         ),
     ]
     full_path, cards_path = markdown_store.write_baseline(CURRENT_VERSION, FULL_DOCUMENT, cards)
+    full_sha256 = markdown_store.sha256_for(full_path)
+    cards_sha256 = markdown_store.sha256_for(cards_path)
     manifest_path = project_root / "data/local_state/current_baseline.json"
     manifest_store = ManifestStore(manifest_path, project_root=project_root)
     manifest_store.atomic_replace(
@@ -176,8 +201,8 @@ def build_release_environment(
             parent_baseline_id=None,
             full_document_path=full_path,
             card_snapshot_path=cards_path,
-            full_document_sha256=markdown_store.sha256_for(full_path),
-            card_snapshot_sha256=markdown_store.sha256_for(cards_path),
+            full_document_sha256=full_sha256,
+            card_snapshot_sha256=cards_sha256,
             change_request_id=None,
             approved_by=REVIEWER,
             published_at=NOW,
@@ -208,6 +233,8 @@ def build_release_environment(
             full_document_path=full_path,
             card_snapshot_path=cards_path,
             manifest_sha256=snapshot.sha256,
+            full_document_sha256=full_sha256,
+            card_snapshot_sha256=cards_sha256,
             change_request_id=None,
             approved_by=REVIEWER,
             effective_at=NOW,
@@ -215,6 +242,38 @@ def build_release_environment(
         )
     )
     SqliteKnowledgeRepository(db_path).upsert_cards(cards)
+    sources = SqliteSourceRepository(db_path)
+    for source_id, (filename, authority, source_type, content) in _SOURCE_DOCUMENTS.items():
+        archive_path, digest, size_bytes = _write_source_archive(
+            project_root,
+            source_id,
+            filename,
+            content,
+        )
+        sources.add(
+            SourceRecord(
+                id=source_id,
+                project_id=PROJECT_ID,
+                original_filename=filename,
+                archive_path=archive_path,
+                sha256=digest,
+                mime_type="text/plain",
+                size_bytes=size_bytes,
+                source_type=source_type,
+                authority_level=authority,
+                source_department="产品部",
+                provider=None,
+                document_date=NOW.date(),
+                document_version="v1.0",
+                applicable_baseline_version=CURRENT_VERSION,
+                security_level=SecurityLevel.L2_INTERNAL,
+                is_redacted=True,
+                allow_external_model=True,
+                is_sandbox=False,
+                ingest_status="completed",
+                created_at=NOW,
+            )
+        )
     SqliteIssueRepository(db_path).add_many(
         [
             IssueCard(
@@ -283,5 +342,20 @@ def build_release_environment(
         projects=projects,
         baselines=baselines,
         changes=changes,
+        sources=sources,
         event_logger=event_logger,
     )
+
+
+def _write_source_archive(
+    project_root: Path,
+    source_id: str,
+    filename: str,
+    content: str,
+) -> tuple[str, str, int]:
+    archive_dir = project_root / "data/source_archive" / PROJECT_ID / source_id
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    payload = content.encode("utf-8")
+    archive_path = archive_dir / filename
+    archive_path.write_bytes(payload)
+    return str(archive_path), hashlib.sha256(payload).hexdigest(), len(payload)

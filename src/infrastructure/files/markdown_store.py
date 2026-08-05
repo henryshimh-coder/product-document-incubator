@@ -76,17 +76,30 @@ class MarkdownStore:
         current_full_document_path: str,
         change: ChangeRequest,
         temp_dir: Path,
+        *,
+        parent_version: str,
     ) -> None:
-        """Write the staged full.md replacing exactly one authoritative passage."""
+        """Write the staged full.md replacing the version declaration and one passage."""
         self._require_staging_dir(temp_dir)
         current_text = (self.project_root / current_full_document_path).read_text(encoding="utf-8")
+        parent_declaration = f"当前版本：{parent_version}"
+        target_declaration = f"当前版本：{change.target_version}"
+        declaration_occurrences = current_text.count(parent_declaration)
+        if declaration_occurrences != 1:
+            raise DomainError(
+                ErrorCode.RELEASE_FAILED,
+                f"FULL_DOCUMENT_VERSION_DECLARATION_NOT_UNIQUE:{declaration_occurrences}",
+            )
         occurrences = current_text.count(change.before_content)
         if occurrences != 1:
             raise DomainError(
                 ErrorCode.RELEASE_FAILED,
                 f"FULL_DOCUMENT_TARGET_NOT_UNIQUE:{occurrences}",
             )
-        new_text = current_text.replace(change.before_content, change.after_content, 1)
+        new_text = current_text.replace(parent_declaration, target_declaration, 1)
+        new_text = new_text.replace(change.before_content, change.after_content, 1)
+        if new_text.count(parent_declaration) != 0 or new_text.count(target_declaration) != 1:
+            raise DomainError(ErrorCode.RELEASE_FAILED, "FULL_DOCUMENT_VERSION_DECLARATION_INVALID")
         (temp_dir / "full.md").write_text(new_text, encoding="utf-8")
 
     def build_release_cards(
@@ -95,11 +108,21 @@ class MarkdownStore:
         change: ChangeRequest,
         temp_dir: Path,
         *,
+        parent_version: str,
         updated_at: datetime,
-    ) -> None:
-        """Write the staged cards.json updating exactly the target card."""
+    ) -> list[KnowledgeCard]:
+        """Write the staged cards.json as a complete snapshot of the target version."""
         self._require_staging_dir(temp_dir)
         cards = self.read_cards(current_card_snapshot_path)
+        card_ids = [card.id for card in cards]
+        if len(set(card_ids)) != len(card_ids):
+            raise DomainError(ErrorCode.RELEASE_FAILED, "PARENT_SNAPSHOT_DUPLICATE_CARD_ID")
+        mixed = [card.id for card in cards if card.product_version != parent_version]
+        if mixed:
+            raise DomainError(
+                ErrorCode.RELEASE_FAILED,
+                f"PARENT_SNAPSHOT_VERSION_MIXED:{','.join(sorted(mixed))}",
+            )
         matches = [card for card in cards if card.id == change.target_card_id]
         if len(matches) != 1:
             raise DomainError(
@@ -109,14 +132,20 @@ class MarkdownStore:
         target = matches[0]
         if target.content != change.before_content:
             raise DomainError(ErrorCode.RELEASE_FAILED, "BEFORE_CONTENT_MISMATCH")
-        updated = target.model_copy(
-            update={
-                "content": change.after_content,
-                "product_version": change.target_version,
-                "updated_at": updated_at,
-            }
-        )
-        new_cards = [updated if card.id == target.id else card for card in cards]
+        new_cards = [
+            (
+                card.model_copy(
+                    update={
+                        "content": change.after_content,
+                        "product_version": change.target_version,
+                        "updated_at": updated_at,
+                    }
+                )
+                if card.id == target.id
+                else card.model_copy(update={"product_version": change.target_version})
+            )
+            for card in cards
+        ]
         (temp_dir / "cards.json").write_text(
             json.dumps(
                 [card.model_dump(mode="json") for card in new_cards],
@@ -127,6 +156,7 @@ class MarkdownStore:
             + "\n",
             encoding="utf-8",
         )
+        return new_cards
 
     def write_release_metadata(
         self,
@@ -162,6 +192,7 @@ class MarkdownStore:
             ]
         )
         (temp_dir / "diff.md").write_text(diff_document, encoding="utf-8")
+        staged_cards = json.loads((temp_dir / "cards.json").read_text(encoding="utf-8"))
         release_record = {
             "schema_version": "1.0",
             "parent_version": parent_version,
@@ -170,6 +201,7 @@ class MarkdownStore:
             "approved_by": approved_by,
             "published_at": published_at.isoformat(),
             "release_note": release_note,
+            "card_count": len(staged_cards),
             "file_sha256": {
                 name: hashlib.sha256((temp_dir / name).read_bytes()).hexdigest()
                 for name in ("full.md", "cards.json", "diff.md")

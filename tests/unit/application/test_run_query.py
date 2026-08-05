@@ -120,12 +120,33 @@ def _historical_baseline(**updates) -> Baseline:
         full_document_path="data/baselines/LLD-700_1/full.md",
         card_snapshot_path="data/baselines/LLD-700_1/cards.json",
         manifest_sha256="e" * 64,
+        full_document_sha256="1" * 64,
+        card_snapshot_sha256="2" * 64,
         change_request_id=None,
         approved_by="产品经理",
         effective_at=NOW,
         created_at=NOW,
     )
     return baseline.model_copy(update=updates)
+
+
+def _stored_baseline(project_id: str, version: str, *, status: str) -> Baseline:
+    return Baseline(
+        id=f"BASE-{version}",
+        project_id=project_id,
+        version=version,
+        parent_baseline_id=None,
+        status=status,
+        full_document_path=f"data/baselines/{version}/full.md",
+        card_snapshot_path=f"data/baselines/{version}/cards.json",
+        manifest_sha256="e" * 64,
+        full_document_sha256="1" * 64,
+        card_snapshot_sha256="2" * 64,
+        change_request_id=None,
+        approved_by="产品经理",
+        effective_at=NOW,
+        created_at=NOW,
+    )
 
 
 class FakeManifest:
@@ -159,6 +180,31 @@ class FakeKnowledge:
         ]
 
 
+class FakeBaselineCards:
+    """Strict in-memory BaselineCardReader keyed by project, version, path and hash."""
+
+    def __init__(self, events: list[str], cards: list[KnowledgeCard]) -> None:
+        self.events = events
+        self.cards = list(cards)
+        self.calls: list[tuple[str, str, str, str]] = []
+
+    def read_version_cards(
+        self,
+        *,
+        project_id: str,
+        version: str,
+        relative_path: str,
+        expected_sha256: str,
+    ) -> list[KnowledgeCard]:
+        self.events.append("baseline_cards")
+        self.calls.append((project_id, version, relative_path, expected_sha256))
+        return [
+            card
+            for card in self.cards
+            if card.project_id == project_id and card.product_version == version
+        ]
+
+
 class FakeSources:
     def __init__(self, sources: list[SourceRecord] | None = None) -> None:
         selected = [_source()] if sources is None else sources
@@ -185,26 +231,15 @@ class FakeBaselines:
 
     def get_by_version(self, project_id: str, version: str) -> Baseline:
         self.requested.append((project_id, version))
-        return self.baseline or Baseline(
-            id="BASE-LLD-700_1",
-            project_id=project_id,
-            version=version,
-            parent_baseline_id=None,
-            status="superseded",
-            full_document_path="data/baselines/LLD-700_1/full.md",
-            card_snapshot_path="data/baselines/LLD-700_1/cards.json",
-            manifest_sha256="e" * 64,
-            change_request_id=None,
-            approved_by="产品经理",
-            effective_at=NOW,
-            created_at=NOW,
-        )
+        return self.baseline or _stored_baseline(project_id, version, status="superseded")
 
     def list_for_project(self, project_id: str) -> list[Baseline]:
-        return [
-            self.get_by_version(project_id, "LLD-700_1"),
-            self.get_by_version(project_id, "LLD-724_1").model_copy(update={"status": "effective"}),
-        ]
+        historical = self.baseline or _stored_baseline(
+            project_id,
+            "LLD-700_1",
+            status="superseded",
+        )
+        return [historical, _stored_baseline(project_id, "LLD-724_1", status="effective")]
 
 
 class FakeMaterialReader:
@@ -313,6 +348,7 @@ def _use_case(
     manifest: FakeManifest | None = None,
     material_reader: FakeMaterialReader | None = None,
     baselines: FakeBaselines | None = None,
+    baseline_cards: FakeBaselineCards | None = None,
 ):
     event_log = events if events is not None else []
     selected_gateway = gateway or ProofCheckingGateway()
@@ -324,6 +360,7 @@ def _use_case(
         projects=FakeProjects(),
         knowledge=FakeKnowledge(event_log, cards),
         sources=sources or FakeSources(),
+        baseline_cards=baseline_cards or FakeBaselineCards(event_log, cards),
         material_reader=reader,
         gateway=selected_gateway,
         customer_names=(),
@@ -364,6 +401,7 @@ def test_query_rejects_external_call_when_project_has_not_authorized_it() -> Non
         projects=FakeProjects(_project(allow_external_model=False)),
         knowledge=FakeKnowledge([], [_card("RULE-LLD-001")]),
         sources=FakeSources(),
+        baseline_cards=FakeBaselineCards([], [_card("RULE-LLD-001")]),
         material_reader=FakeMaterialReader(),
         gateway=gateway,
         customer_names=(),
@@ -442,7 +480,7 @@ def test_effective_query_reads_manifest_first_and_never_sends_candidate_cards() 
         )
     )
 
-    assert events[:2] == ["manifest", "knowledge"]
+    assert events[:2] == ["manifest", "baseline_cards"]
     assert {item["id"] for item in gateway.last_inputs["effective_cards"]} == {"RULE-LLD-001"}
     assert set(response.effective_rules) == {"RULE-LLD-001"}
     assert "RULE-CANDIDATE-001" not in gateway.last_inputs["effective_cards"]
@@ -1132,3 +1170,155 @@ def test_query_caps_effective_cards_notices_and_citations_at_schema_limits() -> 
     assert len(gateway.last_inputs["effective_cards"]) == 20
     assert len(gateway.last_inputs["notices"]) == 20
     assert len(gateway.last_inputs["citations"]) == 50
+
+
+def _chain_row(
+    row_id: str,
+    version: str,
+    parent_id: str | None,
+    *,
+    project_id: str = "LLD",
+) -> Baseline:
+    return Baseline(
+        id=row_id,
+        project_id=project_id,
+        version=version,
+        parent_baseline_id=parent_id,
+        status=BaselineStatus.EFFECTIVE,
+        full_document_path=f"data/baselines/{version}/full.md",
+        card_snapshot_path=f"data/baselines/{version}/cards.json",
+        manifest_sha256="e" * 64,
+        full_document_sha256="1" * 64,
+        card_snapshot_sha256="2" * 64,
+        change_request_id=None,
+        approved_by="产品经理",
+        effective_at=NOW,
+        created_at=NOW,
+    )
+
+
+class ChainBaselines(FakeBaselines):
+    def __init__(self, rows: list[Baseline]) -> None:
+        super().__init__()
+        self.rows = rows
+
+    def list_for_project(self, project_id: str) -> list[Baseline]:
+        return list(self.rows)
+
+
+def _chain_use_case(rows: list[Baseline]):
+    return _use_case(
+        [_card("RULE-LLD-001")],
+        baselines=ChainBaselines(rows),
+        gateway=ProofCheckingGateway(),
+    )
+
+
+def test_query_inherits_sources_along_the_same_project_parent_chain() -> None:
+    """Catches a parent-imported source being rejected after a version bump."""
+    rows = [
+        _chain_row("BASE-LLD-724_2", "LLD-724_2", "BASE-LLD-724_1"),
+        _chain_row("BASE-LLD-724_1", "LLD-724_1", None),
+    ]
+    card = _card("RULE-LLD-002", version="LLD-724_2", content="收紧后的目标客群。")
+    manifest = FakeManifest([], _manifest("LLD-724_2"))
+    source = _source().model_copy(update={"applicable_baseline_version": "LLD-724_1"})
+    use_case, gateway, _, _ = _use_case(
+        [card],
+        baselines=ChainBaselines(rows),
+        manifest=manifest,
+        sources=FakeSources([source]),
+    )
+
+    response = use_case.execute(
+        RunQueryInput(
+            project_id="LLD",
+            question="收紧后的目标客群是什么？",
+            scope="effective",
+            historical_version=None,
+        )
+    )
+
+    assert response.baseline_version == "LLD-724_2"
+    assert gateway.last_inputs is not None
+
+
+def test_query_fails_closed_on_cyclic_baseline_parent_chain() -> None:
+    """Catches a parent-chain loop silently trusting a partial ancestry."""
+    rows = [
+        _chain_row("BASE-A", "LLD-724_1", "BASE-B"),
+        _chain_row("BASE-B", "LLD-700_1", "BASE-A"),
+    ]
+    use_case, gateway, _, _ = _chain_use_case(rows)
+
+    with pytest.raises(DomainError, match="BASELINE_PARENT_CHAIN_CYCLE"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前目标客群是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is None
+
+
+def test_query_fails_closed_on_missing_parent_baseline_row() -> None:
+    """Catches a broken chain being accepted as a complete ancestry."""
+    rows = [_chain_row("BASE-A", "LLD-724_1", "BASE-MISSING")]
+    use_case, gateway, _, _ = _chain_use_case(rows)
+
+    with pytest.raises(DomainError, match="BASELINE_PARENT_CHAIN_BROKEN"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前目标客群是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is None
+
+
+def test_query_fails_closed_on_duplicate_baseline_versions() -> None:
+    """Catches two rows claiming the same version making ancestry ambiguous."""
+    rows = [
+        _chain_row("BASE-A", "LLD-724_1", None),
+        _chain_row("BASE-B", "LLD-724_1", None),
+    ]
+    use_case, gateway, _, _ = _chain_use_case(rows)
+
+    with pytest.raises(DomainError, match="BASELINE_DUPLICATE_VERSION"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前目标客群是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is None
+
+
+def test_query_fails_closed_when_parent_chain_crosses_projects() -> None:
+    """Catches inheriting sources through another project's baseline row."""
+    rows = [
+        _chain_row("BASE-A", "LLD-724_1", "BASE-FOREIGN"),
+        _chain_row("BASE-FOREIGN", "LLD-700_1", None, project_id="OTHER"),
+    ]
+    use_case, gateway, _, _ = _chain_use_case(rows)
+
+    with pytest.raises(DomainError, match="BASELINE_PARENT_CHAIN_BROKEN"):
+        use_case.execute(
+            RunQueryInput(
+                project_id="LLD",
+                question="当前目标客群是什么？",
+                scope="effective",
+                historical_version=None,
+            )
+        )
+
+    assert gateway.last_inputs is None

@@ -129,6 +129,8 @@ class Baseline(DomainModel):
     full_document_path: NonEmptyStr
     card_snapshot_path: NonEmptyStr
     manifest_sha256: Sha256Str
+    full_document_sha256: Sha256Str | None = None
+    card_snapshot_sha256: Sha256Str | None = None
     change_request_id: NonEmptyStr | None
     approved_by: NonEmptyStr
     effective_at: datetime | None
