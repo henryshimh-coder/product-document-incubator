@@ -649,7 +649,7 @@ def test_publish_fails_when_card_has_only_bare_source_ids(tmp_path) -> None:
     _assert_release_tree_and_state_unchanged(env, before)
 
 
-def _baseline_rule_fragment_locator(env) -> str:
+def _baseline_fragment_locator_for(env, marker: str) -> str:
     from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 
     manifest = env.manifest_store.read_and_validate()
@@ -660,7 +660,11 @@ def _baseline_rule_fragment_locator(env) -> str:
         relative_path=manifest.full_document_path,
         expected_sha256=manifest.full_document_sha256,
     )
-    return next(item for item in material.fragments if BEFORE_CONTENT in item.text).locator
+    return next(item for item in material.fragments if marker in item.text).locator
+
+
+def _baseline_rule_fragment_locator(env) -> str:
+    return _baseline_fragment_locator_for(env, BEFORE_CONTENT)
 
 
 def _append_issue_evidence(env, evidence: dict) -> None:
@@ -711,6 +715,32 @@ def _replace_change_evidence_ref(env, old: str, new: str) -> None:
             "UPDATE change_requests SET evidence_refs_json = ? WHERE id = 'CHANGE-001'",
             (json.dumps(refs, ensure_ascii=False),),
         )
+
+
+def _snapshot_release_state(env) -> dict:
+    """Capture Manifest raw bytes, every SQLite table, and the release tree."""
+    with sqlite3.connect(env.db_path) as connection:
+        tables = {
+            name: connection.execute(f'SELECT * FROM "{name}" ORDER BY rowid').fetchall()
+            for (name,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+        }
+    release_root = env.project_root / "data/obsidian_vault/02_Current_Baseline"
+    return {
+        "manifest_bytes": env.manifest_path.read_bytes(),
+        "sqlite": tables,
+        "release_tree": sorted(item.name for item in release_root.iterdir()),
+    }
+
+
+def _assert_publish_failure_state_unchanged(env, snapshot: dict) -> None:
+    """发布失败后 Manifest、SQLite、发布目录及审批状态必须逐项不变。"""
+    after = _snapshot_release_state(env)
+    assert after == snapshot
+    change = env.changes.get("CHANGE-001")
+    assert change.status == ChangeStatus.APPROVED
+    assert change.review_idempotency_key == "REVIEW-KEY-001"
 
 
 def test_publish_accepts_baseline_side_evidence_with_locatable_position(tmp_path) -> None:
@@ -875,6 +905,85 @@ def test_publish_fails_when_baseline_evidence_citation_is_forged(tmp_path) -> No
 
     _update_issue_evidence(env, forged_id, citation_id="CIT-BASE-001")
     _replace_change_evidence_ref(env, forged_id, "CIT-BASE-001")
+    baseline = _use_case(env).execute(_command())
+    assert baseline.version == TARGET_VERSION
+
+
+def test_publish_fails_when_baseline_evidence_cites_another_card(tmp_path) -> None:
+    """V4-A08: 引用其他卡片的合法 citation 时发布失败，全量状态保持不变。
+
+    CIT-BASE-002 是 API-CUSTOMER 卡片的真实 citation，版本/locator/excerpt 全部
+    合法，但本次变更目标卡片是 RULE-001——受控关系规则只允许绑定 target_card_id。
+    """
+    env = _approved_env(tmp_path)
+    citation_id = "CIT-BASE-002"
+    _append_issue_evidence(
+        env,
+        {
+            "source_id": CURRENT_BASELINE_ID,
+            "citation_id": citation_id,
+            "excerpt": "客群接口规则。",
+            "document_version": CURRENT_VERSION,
+            "page_or_section": _baseline_fragment_locator_for(env, "客群接口规则。"),
+            "side": "current_baseline",
+        },
+    )
+    _add_change_evidence_ref(env, citation_id)
+    before = _snapshot_release_state(env)
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == f"PUBLISH_EVIDENCE_CARD_MISMATCH:{citation_id}"
+    _assert_publish_failure_state_unchanged(env, before)
+
+    # 修正为目标卡片的合法 citation 后可直接重试，无需重复人工审批。
+    _update_issue_evidence(
+        env,
+        citation_id,
+        citation_id="CIT-BASE-001",
+        excerpt=BEFORE_CONTENT,
+        page_or_section=_baseline_rule_fragment_locator(env),
+    )
+    _replace_change_evidence_ref(env, citation_id, "CIT-BASE-001")
+    baseline = _use_case(env).execute(_command())
+    assert baseline.version == TARGET_VERSION
+
+
+def test_publish_fails_when_baseline_evidence_excerpt_is_partial(tmp_path) -> None:
+    """V4-A09: 合法 citation 携带局部摘录时发布失败，全量状态保持不变。
+
+    摘录是目标卡片正文（即 entry.excerpt）的真子串——旧规则下它能以"fragment
+    任意子串"身份通过，新规则要求 evidence.excerpt == entry.excerpt 精确等值。
+    """
+    env = _approved_env(tmp_path)
+    citation_id = "CIT-BASE-001"
+    partial_excerpt = BEFORE_CONTENT[:-1]
+    assert partial_excerpt != BEFORE_CONTENT and partial_excerpt in BEFORE_CONTENT
+    _append_issue_evidence(
+        env,
+        {
+            "source_id": CURRENT_BASELINE_ID,
+            "citation_id": citation_id,
+            "excerpt": partial_excerpt,
+            "document_version": CURRENT_VERSION,
+            "page_or_section": _baseline_rule_fragment_locator(env),
+            "side": "current_baseline",
+        },
+    )
+    _add_change_evidence_ref(env, citation_id)
+    before = _snapshot_release_state(env)
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{citation_id}"
+    _assert_publish_failure_state_unchanged(env, before)
+
+    # 补齐完整摘录后可直接重试，无需重复人工审批。
+    _update_issue_evidence(env, citation_id, excerpt=BEFORE_CONTENT)
     baseline = _use_case(env).execute(_command())
     assert baseline.version == TARGET_VERSION
 

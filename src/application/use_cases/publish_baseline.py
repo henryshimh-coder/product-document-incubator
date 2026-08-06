@@ -349,7 +349,7 @@ class PublishBaseline:
                 )
             evidence = matches[0]
             if evidence.source_id == current.current_baseline_id:
-                self._verify_baseline_evidence(command, current, parent_cards, evidence)
+                self._verify_baseline_evidence(command, change, current, parent_cards, evidence)
                 continue
             source = self._require_formal_source(command.project_id, evidence.source_id)
             material = self._read_source_material(source)
@@ -371,6 +371,7 @@ class PublishBaseline:
     def _verify_baseline_evidence(
         self,
         command: PublishBaselineInput,
+        change: ChangeRequest,
         current: BaselineManifest,
         parent_cards: list[KnowledgeCard],
         evidence: IssueEvidence,
@@ -379,7 +380,14 @@ class PublishBaseline:
 
         The citation ID must be a real identity generated from the Manifest-pointed
         card snapshot (shared rule with run_lint), and version/locator/excerpt must
-        match that mapping entry field-by-field. Arbitrary citation IDs fail closed.
+        equal that mapping entry field-by-field — a partial excerpt that is merely a
+        substring of the fragment fails closed. Arbitrary citation IDs fail closed.
+
+        受控关系规则（唯一允许的基线证据绑定）：基线侧证据只允许绑定本次变更的
+        目标卡片，即 entry.card_id == change.target_card_id。受影响对象
+        （impacted_objects）中的其他卡片不允许作为基线证据引用；其内容如确需
+        进入证据链，必须以正式来源证据（source_id 指向受控来源归档）形式提交。
+        当前实现不允许任何例外，fail closed。
         """
         material = self.material_reader.read_baseline(
             project_id=command.project_id,
@@ -397,17 +405,20 @@ class PublishBaseline:
             (item for item in citations if item.citation_id == evidence.citation_id),
             None,
         )
-        fragment = (
-            next((item for item in material.fragments if item.locator == entry.locator), None)
-            if entry is not None
-            else None
-        )
+        if entry is None:
+            raise DomainError(
+                ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
+                f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{evidence.citation_id}",
+            )
+        if entry.card_id != change.target_card_id:
+            raise DomainError(
+                ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
+                f"PUBLISH_EVIDENCE_CARD_MISMATCH:{evidence.citation_id}",
+            )
         if (
-            entry is None
-            or fragment is None
-            or evidence.document_version != entry.baseline_version
+            evidence.document_version != entry.baseline_version
             or evidence.page_or_section != entry.locator
-            or evidence.excerpt not in fragment.text
+            or evidence.excerpt != entry.excerpt
         ):
             raise DomainError(
                 ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
