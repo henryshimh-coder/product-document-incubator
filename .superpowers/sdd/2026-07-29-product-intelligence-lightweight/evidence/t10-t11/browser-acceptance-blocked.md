@@ -26,5 +26,5 @@
 - 解除方式：官方 Kimi WebBridge 扩展 v1.11.5 经 Chrome External Extensions 机制从官方商店自动安装进隔离 profile（`--user-data-dir=/tmp/wb-profile --remote-debugging-port=9223`，不触碰日常 Chrome），与本机守护进程 `127.0.0.1:10086` 建立连接；navigate/evaluate/click/cdp 全链路实测可用。
 - 正式证据入口：`browser/` 目录（双视口截图 6 张 + `browser/browser-acceptance.md` 测量与结论）。
 - v3 轮验收提交：`b3845d5`（fix: close publish source integrity and trace verification gaps），2026-08-05 完成双视口验收。
-- v4 轮换证提交：`2b02b56`（fix: bind publish evidence metadata to verified material），2026-08-05 以最终代码重新完成双视口验收，`browser/browser-acceptance.md` 中的验收 SHA 已更新为该提交。
+- v4 轮最终换证提交：`35ea4cf`（v4 最终代码提交；含 `2b02b56` 证据元数据绑定与 `35ea4cf` 任务 ID 抖动修复），2026-08-05 以最终代码重新完成双视口验收，`browser/browser-acceptance.md` 中的验收 SHA 已更新为该提交。
 - 最新结论：1440x1024 与 390x844 均无横向溢出；发布确认弹窗完整在移动视口内；篡改归档触发 PUBLISH_SOURCE_INTEGRITY_FAILED 且可安全回退重试；追溯六节点双视口有序无溢出；控制台无 error/warn。原阻塞项全部关闭。
