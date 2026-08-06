@@ -137,3 +137,12 @@
 - **V4-A01~A07 新增**：正式来源伪造版本/伪造 locator/四项全对；基线侧伪造版本/伪造 citation/伪造 locator/全对；失败用例均断言变更保持 approved、Manifest 与镜像不变、目标目录未生效、恢复合法证据后免重复批准直接重试成功。release_env 夹具 FULL_DOCUMENT 补上接口约束段（基线 full.md 覆盖全部卡正文的真实不变式），证据 page_or_section 改用真实 extractor locator。
 - **验证**：专项 49 passed；全量 664 passed（659+5 净增）；覆盖率 95%；ruff/compileall/diff check 全过；联合 14 步全新环境 PASS。
 - **浏览器换证**：以本提交重拍双视口 6 图（篡改失败→回退→重试全链路），证据与测量见 `evidence/t10-t11/browser/browser-acceptance.md`（验收 SHA 已更新为 2b02b56）。
+
+## v4 补充加固轮（2026-08-05，评审方追加要求）
+
+评审方在 v4 基础上追加两项基线证据绑定收紧：
+
+- **目标卡片绑定（受控关系规则）**：基线侧证据除命中共享 citation 身份映射外，新增 `entry.card_id == change.target_card_id` 校验，违反时报 `PUBLISH_CITATION_UNVERIFIABLE` / `PUBLISH_EVIDENCE_CARD_MISMATCH:<citation_id>`。受控关系规则已明确写入 `_verify_baseline_evidence` docstring：基线证据唯一允许绑定本次变更的目标卡片；`impacted_objects` 中的其他受影响对象不允许作为基线证据引用，其内容须以正式来源证据（受控来源归档）形式进入证据链；实现不允许例外，fail closed。
+- **摘录精确等值**：`evidence.excerpt == entry.excerpt`（entry.excerpt 即目标卡片全文），不再接受"fragment 任意子串"的局部摘录。
+- **V4-A08/A09 新增负向测试**：A08 引用其他卡片（API-CUSTOMER）的合法 citation CIT-BASE-002（版本/locator/excerpt 全合法，仅卡片不符）→ 拒绝；A09 合法 citation 携带局部摘录（目标卡片正文去掉末尾字）→ 拒绝。两条均已验证在修复前代码下必然失败（DID NOT RAISE）、修复后通过；失败后以全量状态快照断言 Manifest 原始字节、SQLite 全部表、发布目录及审批状态（approved + 幂等键）逐项不变；修正证据后免重复批准直接重试成功。
+- **验证**：发布专项 51 passed；全量 668 passed（666+2 新）；domain+application 覆盖率 95%（2479 行缺 116，新增分支全覆盖）；ruff check/format、compileall、git diff --check 全过；联合 14 步全新环境 PASS。真实产品流不受影响：run_lint 比较包产出的基线摘录即卡片全文且 citation 与卡片一一绑定，联合验收发布步骤仅引用正式来源证据。
