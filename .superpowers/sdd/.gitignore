@@ -1,0 +1,25 @@
+# SDD 工作目录默认忽略；仅放行 T10/T11 正式验收交付材料（v4 M4 白名单）。
+*
+!2026-07-29-product-intelligence-lightweight/
+2026-07-29-product-intelligence-lightweight/*
+!2026-07-29-product-intelligence-lightweight/progress.md
+!2026-07-29-product-intelligence-lightweight/task-10-implementer-report.md
+!2026-07-29-product-intelligence-lightweight/task-11-implementer-report.md
+!2026-07-29-product-intelligence-lightweight/evidence/
+2026-07-29-product-intelligence-lightweight/evidence/*
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/
+2026-07-29-product-intelligence-lightweight/evidence/t10-t11/*
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/joint_acceptance.py
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/joint-acceptance.log
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser-acceptance-blocked.md
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/
+2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/*
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/browser-acceptance.md
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/release-desktop-1440x1024.png
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/release-failure-mobile-390x844.png
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/release-confirm-mobile-390x844.png
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/release-success-mobile-390x844.png
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/trace-six-node-desktop-1440x1024.png
+!2026-07-29-product-intelligence-lightweight/evidence/t10-t11/browser/trace-six-node-mobile-390x844.png
+__pycache__/
+*.pyc

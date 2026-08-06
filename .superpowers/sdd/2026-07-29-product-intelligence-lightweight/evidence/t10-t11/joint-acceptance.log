@@ -1,0 +1,16 @@
+[PASS] 01 初始化: baseline=LLD-724_1, relations=2
+[PASS] 01b 容器组装: import/query/lint 服务齐备，启动对账通过
+[PASS] 02 导入三份材料: risk=SRC-739BF7DF1497A8C1 生成 1 张候选卡；relations=4
+[PASS] 03 当前查询 (V3-A02): answer='当前目标客群是符合准入要求的存量客户。', version=LLD-724_1, citation_excerpts=['当前目标客群是符合准入要求的存量客户。']
+[PASS] 04 Lint: issue=ISSUE-74C2DDBE13743AEA87E0, relations=5
+[PASS] 05 人工决定: decision=DECISION-D4F80BB9DF4D48A2B6ECBE31C0F98551, change=CHANGE-E45D3667C9F04403BABF2C1BA3A10B32, relations=7
+[PASS] 05b 决定幂等重放: 重放返回原决定 DECISION-D4F80BB9DF4D48A2B6ECBE31C0F98551，relations 仍为 7
+[PASS] 06 人工批准: change=CHANGE-E45D3667C9F04403BABF2C1BA3A10B32 approved
+[PASS] 07 原子发布: baseline=BASE-LLD-724_2 effective，relations=9（+approved_as/supersedes）
+[PASS] 08 发布后当前查询 (V3-A03): answer='目标客群收紧为符合准入要求且通过风险评估的存量客户。', version=LLD-724_2, citation_excerpts=['目标客群收紧为符合准入要求且通过风险评估的存量客户。']
+[PASS] 09 历史查询 (V3-A04): answer='当前目标客群是符合准入要求的存量客户。', version=LLD-724_1, citation_excerpts=['当前目标客群是符合准入要求的存量客户。']
+[PASS] 10 六节点 Relation 链: kinds=['source', 'knowledge', 'issue', 'decision', 'change', 'baseline'], edges=['derived_from', 'conflicts_with', 'resolved_by', 'proposes_change_to', 'approved_as'], missing=[]
+[PASS] 11 来源原文验证 (V3-A05): verification=verified, excerpt='heading:当前产品方案 > 目标客群; line:7｜当前目标客群是符合准入要求的存量客户。'…
+[PASS] 12 市场证据不足: 卡片=MKT-LLD-001, classification=unvalidated_assumption
+[PASS] 13 沙箱成本联动: sources=['SRC-4269147D6203BEA4'], is_simulation=True, delta=1000.00, 正式来源被阻断=COST_SOURCE_REQUIRED
+[PASS] 14 重启对账: reconcile=True, integrity=True, version=LLD-724_2, relations=9
