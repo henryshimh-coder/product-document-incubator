@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol
-from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -33,7 +32,10 @@ from src.domain.services.citation_validator import (
     contains_normalized_statement,
 )
 from src.infrastructure.files.query_material_reader import VerifiedQueryMaterial
-from src.infrastructure.gateways._common import create_outbound_safety_proof
+from src.infrastructure.gateways._common import (
+    create_outbound_safety_proof,
+    new_workflow_task_id,
+)
 from src.infrastructure.gateways.schemas import QueryWorkflowInput
 
 INSUFFICIENT_EVIDENCE_ANSWER = "现有材料不足以支持确定结论。请补充资料或查看相关引用。"
@@ -99,7 +101,7 @@ class RunQuery:
         self.financial_terms = tuple(financial_terms)
         self.leader_names = tuple(leader_names)
         self.unpublished_decisions = tuple(unpublished_decisions)
-        self.task_id_factory = task_id_factory or (lambda: f"TASK-QUERY-{uuid4().hex.upper()}")
+        self.task_id_factory = task_id_factory or (lambda: new_workflow_task_id("TASK-QUERY"))
         self.schema_version = schema_version
 
     def list_historical_versions(self, project_id: str) -> tuple[str, ...]:

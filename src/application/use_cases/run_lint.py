@@ -4,7 +4,6 @@ import hashlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
-from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -37,7 +36,10 @@ from src.domain.policies.security_policy import can_call_external_model
 from src.domain.services.deterministic_lint import DeterministicFinding, run_rule
 from src.infrastructure.files.markdown_store import MarkdownStore
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
-from src.infrastructure.gateways._common import create_outbound_safety_proof
+from src.infrastructure.gateways._common import (
+    create_outbound_safety_proof,
+    new_workflow_task_id,
+)
 from src.infrastructure.gateways.schemas import LintIssueOutput, LintWorkflowInput
 
 
@@ -439,7 +441,7 @@ class SafeLintComparisonBuilder:
         self.sources = sources
         self.card_store = card_store
         self.material_reader = material_reader
-        self.task_id_factory = task_id_factory or (lambda: f"TASK-LINT-{uuid4().hex.upper()}")
+        self.task_id_factory = task_id_factory or (lambda: new_workflow_task_id("TASK-LINT"))
         self.schema_version = schema_version
         self.input_contract_version = input_contract_version
 

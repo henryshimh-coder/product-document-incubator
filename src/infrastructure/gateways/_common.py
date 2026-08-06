@@ -7,6 +7,7 @@ import math
 import secrets
 from collections.abc import Iterable, Mapping
 from typing import Any, TypeVar
+from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
@@ -20,6 +21,19 @@ MAX_OUTBOUND_COVERAGE = 0.25
 MAX_CANONICAL_PAYLOAD_CHARS = 20_000
 _PROOF_HMAC_KEY = secrets.token_bytes(32)
 _PROOF_ISSUER = object()
+
+
+def new_workflow_task_id(prefix: str) -> str:
+    """Return a random task ID that can never resemble numeric sensitive data.
+
+    Outbound payloads are scanned by REDACTION_PATTERNS (phone/id_card/bank_card,
+    minimum 11 consecutive digits). Bare hex UUIDs hit those patterns with ~0.6%
+    probability per ID and make the outbound safety proof fail closed at random.
+    Grouping into 4-char blocks bounds any digit run to 4, so a match is
+    structurally impossible.
+    """
+    hex32 = uuid4().hex.upper()
+    return f"{prefix}-{'-'.join(hex32[offset : offset + 4] for offset in range(0, 32, 4))}"
 
 
 class OutboundSafetyProof:
