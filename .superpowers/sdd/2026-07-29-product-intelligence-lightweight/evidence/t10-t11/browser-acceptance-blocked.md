@@ -28,3 +28,4 @@
 - v3 轮验收提交：`b3845d5`（fix: close publish source integrity and trace verification gaps），2026-08-05 完成双视口验收。
 - v4 轮最终换证提交：`35ea4cf`（v4 最终代码提交；含 `2b02b56` 证据元数据绑定与 `35ea4cf` 任务 ID 抖动修复），2026-08-05 以最终代码重新完成双视口验收，`browser/browser-acceptance.md` 中的验收 SHA 已更新为该提交。
 - 最新结论：1440x1024 与 390x844 均无横向溢出；发布确认弹窗完整在移动视口内；篡改归档触发 PUBLISH_SOURCE_INTEGRITY_FAILED 且可安全回退重试；追溯六节点双视口有序无溢出；控制台无 error/warn。原阻塞项全部关闭。
+- v4 补充加固轮最终换证提交：`c694778`（fix: bind baseline evidence to target card and exact excerpt，为当前最终代码提交），2026-08-05 以该代码重新完成双视口验收（篡改→失败→还原→重试全链路 + 六节点双视口 + 控制台零告警），`browser/browser-acceptance.md` 验收 SHA 已更新为该提交。

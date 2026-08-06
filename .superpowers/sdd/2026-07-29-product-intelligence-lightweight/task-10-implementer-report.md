@@ -146,3 +146,4 @@
 - **摘录精确等值**：`evidence.excerpt == entry.excerpt`（entry.excerpt 即目标卡片全文），不再接受"fragment 任意子串"的局部摘录。
 - **V4-A08/A09 新增负向测试**：A08 引用其他卡片（API-CUSTOMER）的合法 citation CIT-BASE-002（版本/locator/excerpt 全合法，仅卡片不符）→ 拒绝；A09 合法 citation 携带局部摘录（目标卡片正文去掉末尾字）→ 拒绝。两条均已验证在修复前代码下必然失败（DID NOT RAISE）、修复后通过；失败后以全量状态快照断言 Manifest 原始字节、SQLite 全部表、发布目录及审批状态（approved + 幂等键）逐项不变；修正证据后免重复批准直接重试成功。
 - **验证**：发布专项 51 passed；全量 668 passed（666+2 新）；domain+application 覆盖率 95%（2479 行缺 116，新增分支全覆盖）；ruff check/format、compileall、git diff --check 全过；联合 14 步全新环境 PASS。真实产品流不受影响：run_lint 比较包产出的基线摘录即卡片全文且 citation 与卡片一一绑定，联合验收发布步骤仅引用正式来源证据。
+- **浏览器换证（c694778）**：以加固后最终代码重拍双视口 6 图——弹窗 358×392@(16,48) 在 390×844 内；篡改归档（+29 字节）→ `PUBLISH_SOURCE_INTEGRITY_FAILED` → Manifest/变更 approved 不变 → 还原免重复批准重试 → LLD-724_2 生效；六节点双视口有序无溢出（移动 x=20 w=350，桌面 max bottom=555）；三处 scrollWidth==clientWidth；控制台 0 错误 0 警告。证据 `evidence/t10-t11/browser/`（验收 SHA 已更新为 c694778）。
