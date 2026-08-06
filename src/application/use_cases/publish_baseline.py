@@ -18,6 +18,7 @@ from src.application.ports.repositories import (
     ReleaseUnitOfWork,
     SourceRepository,
 )
+from src.application.use_cases.baseline_citations import build_baseline_citations
 from src.domain.enums import BaselineStatus, KnowledgeStatus
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.models import (
@@ -348,7 +349,7 @@ class PublishBaseline:
                 )
             evidence = matches[0]
             if evidence.source_id == current.current_baseline_id:
-                self._verify_baseline_evidence(command, current, evidence)
+                self._verify_baseline_evidence(command, current, parent_cards, evidence)
                 continue
             source = self._require_formal_source(command.project_id, evidence.source_id)
             material = self._read_source_material(source)
@@ -356,7 +357,12 @@ class PublishBaseline:
                 (item for item in material.fragments if item.fragment_id == citation_id),
                 None,
             )
-            if fragment is None or evidence.excerpt not in fragment.text:
+            if (
+                fragment is None
+                or evidence.document_version != material.document_version
+                or evidence.page_or_section != fragment.locator
+                or evidence.excerpt not in fragment.text
+            ):
                 raise DomainError(
                     ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
                     f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{citation_id}",
@@ -366,9 +372,15 @@ class PublishBaseline:
         self,
         command: PublishBaselineInput,
         current: BaselineManifest,
+        parent_cards: list[KnowledgeCard],
         evidence: IssueEvidence,
     ) -> None:
-        """Verify an evidence item that cites the current baseline full document."""
+        """Verify an evidence item that cites the current baseline full document.
+
+        The citation ID must be a real identity generated from the Manifest-pointed
+        card snapshot (shared rule with run_lint), and version/locator/excerpt must
+        match that mapping entry field-by-field. Arbitrary citation IDs fail closed.
+        """
         material = self.material_reader.read_baseline(
             project_id=command.project_id,
             asset_id=current.current_baseline_id,
@@ -376,11 +388,27 @@ class PublishBaseline:
             relative_path=current.full_document_path,
             expected_sha256=current.full_document_sha256,
         )
-        fragment = next(
-            (item for item in material.fragments if item.locator == evidence.page_or_section),
+        citations = build_baseline_citations(
+            baseline_version=current.current_version,
+            cards=parent_cards,
+            fragments=material.fragments,
+        )
+        entry = next(
+            (item for item in citations if item.citation_id == evidence.citation_id),
             None,
         )
-        if fragment is None or evidence.excerpt not in fragment.text:
+        fragment = (
+            next((item for item in material.fragments if item.locator == entry.locator), None)
+            if entry is not None
+            else None
+        )
+        if (
+            entry is None
+            or fragment is None
+            or evidence.document_version != entry.baseline_version
+            or evidence.page_or_section != entry.locator
+            or evidence.excerpt not in fragment.text
+        ):
             raise DomainError(
                 ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
                 f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{evidence.citation_id}",

@@ -22,6 +22,7 @@ from src.application.ports.repositories import (
     ProjectRepository,
     SourceRepository,
 )
+from src.application.use_cases.baseline_citations import build_baseline_citations
 from src.domain.enums import (
     BaselineStatus,
     CallResultMode,
@@ -467,27 +468,21 @@ class SafeLintComparisonBuilder:
                 "LINT_CARD_SNAPSHOT_HASH_MISMATCH",
             )
         baseline_cards = self.card_store.read_cards(manifest.card_snapshot_path)
-        baseline_rules: list[dict[str, str]] = []
-        for index, card in enumerate(baseline_cards[:50], start=1):
-            fragment = next(
-                (item for item in baseline_material.fragments if card.content in item.text),
-                None,
+        baseline_rules: list[dict[str, str]] = [
+            {
+                "id": entry.card_id,
+                "source_id": manifest.current_baseline_id,
+                "citation_id": entry.citation_id,
+                "document_version": entry.baseline_version,
+                "page_or_section": entry.locator,
+                "excerpt": entry.excerpt,
+            }
+            for entry in build_baseline_citations(
+                baseline_version=manifest.current_version,
+                cards=baseline_cards,
+                fragments=baseline_material.fragments,
             )
-            if fragment is None:
-                raise DomainError(
-                    ErrorCode.CITATION_INVALID,
-                    f"LINT_BASELINE_TEXT_MISMATCH:{card.id}",
-                )
-            baseline_rules.append(
-                {
-                    "id": card.id,
-                    "source_id": manifest.current_baseline_id,
-                    "citation_id": f"CIT-BASE-{index:03d}",
-                    "document_version": manifest.current_version,
-                    "page_or_section": fragment.locator,
-                    "excerpt": card.content,
-                }
-            )
+        ]
 
         materials = [baseline_material]
         selected_source = None

@@ -58,6 +58,8 @@ FULL_DOCUMENT = (
     f"当前版本：{CURRENT_VERSION}\n\n"
     "## 目标客群\n\n"
     f"{BEFORE_CONTENT}\n\n"
+    "## 接口约束\n\n"
+    "客群接口规则。\n\n"
     "## 附录\n\n"
     "仅作为脱敏演示基线使用。\n"
 )
@@ -89,6 +91,16 @@ _SOURCE_DOCUMENTS: dict[str, tuple[str, AuthorityLevel, str, str]] = {
 
 def _chunk_id_for(source_id: str, marker: str) -> str:
     """Locate the real chunk id of a marker text inside a source archive fixture."""
+    chunk = _chunk_for(source_id, marker)
+    return chunk.chunk_id
+
+
+def _chunk_locator_for(source_id: str, marker: str) -> str:
+    """Locate the real extractor locator of a marker text inside a source fixture."""
+    return _chunk_for(source_id, marker).locator
+
+
+def _chunk_for(source_id: str, marker: str):
     filename, _, _, content = _SOURCE_DOCUMENTS[source_id]
     extracted = extract_document_bytes(
         content.encode("utf-8"),
@@ -98,12 +110,14 @@ def _chunk_id_for(source_id: str, marker: str) -> str:
     chunk = next((item for item in extracted.chunks if marker in item.text), None)
     if chunk is None:
         raise ValueError(f"{source_id} archive is missing chunk for: {marker}")
-    return chunk.chunk_id
+    return chunk
 
 
 BASE_RULE_CHUNK_ID = _chunk_id_for("SRC-BASE", BEFORE_CONTENT)
 BASE_API_CHUNK_ID = _chunk_id_for("SRC-BASE", "客群接口规则。")
 RISK_CHUNK_ID = _chunk_id_for("SRC-RISK", "风险意见要求收紧客群。")
+BASE_RULE_LOCATOR = _chunk_locator_for("SRC-BASE", BEFORE_CONTENT)
+RISK_LOCATOR = _chunk_locator_for("SRC-RISK", "风险意见要求收紧客群。")
 RULE_CARD_REF = f"SRC-BASE:{BASE_RULE_CHUNK_ID}"
 API_CARD_REF = f"SRC-BASE:{BASE_API_CHUNK_ID}"
 
@@ -312,7 +326,7 @@ def build_release_environment(
                         citation_id=BASE_RULE_CHUNK_ID,
                         excerpt=BEFORE_CONTENT,
                         document_version="v1.0",
-                        page_or_section="目标客群",
+                        page_or_section=BASE_RULE_LOCATOR,
                         side=EvidenceSide.CURRENT_BASELINE,
                     ),
                     IssueEvidence(
@@ -320,7 +334,7 @@ def build_release_environment(
                         citation_id=RISK_CHUNK_ID,
                         excerpt="风险意见要求收紧客群。",
                         document_version="v1.0",
-                        page_or_section="客群限制",
+                        page_or_section=RISK_LOCATOR,
                         side=EvidenceSide.CHALLENGING_SOURCE,
                     ),
                 ],

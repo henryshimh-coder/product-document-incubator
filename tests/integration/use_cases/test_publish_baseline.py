@@ -22,6 +22,8 @@ from tests.integration.release_env import (
     PROJECT_ID,
     RELEASE_NOTE,
     REVIEWER,
+    RISK_CHUNK_ID,
+    RISK_LOCATOR,
     RULE_CARD_REF,
     TARGET_BASELINE_ID,
     TARGET_VERSION,
@@ -684,10 +686,37 @@ def _add_change_evidence_ref(env, citation_id: str) -> None:
         )
 
 
+def _update_issue_evidence(env, match_id: str, **updates) -> None:
+    from src.infrastructure.db.repositories import SqliteIssueRepository
+
+    issue = SqliteIssueRepository(env.db_path).get("ISSUE-001")
+    payload = []
+    for item in issue.evidence:
+        data = item.model_dump(mode="json")
+        if item.citation_id == match_id:
+            data.update(updates)
+        payload.append(data)
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            "UPDATE issue_cards SET evidence_json = ? WHERE id = 'ISSUE-001'",
+            (json.dumps(payload, ensure_ascii=False),),
+        )
+
+
+def _replace_change_evidence_ref(env, old: str, new: str) -> None:
+    change = env.changes.get("CHANGE-001")
+    refs = [new if item == old else item for item in change.evidence_refs]
+    with sqlite3.connect(env.db_path) as connection:
+        connection.execute(
+            "UPDATE change_requests SET evidence_refs_json = ? WHERE id = 'CHANGE-001'",
+            (json.dumps(refs, ensure_ascii=False),),
+        )
+
+
 def test_publish_accepts_baseline_side_evidence_with_locatable_position(tmp_path) -> None:
-    """真实 lint 流程的当前基线侧证据经基线材料定位校验后可发布。"""
+    """V4-A07: 当前基线侧证据 citation/版本/locator/excerpt 全部正确时正常发布。"""
     env = _approved_env(tmp_path)
-    citation_id = "CIT-BASELINE-001"
+    citation_id = "CIT-BASE-001"
     _append_issue_evidence(
         env,
         {
@@ -707,9 +736,10 @@ def test_publish_accepts_baseline_side_evidence_with_locatable_position(tmp_path
 
 
 def test_publish_fails_when_baseline_side_evidence_position_is_unlocatable(tmp_path) -> None:
-    """基线侧证据的 locator/excerpt 不对应已验证片段时发布失败。"""
+    """V4-A06: 基线侧证据 citation/版本正确但 locator 伪造时发布失败，可恢复重试。"""
     env = _approved_env(tmp_path)
-    citation_id = "CIT-BASELINE-001"
+    citation_id = "CIT-BASE-001"
+    legal_locator = _baseline_rule_fragment_locator(env)
     _append_issue_evidence(
         env,
         {
@@ -730,6 +760,123 @@ def test_publish_fails_when_baseline_side_evidence_position_is_unlocatable(tmp_p
     assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
     assert raised.value.detail == f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{citation_id}"
     _assert_release_tree_and_state_unchanged(env, before)
+
+    _update_issue_evidence(env, citation_id, page_or_section=legal_locator)
+    baseline = _use_case(env).execute(_command())
+    assert baseline.version == TARGET_VERSION
+
+
+def test_publish_fails_when_formal_evidence_version_is_forged(tmp_path) -> None:
+    """V4-A01: 正式来源 citation/excerpt 正确但 document_version 伪造时发布失败。"""
+    env = _approved_env(tmp_path)
+    before = env.manifest_store.read_and_validate()
+    _update_issue_evidence(env, RISK_CHUNK_ID, document_version="FORGED-V999")
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{RISK_CHUNK_ID}"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+    _update_issue_evidence(env, RISK_CHUNK_ID, document_version="v1.0")
+    baseline = _use_case(env).execute(_command())
+    assert baseline.version == TARGET_VERSION
+
+
+def test_publish_fails_when_formal_evidence_locator_is_forged(tmp_path) -> None:
+    """V4-A02: 正式来源 citation/excerpt 正确但 page_or_section 伪造时发布失败。"""
+    env = _approved_env(tmp_path)
+    before = env.manifest_store.read_and_validate()
+    _update_issue_evidence(env, RISK_CHUNK_ID, page_or_section="heading:伪造章节; line:999")
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{RISK_CHUNK_ID}"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+    _update_issue_evidence(env, RISK_CHUNK_ID, page_or_section=RISK_LOCATOR)
+    baseline = _use_case(env).execute(_command())
+    assert baseline.version == TARGET_VERSION
+
+
+def test_publish_accepts_formal_evidence_with_full_metadata(tmp_path) -> None:
+    """V4-A03: 正式来源 citation/版本/locator/excerpt 四项全部正确时正常发布。"""
+    env = _approved_env(tmp_path)
+    from src.infrastructure.db.repositories import SqliteIssueRepository
+
+    issue = SqliteIssueRepository(env.db_path).get("ISSUE-001")
+    risk = next(item for item in issue.evidence if item.citation_id == RISK_CHUNK_ID)
+    assert risk.document_version == "v1.0"
+    assert risk.page_or_section == RISK_LOCATOR
+    assert risk.excerpt == "风险意见要求收紧客群。"
+
+    baseline = _use_case(env).execute(_command())
+
+    assert baseline.version == TARGET_VERSION
+
+
+def test_publish_fails_when_baseline_evidence_version_is_forged(tmp_path) -> None:
+    """V4-A04: 当前基线 locator/excerpt 正确但 document_version 伪造时发布失败。"""
+    env = _approved_env(tmp_path)
+    citation_id = "CIT-BASE-001"
+    _append_issue_evidence(
+        env,
+        {
+            "source_id": CURRENT_BASELINE_ID,
+            "citation_id": citation_id,
+            "excerpt": BEFORE_CONTENT,
+            "document_version": "FORGED-V999",
+            "page_or_section": _baseline_rule_fragment_locator(env),
+            "side": "current_baseline",
+        },
+    )
+    _add_change_evidence_ref(env, citation_id)
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{citation_id}"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+    _update_issue_evidence(env, citation_id, document_version=CURRENT_VERSION)
+    baseline = _use_case(env).execute(_command())
+    assert baseline.version == TARGET_VERSION
+
+
+def test_publish_fails_when_baseline_evidence_citation_is_forged(tmp_path) -> None:
+    """V4-A05: 当前基线版本/locator/excerpt 正确但 citation_id 伪造时发布失败。"""
+    env = _approved_env(tmp_path)
+    forged_id = "CIT-BASE-099"
+    _append_issue_evidence(
+        env,
+        {
+            "source_id": CURRENT_BASELINE_ID,
+            "citation_id": forged_id,
+            "excerpt": BEFORE_CONTENT,
+            "document_version": CURRENT_VERSION,
+            "page_or_section": _baseline_rule_fragment_locator(env),
+            "side": "current_baseline",
+        },
+    )
+    _add_change_evidence_ref(env, forged_id)
+    before = env.manifest_store.read_and_validate()
+
+    with pytest.raises(DomainError) as raised:
+        _use_case(env).execute(_command())
+
+    assert raised.value.code == ErrorCode.PUBLISH_CITATION_UNVERIFIABLE.value
+    assert raised.value.detail == f"PUBLISH_EVIDENCE_CITATION_UNVERIFIABLE:{forged_id}"
+    _assert_release_tree_and_state_unchanged(env, before)
+
+    _update_issue_evidence(env, forged_id, citation_id="CIT-BASE-001")
+    _replace_change_evidence_ref(env, forged_id, "CIT-BASE-001")
+    baseline = _use_case(env).execute(_command())
+    assert baseline.version == TARGET_VERSION
 
 
 def test_publish_rejects_sandbox_evidence_source(tmp_path) -> None:
