@@ -78,6 +78,7 @@ from src.infrastructure.cache.ai_cache import (  # noqa: E402
     build_cache_key,
 )
 from src.infrastructure.db.connection import connect  # noqa: E402
+from src.infrastructure.db.state_lock import STATE_LOCK_REL  # noqa: E402
 from src.infrastructure.files.manifest_store import ManifestStore  # noqa: E402
 
 DATABASE_REL = Path("data/local_state/product_intelligence.db")
@@ -86,7 +87,8 @@ CACHE_DIR_REL = Path("data/local_state/cache")
 VAULT_DIR_REL = Path("data/obsidian_vault")
 SNAPSHOT_TARGETS: tuple[Path, ...] = (DATABASE_REL, MANIFEST_REL, CACHE_DIR_REL, VAULT_DIR_REL)
 SOURCE_ARCHIVE_REL = Path("data/source_archive")
-RESET_LOCK_REL = Path("data/local_state/.reset.lock")
+# 与应用侧共享同一路径：应用持共享锁，重置持排他锁（评审第二轮 Important）。
+RESET_LOCK_REL = STATE_LOCK_REL
 
 SNAPSHOT_SCHEMA_VERSION = "1.1"
 PAYLOAD_DIRNAME = "payload"
@@ -324,7 +326,12 @@ def _validate_source_archives(project_root: Path, db_path: Path) -> str | None:
 
 
 def _checked_output_dir(project_root: Path, snapshot_dir: Path) -> Path:
-    """在任何写入前拒绝危险的快照输出目录（评审 T12-P0-01）。"""
+    """在任何写入前拒绝危险的快照输出目录（评审 T12-P0-01 及第二轮 Critical）。
+
+    除根/根祖先/受保护目标重叠外，已存在且含内容的目录必须是快照形态
+    （manifest.json + payload/）才允许被替换——普通目录（如 src/、docs/）
+    里的哨兵文件绝不被快照替换吞掉。
+    """
     try:
         resolved = snapshot_dir.resolve()
     except (OSError, RuntimeError) as error:
@@ -335,8 +342,15 @@ def _checked_output_dir(project_root: Path, snapshot_dir: Path) -> Path:
         protected = (project_root / relative).resolve()
         if resolved.is_relative_to(protected) or protected.is_relative_to(resolved):
             raise ValueError(f"SNAPSHOT_OUTPUT_OVERLAP:{resolved}")
-    if resolved.exists() and not resolved.is_dir():
-        raise ValueError(f"SNAPSHOT_OUTPUT_UNSAFE:{resolved}")
+    if resolved.exists():
+        if not resolved.is_dir():
+            raise ValueError(f"SNAPSHOT_OUTPUT_UNSAFE:{resolved}")
+        has_content = any(resolved.iterdir())
+        looks_like_snapshot = (resolved / MANIFEST_FILENAME).is_file() and (
+            resolved / PAYLOAD_DIRNAME
+        ).is_dir()
+        if has_content and not looks_like_snapshot:
+            raise ValueError(f"SNAPSHOT_OUTPUT_NONSNAPSHOT:{resolved}")
     return resolved
 
 
@@ -531,8 +545,17 @@ def restore_snapshot(snapshot_dir: Path, project_root: Path) -> ValidationReport
                 for relative in seed_plan:
                     destination = project_root / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(payload_root / relative, destination)
+                    # 先登记回滚：部分写入失败时 _rollback 能清掉残留；
+                    # 临时文件 + rename 保证目标路径只出现完整内容。
                     seeded.append(destination)
+                    temporary = destination.parent / (
+                        f".{destination.name}.seed-{uuid4().hex[:8]}.tmp"
+                    )
+                    try:
+                        shutil.copy2(payload_root / relative, temporary)
+                        os.replace(temporary, destination)
+                    finally:
+                        temporary.unlink(missing_ok=True)
                 for relative in SNAPSHOT_TARGETS:
                     parked.extend(_park_existing(project_root, backup, relative))
                     _place_staged(staging, project_root, relative)

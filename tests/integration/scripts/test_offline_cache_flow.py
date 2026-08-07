@@ -426,6 +426,8 @@ def test_three_consecutive_resets_after_full_demo(
     root = _restored_frozen_root(tmp_path)
     container = _offline_container(root, monkeypatch)
     assert _run_offline_main_flow(container) == "LLD-724_2"
+    # 应用运行期持共享状态锁：先释放再重置（持锁应用会阻断重置，另行覆盖）。
+    container.close()
 
     fingerprints: list[dict[str, str]] = []
     for _ in range(3):

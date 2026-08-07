@@ -68,6 +68,7 @@ from src.infrastructure.db.repositories import (
     SqliteReviewUnitOfWork,
     SqliteSourceRepository,
 )
+from src.infrastructure.db.state_lock import acquire_shared, release
 from src.infrastructure.files.archive import SourceArchive
 from src.infrastructure.files.baseline_card_reader import LocalBaselineCardReader
 from src.infrastructure.files.extractor import extract_document
@@ -168,6 +169,7 @@ class AppSettings(BaseModel):
 @dataclass(frozen=True)
 class AppContainer:
     settings: AppSettings
+    state_lock_fd: int | None = None
     import_source: ImportSourceService | None = None
     dashboard: DashboardService | None = None
     query: QueryService | None = None
@@ -179,6 +181,14 @@ class AppContainer:
     release_guard: ReleaseGuard | None = None
     reconciliation: ReconciliationPort | None = None
     trace: TraceService | None = None
+
+    def close(self) -> None:
+        """释放应用运行期持有的状态共享锁（幂等；进程退出时 flock 也会自动释放）。"""
+        descriptor = self.state_lock_fd
+        if descriptor is None:
+            return
+        object.__setattr__(self, "state_lock_fd", None)
+        release(descriptor)
 
 
 def _load_settings(app_path: Path, schema_path: Path) -> tuple[AppSettings, bool]:
@@ -317,7 +327,11 @@ def build_container(
         runtime.get("DIFY_LINT_API_KEY", "").strip(),
     )
     if not all(required):
-        return AppContainer(settings=settings, **local_services)
+        return AppContainer(
+            settings=settings,
+            state_lock_fd=acquire_shared(project_root),
+            **local_services,
+        )
     if not has_explicit_lint_contract:
         raise ConfigurationError(
             "Live Lint deployment requires explicit "
@@ -407,6 +421,7 @@ def build_container(
     )
     return AppContainer(
         settings=settings,
+        state_lock_fd=acquire_shared(project_root),
         import_source=import_service,
         query=query_service,
         lint=lint_service,

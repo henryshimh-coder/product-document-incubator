@@ -518,3 +518,88 @@ def test_reset_cli_reports_reset_and_validation_ok(
     output = capsys.readouterr().out
     assert "RESET_OK snapshot=frozen" in output
     assert f"VALIDATION_OK baseline={BASELINE_VERSION}" in output
+
+
+def test_capture_refuses_to_overwrite_non_snapshot_directory(tmp_path: Path) -> None:
+    """评审第二轮 Critical：含内容的普通目录绝不被快照替换吞掉。"""
+    root = _bootstrapped_root(tmp_path)
+    ordinary = root / "src"
+    ordinary.mkdir()
+    sentinel = ordinary / "sentinel.py"
+    sentinel.write_text("# 业务代码，绝不可被快照删除\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    keep = elsewhere / "keep.txt"
+    keep.write_text("keep\n", encoding="utf-8")
+    for target in (ordinary, elsewhere):
+        with pytest.raises(ValueError, match="SNAPSHOT_OUTPUT_NONSNAPSHOT"):
+            capture_snapshot(root, target)
+        assert target.is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "# 业务代码，绝不可被快照删除\n"
+    assert keep.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_capture_allows_recapture_over_snapshot_shaped_directory(tmp_path: Path) -> None:
+    """快照形态目录（manifest.json + payload/）允许原子换入；空目录同样允许。"""
+    root = _bootstrapped_root(tmp_path)
+    target = tmp_path / "snap"
+    first = capture_snapshot(root, target)
+    second = capture_snapshot(root, target)
+    assert second.database_sha256 == first.database_sha256
+    empty = tmp_path / "empty_snap"
+    empty.mkdir()
+    capture_snapshot(root, empty)
+    assert (empty / "payload").is_dir()
+
+
+def test_restore_blocked_while_app_holds_state_lock(tmp_path: Path) -> None:
+    """评审第二轮 Important：应用运行（持共享锁）时重置 fail closed，关闭后可重置。"""
+    root = tmp_path / "demo"
+    root.mkdir()
+    report = restore_snapshot(SNAPSHOTS_DIR / "frozen", root)
+    assert report.ok
+    shutil.copytree(CONFIG_DIR, root / "config", dirs_exist_ok=True)
+    container = build_container(root / "config" / "app.yaml")
+    try:
+        assert container.state_lock_fd is not None
+        before = _target_fingerprints(root)
+        with pytest.raises(ValueError, match="RESET_LOCKED"):
+            restore_snapshot(SNAPSHOTS_DIR / "initial", root)
+        assert _target_fingerprints(root) == before
+    finally:
+        container.close()
+    assert container.state_lock_fd is None
+    report = restore_snapshot(SNAPSHOTS_DIR / "initial", root)
+    assert report.ok
+    assert report.baseline_version == BASELINE_VERSION
+
+
+def test_restore_rolls_back_partial_seed_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """评审第二轮 Important：种子部分写入后失败，回滚清残留，再恢复不命中冲突。"""
+    root = tmp_path / "demo"
+    root.mkdir()
+    real_copy2 = shutil.copy2
+
+    def flaky_copy2(source, destination, *args, **kwargs):
+        if ".seed-" in str(destination):
+            Path(destination).write_bytes(b"PARTIAL-SEED")
+            raise OSError("INJECTED_PARTIAL_WRITE")
+        return real_copy2(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copy2", flaky_copy2)
+    with pytest.raises(OSError, match="INJECTED_PARTIAL_WRITE"):
+        restore_snapshot(SNAPSHOTS_DIR / "initial", root)
+    monkeypatch.undo()
+    seed = root / BASE_ARCHIVE_REL
+    assert not seed.exists()
+    assert not [item for item in root.rglob("*") if ".seed-" in item.name]
+    report = restore_snapshot(SNAPSHOTS_DIR / "initial", root)
+    assert report.ok
+    assert seed.is_file()
+    assert (
+        hashlib.sha256(seed.read_bytes()).hexdigest()
+        == hashlib.sha256((FIXTURES_DIR / "current_product.md").read_bytes()).hexdigest()
+    )
