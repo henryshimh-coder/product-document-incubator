@@ -78,17 +78,25 @@
 
 对应测试：`test_capture_refuses_to_overwrite_non_snapshot_directory`、`test_capture_allows_recapture_over_snapshot_shaped_directory`、`test_restore_blocked_while_app_holds_state_lock`、`test_restore_rolls_back_partial_seed_copy`；R14 三连重置测试适配为「先 `container.close()` 再重置」。
 
-## 完整验证结果（2026-08-06 第二轮整改后，当前有效）
+## 独立评审第三轮整改（2026-08-06 深夜，提交 `f84858f`）
 
-- 全套：`.venv/bin/python -m pytest -q` → `713 passed`（第一轮 709 + 第二轮净增 4）。
-- 覆盖率：domain+application `95%`（TOTAL 2560 行缺 124），门槛 90% 通过。
+第二轮合入后评审再报 1 个 Critical + 1 个 Important，并给出最终修改标准，本轮全部关闭：
+
+1. **Critical：只校验"快照外形"，仍可删除普通目录** → 按最终标准收紧 `_checked_output_dir`：已存在且非空的目录，顶层条目集合必须**恰好**为 `{manifest.json, payload/}`（任何约定外条目直接 `SNAPSHOT_OUTPUT_NONSNAPSHOT`），且必须通过**完整** `verify_snapshot_payload()`（严格清单解析 + 五类载荷哈希全对）才允许被替换；伪快照目录（无效清单 + payload + 业务哨兵文件）拒绝覆盖且哨兵逐字节保留，指定负向测试 `test_capture_refuses_invalid_snapshot_shaped_directory` 同时覆盖"有哨兵"与"仅约定两项但清单无效"两种形态。
+2. **Important：应用获取共享锁的时间太晚** → `build_container` 重构为两段：确认 Manifest 存在后立即 `acquire_shared`（**早于** `migrate()`、Manifest 镜像对账与一切状态访问），主体装配移入 `_build_stateful_container`；`try/except BaseException` 保证构建失败必释放锁，成功时锁随容器持有。指定负向测试 `test_build_container_fails_closed_before_migrate_when_locked`：排他锁占用下 `migrate` 间谍零调用、立即 `APP_STATE_LOCKED`，锁释放后正常构建并持锁。
+
+## 完整验证结果（2026-08-06 第三轮整改后，当前有效）
+
+- 全套：`.venv/bin/python -m pytest -q` → `715 passed`（第二轮 713 + 第三轮净增 2）。
+- 覆盖率：domain+application `95%`（TOTAL 2567 行缺 124），门槛 90% 通过。
 - 静态检查：`ruff check src tests scripts` 全过；`ruff format --check` 153 files；`compileall` 与 `git diff --check` 干净。
 - 联合验收：全新临时根复跑 T10/T11 联合验收 14 步全 PASS，无回归。
 - CLI 冒烟：空目录 `--snapshot initial` / `--snapshot frozen` 恢复均 `RESET_OK` + `VALIDATION_OK baseline=LLD-724_1`，恢复目录零侧车/零 staging 残留。
-- 浏览器复验（第一轮 R15）：`46de3fd` 上完整复现「篡改归档 → 发布失败（`PUBLISH_SOURCE_INTEGRITY_FAILED`）→ 还原重试成功」，服务端状态直查两端均正确，详见 `browser-acceptance.md`；第二轮改动不涉及发布页行为。
+- 浏览器复验（第一轮 R15）：`46de3fd` 上完整复现「篡改归档 → 发布失败（`PUBLISH_SOURCE_INTEGRITY_FAILED`）→ 还原重试成功」，服务端状态直查两端均正确，详见 `browser-acceptance.md`；第二、三轮改动均不涉及发布页行为。
 
 ## 提交
 
 - 初版：分支 `codex/t12-demo-snapshots`，feat `feat: add deterministic demo snapshots and reset` + docs 提交，fast-forward 合入 `feat/lightweight-t01`。
 - 整改第一轮：feat `46de3fd fix: close snapshot safety gaps and wire query lint cache consumers` + docs 提交。
-- 整改第二轮：feat `7fefc1f fix: protect ordinary directories and coordinate reset lock with app`（scripts/src/tests）+ docs 提交；随后 fast-forward 合入 `feat/lightweight-t01`。T12 整改独立提交，未夹入任何 T13 产物。
+- 整改第二轮：feat `7fefc1f fix: protect ordinary directories and coordinate reset lock with app` + docs 提交。
+- 整改第三轮：feat `f84858f fix: require full payload verify before replace and lock before migrate`（scripts/src/tests）+ docs 提交；随后 fast-forward 合入 `feat/lightweight-t01`。T12 整改独立提交，未夹入任何 T13 产物。
