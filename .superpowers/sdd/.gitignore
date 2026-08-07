@@ -1,10 +1,11 @@
-# SDD 工作目录默认忽略；仅放行 T10/T11 正式验收交付材料（v4 M4 白名单）。
+# SDD 工作目录默认忽略；仅放行 T10/T11/T12 正式验收交付材料（v4 M4 白名单，T12 追加）。
 *
 !2026-07-29-product-intelligence-lightweight/
 2026-07-29-product-intelligence-lightweight/*
 !2026-07-29-product-intelligence-lightweight/progress.md
 !2026-07-29-product-intelligence-lightweight/task-10-implementer-report.md
 !2026-07-29-product-intelligence-lightweight/task-11-implementer-report.md
+!2026-07-29-product-intelligence-lightweight/task-12-implementer-report.md
 !2026-07-29-product-intelligence-lightweight/evidence/
 2026-07-29-product-intelligence-lightweight/evidence/*
 !2026-07-29-product-intelligence-lightweight/evidence/t10-t11/
