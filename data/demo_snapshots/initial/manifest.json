@@ -1,0 +1,10 @@
+{
+  "app_version": "0.1.0",
+  "schema_version": "1.0",
+  "baseline_version": "LLD-724_1",
+  "database_sha256": "ae7cfd927a6ae7daaf52e84fb36690cdaed8dce6969ae4321fc52908b2169d9b",
+  "manifest_sha256": "2a70b01005418cb86988f7530e86e81aa9abf4dac94f6fbb4ce762b60f7d10c2",
+  "vault_sha256": "4fbb76c31c0234a0cc94ffb5989e790cade60ebb2c9f9981ca4db00ebc69fb23",
+  "cache_index_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "created_at": "2026-08-07T01:11:39.361173Z"
+}

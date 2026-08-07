@@ -1,0 +1,38 @@
+[
+  {
+    "applicable_scope": "演示",
+    "authority_level": "formal_effective",
+    "card_type": "rule",
+    "confidence": null,
+    "content": "当前目标客群是符合准入要求的存量客户。",
+    "created_at": "2026-07-29T07:00:00Z",
+    "id": "RULE-LLD-001",
+    "owner": "产品经理",
+    "product_version": "LLD-724_1",
+    "project_id": "LLD",
+    "source_refs": [
+      "SRC-LLD-BASE:SRC-LLD-BASE-0004"
+    ],
+    "status": "effective",
+    "title": "目标客群",
+    "updated_at": "2026-07-29T07:00:00Z"
+  },
+  {
+    "applicable_scope": "演示",
+    "authority_level": "formal_effective",
+    "card_type": "market_judgment",
+    "confidence": null,
+    "content": "客户普遍接受该奖励机制。",
+    "created_at": "2026-07-29T07:00:00Z",
+    "id": "MKT-LLD-001",
+    "owner": "产品经理",
+    "product_version": "LLD-724_1",
+    "project_id": "LLD",
+    "source_refs": [
+      "SRC-LLD-BASE:SRC-LLD-BASE-0006"
+    ],
+    "status": "effective",
+    "title": "奖励机制接受度",
+    "updated_at": "2026-07-29T07:00:00Z"
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "approved_by": "产品经理",
+  "card_snapshot_path": "data/obsidian_vault/02_Current_Baseline/LLD-724_1/cards.json",
+  "card_snapshot_sha256": "cf43b5ed3e7e4989873d815b04c8a1dd18da9f931c6c752887fef8035586c87b",
+  "change_request_id": null,
+  "current_baseline_id": "BASE-LLD-724_1",
+  "current_version": "LLD-724_1",
+  "full_document_path": "data/obsidian_vault/02_Current_Baseline/LLD-724_1/full.md",
+  "full_document_sha256": "22f5a78078ab20621fff55ce9b7a3391236925810ff1a9728bf282816eeefc04",
+  "parent_baseline_id": null,
+  "project_id": "LLD",
+  "published_at": "2026-07-29T07:00:00Z",
+  "schema_version": "1.0"
+}
