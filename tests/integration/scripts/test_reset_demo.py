@@ -603,3 +603,53 @@ def test_restore_rolls_back_partial_seed_copy(
         hashlib.sha256(seed.read_bytes()).hexdigest()
         == hashlib.sha256((FIXTURES_DIR / "current_product.md").read_bytes()).hexdigest()
     )
+
+
+def test_capture_refuses_invalid_snapshot_shaped_directory(tmp_path: Path) -> None:
+    """评审第三轮 Critical：伪快照目录（无效清单 + payload + 业务哨兵）拒绝覆盖。"""
+    root = _bootstrapped_root(tmp_path)
+    fake = tmp_path / "fake_snapshot"
+    (fake / "payload").mkdir(parents=True)
+    (fake / "manifest.json").write_text("{not a valid manifest", encoding="utf-8")
+    sentinel = fake / "business-plan.md"
+    sentinel.write_text("业务计划，绝不可被快照删除\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="SNAPSHOT_OUTPUT_NONSNAPSHOT"):
+        capture_snapshot(root, fake)
+    assert sentinel.read_text(encoding="utf-8") == "业务计划，绝不可被快照删除\n"
+    assert (fake / "manifest.json").read_text(encoding="utf-8") == "{not a valid manifest"
+    # 变体：顶层只有约定两项但清单无效/载荷哈希不符，完整复验同样 fail closed。
+    sentinel.unlink()
+    with pytest.raises(ValueError, match="SNAPSHOT_OUTPUT_NONSNAPSHOT"):
+        capture_snapshot(root, fake)
+
+
+def test_build_container_fails_closed_before_migrate_when_locked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """评审第三轮 Important：排他锁占用时 migrate 零调用，立即 APP_STATE_LOCKED。"""
+    root = _bootstrapped_root(tmp_path)
+    shutil.copytree(CONFIG_DIR, root / "config", dirs_exist_ok=True)
+    migrate_calls: list[str] = []
+
+    def spy_migrate(db_path) -> None:
+        migrate_calls.append(str(db_path))
+
+    monkeypatch.setattr("src.application.container.migrate", spy_migrate)
+    lock_path = root / "data" / "local_state" / ".reset.lock"
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with pytest.raises(RuntimeError, match="APP_STATE_LOCKED"):
+            build_container(root / "config" / "app.yaml")
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    assert migrate_calls == []
+    # 锁释放后正常构建：migrate 被调用一次，容器持共享锁。
+    container = build_container(root / "config" / "app.yaml")
+    try:
+        assert migrate_calls == [str(root / "data" / "local_state" / "product_intelligence.db")]
+        assert container.state_lock_fd is not None
+    finally:
+        container.close()

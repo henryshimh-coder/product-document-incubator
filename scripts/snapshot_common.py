@@ -345,12 +345,17 @@ def _checked_output_dir(project_root: Path, snapshot_dir: Path) -> Path:
     if resolved.exists():
         if not resolved.is_dir():
             raise ValueError(f"SNAPSHOT_OUTPUT_UNSAFE:{resolved}")
-        has_content = any(resolved.iterdir())
-        looks_like_snapshot = (resolved / MANIFEST_FILENAME).is_file() and (
-            resolved / PAYLOAD_DIRNAME
-        ).is_dir()
-        if has_content and not looks_like_snapshot:
-            raise ValueError(f"SNAPSHOT_OUTPUT_NONSNAPSHOT:{resolved}")
+        entries = {entry.name for entry in resolved.iterdir()}
+        if entries:
+            # 评审第三轮 Critical 最终标准：仅"外形像快照"不够——顶层不得包含
+            # 快照约定外条目，且必须通过完整 verify_snapshot_payload() 才允许被
+            # 替换；伪快照目录（无效清单）里的业务文件绝不被吞掉。
+            if entries != {MANIFEST_FILENAME, PAYLOAD_DIRNAME}:
+                raise ValueError(f"SNAPSHOT_OUTPUT_NONSNAPSHOT:{resolved}")
+            try:
+                verify_snapshot_payload(resolved)
+            except ValueError as error:
+                raise ValueError(f"SNAPSHOT_OUTPUT_NONSNAPSHOT:{resolved}") from error
     return resolved
 
 

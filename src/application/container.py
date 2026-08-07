@@ -230,6 +230,36 @@ def build_container(
     manifest_path = project_root / "data/local_state/current_baseline.json"
     if not manifest_path.is_file():
         return AppContainer(settings=settings)
+    # 状态锁必须在读取 Manifest、执行迁移或对账之前获取（评审第三轮 Important）；
+    # 构建失败必须释放锁，成功时锁随容器持有直至 close()/进程退出。
+    lock_fd = acquire_shared(project_root)
+    try:
+        return _build_stateful_container(
+            settings,
+            has_explicit_lint_contract,
+            project_root,
+            db_path,
+            manifest_path,
+            environ=environ,
+            http_factory=http_factory,
+            lock_fd=lock_fd,
+        )
+    except BaseException:
+        release(lock_fd)
+        raise
+
+
+def _build_stateful_container(
+    settings: AppSettings,
+    has_explicit_lint_contract: bool,
+    project_root: Path,
+    db_path: Path,
+    manifest_path: Path,
+    *,
+    environ: Mapping[str, str] | None,
+    http_factory,
+    lock_fd: int,
+) -> AppContainer:
     migrate(db_path)
     manifest_store = ManifestStore(manifest_path, project_root=project_root)
     markdown_store = MarkdownStore(project_root)
@@ -329,7 +359,7 @@ def build_container(
     if not all(required):
         return AppContainer(
             settings=settings,
-            state_lock_fd=acquire_shared(project_root),
+            state_lock_fd=lock_fd,
             **local_services,
         )
     if not has_explicit_lint_contract:
@@ -421,7 +451,7 @@ def build_container(
     )
     return AppContainer(
         settings=settings,
-        state_lock_fd=acquire_shared(project_root),
+        state_lock_fd=lock_fd,
         import_source=import_service,
         query=query_service,
         lint=lint_service,
