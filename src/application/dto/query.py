@@ -15,3 +15,4 @@ class RunQueryInput(BaseModel):
     question: Question
     scope: Literal["effective", "effective_with_notices", "historical"]
     historical_version: Identifier | None = None
+    preferred_mode: Literal["realtime", "cache"] = "realtime"

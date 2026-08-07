@@ -65,12 +65,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     arguments = parser.parse_args(argv)
     output = arguments.output or (REPO_ROOT / "data/demo_snapshots" / arguments.name)
-    snapshot = export_snapshot(
-        arguments.root.resolve(),
-        output,
-        freeze_caches=arguments.freeze_demo_caches,
-        fixtures_dir=arguments.fixtures.resolve() if arguments.fixtures else None,
-    )
+    try:
+        snapshot = export_snapshot(
+            arguments.root.resolve(),
+            output,
+            freeze_caches=arguments.freeze_demo_caches,
+            fixtures_dir=arguments.fixtures.resolve() if arguments.fixtures else None,
+        )
+    except ValueError as error:
+        print(f"EXPORT_FAILED errors=[{error}]")
+        return 1
     print(
         f"EXPORT_OK name={arguments.name} baseline={snapshot.baseline_version} "
         f"database_sha256={snapshot.database_sha256}"

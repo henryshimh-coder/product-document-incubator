@@ -371,6 +371,7 @@ def build_container(
         financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
         leader_names=dictionary("REDACTION_LEADER_NAMES"),
         unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
+        cache=AiCache(db_path),
         schema_version=settings.schema_version,
     )
     lint_store = ManifestStore(manifest_path)
@@ -402,6 +403,7 @@ def build_container(
         financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
         leader_names=dictionary("REDACTION_LEADER_NAMES"),
         unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
+        cache=AiCache(db_path),
     )
     return AppContainer(
         settings=settings,

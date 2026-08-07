@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
@@ -34,6 +35,7 @@ from src.domain.errors import DomainError, ErrorCode, OutputValidationError
 from src.domain.models import Baseline, IssueCard, IssueEvidence, LintReport, Relation
 from src.domain.policies.security_policy import can_call_external_model
 from src.domain.services.deterministic_lint import DeterministicFinding, run_rule
+from src.infrastructure.cache.ai_cache import AiCache, CacheIdentity
 from src.infrastructure.files.markdown_store import MarkdownStore
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.gateways._common import (
@@ -208,7 +210,11 @@ class RunLint:
         financial_terms: Iterable[str],
         leader_names: Iterable[str],
         unpublished_decisions: Iterable[str],
+        cache: AiCache | None = None,
         now: Callable[[], datetime] | None = None,
+        prompt_version: str = "lint-v1",
+        model_label: str = "dify-lint",
+        schema_version: str = "1.0",
     ) -> None:
         self.local_lint = local_lint
         self.comparison_builder = comparison_builder
@@ -220,34 +226,65 @@ class RunLint:
         self.financial_terms = tuple(financial_terms)
         self.leader_names = tuple(leader_names)
         self.unpublished_decisions = tuple(unpublished_decisions)
+        self.cache = cache
         self.validator = LintIssueValidator(now=now)
+        self.prompt_version = prompt_version
+        self.model_label = model_label
+        self.schema_version = schema_version
 
     def execute(self, command: RunLintInput) -> LintReport:
         if command.scope == "current_plus_source" and not (command.source_id or "").strip():
             raise DomainError(ErrorCode.LINT_SOURCE_REQUIRED)
         deterministic = list(self.local_lint.run(command))
         comparison = self.comparison_builder.build_minimum(command, deterministic)
-        proof = create_outbound_safety_proof(
-            LintWorkflowInput,
-            comparison.inputs,
-            security_level=comparison.security_level,
-            customer_names=self.customer_names,
-            strategy_terms=self.strategy_terms,
-            financial_terms=self.financial_terms,
-            leader_names=self.leader_names,
-            unpublished_decisions=self.unpublished_decisions,
-            source_total_chars=comparison.source_total_chars,
+        # 缓存身份完全由本次真实运行时输入重建：对比来源（或参与材料合成）内容
+        # 哈希、baseline、prompt、model、schema，任一不同即 miss。
+        identity = CacheIdentity(
+            task_type="lint",
+            source_sha256=comparison.cache_source_sha256,
+            baseline_version=comparison.inputs["baseline_version"],
+            prompt_version=self.prompt_version,
+            model_label=self.model_label,
+            schema_version=self.schema_version,
         )
-        semantic_result = self.gateway.run(
-            comparison.inputs,
-            safety_proof=proof,
-            user=command.project_id,
-        )
-        try:
-            raw_issues = semantic_result["result"]["issues"]
-            workflow_run_id = semantic_result["workflow_run_id"]
-        except (KeyError, TypeError) as error:
-            raise OutputValidationError("LINT_RESULT_INVALID") from error
+        cache_generated_at: datetime | None = None
+        if command.preferred_mode == "cache":
+            cache_entry = (
+                self.cache.get_with_created_at(identity) if self.cache is not None else None
+            )
+            if cache_entry is None:
+                raise DomainError(ErrorCode.CACHE_NOT_FOUND)
+            raw_result, cache_generated_at = cache_entry
+            try:
+                raw_issues = raw_result["issues"]
+            except (KeyError, TypeError) as error:
+                raise OutputValidationError("LINT_RESULT_INVALID") from error
+            # 缓存证据必须逐项锚定本次真实构建的对比输入，伪造 citation、版本、
+            # locator 或目标规则在任何领域写入前 fail closed。
+            _validate_cached_issue_evidence(raw_issues, comparison.inputs)
+            workflow_run_id = None
+        else:
+            proof = create_outbound_safety_proof(
+                LintWorkflowInput,
+                comparison.inputs,
+                security_level=comparison.security_level,
+                customer_names=self.customer_names,
+                strategy_terms=self.strategy_terms,
+                financial_terms=self.financial_terms,
+                leader_names=self.leader_names,
+                unpublished_decisions=self.unpublished_decisions,
+                source_total_chars=comparison.source_total_chars,
+            )
+            semantic_result = self.gateway.run(
+                comparison.inputs,
+                safety_proof=proof,
+                user=command.project_id,
+            )
+            try:
+                raw_issues = semantic_result["result"]["issues"]
+                workflow_run_id = semantic_result["workflow_run_id"]
+            except (KeyError, TypeError) as error:
+                raise OutputValidationError("LINT_RESULT_INVALID") from error
         citation_targets = {
             item["citation_id"]: item["id"] for item in comparison.inputs.get("baseline_rules", [])
         }
@@ -259,6 +296,7 @@ class RunLint:
                 validated.append(
                     self.validator.validate_finding(item, project_id=command.project_id)
                 )
+        # 缓存与实时的语义输出走完全相同的领域校验、去重与事务性持久化。
         for payload in raw_issues:
             target_rule_id = next(
                 (
@@ -290,12 +328,26 @@ class RunLint:
             if issue.target_rule_id
         ]
         self.unit_of_work.apply(issues=deduplicated, relations=relations)
+        if command.preferred_mode != "cache" and self.cache is not None:
+            try:
+                self.cache.put(
+                    identity,
+                    {"schema_version": self.schema_version, "issues": raw_issues},
+                )
+            except (OSError, sqlite3.Error, TypeError):
+                # Lint 已成功；缓存回填是可恢复动作，不得把成功变成失败。
+                pass
         return LintReport(
             issues=deduplicated,
             deterministic_count=len(deterministic),
             semantic_count=len(raw_issues),
-            result_mode=CallResultMode.REALTIME,
+            result_mode=(
+                CallResultMode.CACHE
+                if command.preferred_mode == "cache"
+                else CallResultMode.REALTIME
+            ),
             model_call_id=workflow_run_id,
+            cache_generated_at=cache_generated_at,
         )
 
     def list_open(self, project_id: str) -> list[IssueCard]:
@@ -619,10 +671,19 @@ class SafeLintComparisonBuilder:
             if any(item.security_level == SecurityLevel.L2_INTERNAL for item in materials)
             else SecurityLevel.L1_PUBLIC_SIMULATED
         )
+        if selected_source is not None:
+            # current_plus_source：缓存身份绑定对比来源的真实内容哈希。
+            cache_source_sha256 = selected_source.sha256
+        else:
+            # 其余范围：绑定全部参与材料内容哈希的确定性合成。
+            cache_source_sha256 = hashlib.sha256(
+                "\n".join(sorted({material.sha256 for material in materials})).encode("utf-8")
+            ).hexdigest()
         return LintComparisonPackage(
             inputs=inputs,
             source_total_chars=self.material_reader.total_chars(materials),
             security_level=security_level,
+            cache_source_sha256=cache_source_sha256,
         )
 
 
@@ -644,6 +705,34 @@ def issue_fingerprint(
         )
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _validate_cached_issue_evidence(raw_issues: Any, inputs: Mapping[str, Any]) -> None:
+    """缓存语义结果的每条证据必须逐项锚定本次真实构建的对比输入。
+
+    实时路径的 citation 绑定是尽力而为（未命中仅意味着 target_rule_id=None），
+    缓存路径必须更严格：citation_id 不属于当前输入、或 source_id/excerpt/
+    document_version/page_or_section 任一不符，都在任何领域写入前 fail closed。
+    """
+    anchors: dict[str, dict[str, str]] = {}
+    for entry in inputs.get("baseline_rules", []):
+        anchors[f"current_baseline:{entry['citation_id']}"] = entry
+    for entry in inputs.get("comparison_items", []):
+        anchors[f"challenging_source:{entry['citation_id']}"] = entry
+    if not isinstance(raw_issues, list):
+        raise OutputValidationError("LINT_RESULT_INVALID")
+    for issue in raw_issues:
+        evidence = issue.get("evidence", []) if isinstance(issue, Mapping) else []
+        for item in evidence:
+            if not isinstance(item, Mapping):
+                raise OutputValidationError("LINT_CACHE_EVIDENCE_MISMATCH")
+            side = item.get("side", "")
+            anchor = anchors.get(f"{side}:{item.get('citation_id', '')}")
+            if anchor is None:
+                raise OutputValidationError("LINT_CACHE_EVIDENCE_UNKNOWN_CITATION")
+            for field_name in ("source_id", "excerpt", "document_version", "page_or_section"):
+                if item.get(field_name) != anchor[field_name]:
+                    raise OutputValidationError("LINT_CACHE_EVIDENCE_MISMATCH")
 
 
 def _deduplicate(issues: Sequence[IssueCard]) -> list[IssueCard]:

@@ -48,7 +48,11 @@ def main(argv: list[str] | None = None) -> int:
         help="快照名或快照目录（默认 initial）。",
     )
     arguments = parser.parse_args(argv)
-    report = reset_demo(arguments.snapshot, arguments.root.resolve())
+    try:
+        report = reset_demo(arguments.snapshot, arguments.root.resolve())
+    except ValueError as error:
+        print(f"RESET_FAILED errors=[{error}]")
+        return 1
     if not report.ok:
         print(f"RESET_FAILED errors={report.errors}")
         return 1

@@ -223,6 +223,7 @@ def test_historical_query_submits_the_explicitly_selected_version_once() -> None
         "question": "历史客群规则是什么？",
         "scope": "historical",
         "historical_version": "LLD-700_1",
+        "preferred_mode": "realtime",
     }
 
 

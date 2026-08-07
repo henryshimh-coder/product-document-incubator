@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol
@@ -15,7 +16,7 @@ from src.application.ports.repositories import (
     ProjectRepository,
     SourceRepository,
 )
-from src.domain.enums import BaselineStatus, KnowledgeStatus, SecurityLevel
+from src.domain.enums import BaselineStatus, CallResultMode, KnowledgeStatus, SecurityLevel
 from src.domain.errors import DomainError, ErrorCode, OutputValidationError
 from src.domain.models import (
     Baseline,
@@ -31,6 +32,7 @@ from src.domain.services.citation_validator import (
     all_claims_have_direct_support,
     contains_normalized_statement,
 )
+from src.infrastructure.cache.ai_cache import AiCache, CacheIdentity
 from src.infrastructure.files.query_material_reader import VerifiedQueryMaterial
 from src.infrastructure.gateways._common import (
     create_outbound_safety_proof,
@@ -85,7 +87,10 @@ class RunQuery:
         financial_terms: Iterable[str],
         leader_names: Iterable[str],
         unpublished_decisions: Iterable[str],
+        cache: AiCache | None = None,
         task_id_factory: Callable[[], str] | None = None,
+        prompt_version: str = "query-v1",
+        model_label: str = "dify-query",
         schema_version: str = "1.0",
     ) -> None:
         self.manifest = manifest
@@ -101,7 +106,10 @@ class RunQuery:
         self.financial_terms = tuple(financial_terms)
         self.leader_names = tuple(leader_names)
         self.unpublished_decisions = tuple(unpublished_decisions)
+        self.cache = cache
         self.task_id_factory = task_id_factory or (lambda: new_workflow_task_id("TASK-QUERY"))
+        self.prompt_version = prompt_version
+        self.model_label = model_label
         self.schema_version = schema_version
 
     def list_historical_versions(self, project_id: str) -> tuple[str, ...]:
@@ -176,14 +184,38 @@ class RunQuery:
             unpublished_decisions=self.unpublished_decisions,
             source_total_chars=source_total_chars,
         )
-        gateway_result = self.gateway.run(inputs, safety_proof=proof, user=command.project_id)
+        # 缓存身份完全由本次真实运行时输入重建：基线材料（历史范围为快照）内容
+        # 哈希、baseline、prompt、model、schema 与规范化 question，任一不同即 miss。
+        identity = CacheIdentity(
+            task_type="query",
+            source_sha256=(
+                baseline_material.sha256 if baseline_material is not None else snapshot_sha256
+            ),
+            baseline_version=version,
+            prompt_version=self.prompt_version,
+            model_label=self.model_label,
+            schema_version=self.schema_version,
+            question=command.question,
+        )
+        cache_generated_at = None
+        if command.preferred_mode == "cache":
+            cache_entry = (
+                self.cache.get_with_created_at(identity) if self.cache is not None else None
+            )
+            if cache_entry is None:
+                raise DomainError(ErrorCode.CACHE_NOT_FOUND)
+            raw_result, cache_generated_at = cache_entry
+            gateway_result = {"result": raw_result}
+        else:
+            gateway_result = self.gateway.run(inputs, safety_proof=proof, user=command.project_id)
         snapshot_after = self.manifest.read_snapshot()
         if snapshot_after != snapshot_before:
             raise DomainError(
                 ErrorCode.BASELINE_INTEGRITY_FAILED,
                 "MANIFEST_CHANGED_DURING_QUERY",
             )
-        return self._validate_response(
+        # 缓存输出与实时输出走完全相同的 schema、citation、版本与安全边界校验。
+        response = self._validate_response(
             gateway_result,
             version=version,
             cards=cards,
@@ -191,6 +223,21 @@ class RunQuery:
             citations=citations,
             notices=notices,
         )
+        if command.preferred_mode == "cache":
+            return response.model_copy(
+                update={
+                    "result_mode": CallResultMode.CACHE,
+                    "model_call_id": None,
+                    "cache_generated_at": cache_generated_at,
+                }
+            )
+        if self.cache is not None:
+            try:
+                self.cache.put(identity, gateway_result["result"])
+            except (KeyError, OSError, sqlite3.Error):
+                # 查询已成功；缓存回填是可恢复动作，不得把成功变成失败。
+                pass
+        return response
 
     def _resolve_scope(
         self,

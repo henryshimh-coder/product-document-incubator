@@ -15,6 +15,7 @@ class RunLintInput(LintDto):
     project_id: str
     scope: Literal["current", "current_plus_source", "all_current_sources"]
     source_id: str | None = None
+    preferred_mode: Literal["realtime", "cache"] = "realtime"
 
 
 class ListLintIssuesInput(LintDto):
@@ -34,3 +35,6 @@ class LintComparisonPackage(LintDto):
     inputs: dict[str, Any]
     source_total_chars: int
     security_level: SecurityLevel
+    # 缓存身份的来源 SHA-256：current_plus_source 为对比来源，其余为参与材料
+    # 内容哈希的确定性合成；必须由真实运行时输入重建。
+    cache_source_sha256: str = ""

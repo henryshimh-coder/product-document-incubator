@@ -287,6 +287,7 @@ class QueryResponse(DomainModel):
     evidence_sufficiency: Literal["sufficient", "partial", "insufficient"]
     result_mode: CallResultMode
     model_call_id: NonEmptyStr | None
+    cache_generated_at: datetime | None = None
 
 
 class IngestResultView(DomainModel):
@@ -320,6 +321,7 @@ class LintReport(DomainModel):
     semantic_count: NonNegativeInt
     result_mode: CallResultMode
     model_call_id: NonEmptyStr | None
+    cache_generated_at: datetime | None = None
 
 
 class DecisionResult(DomainModel):
