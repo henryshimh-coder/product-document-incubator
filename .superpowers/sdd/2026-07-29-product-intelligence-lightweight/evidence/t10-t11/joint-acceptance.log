@@ -3,9 +3,9 @@
 [PASS] 02 导入三份材料: risk=SRC-739BF7DF1497A8C1 生成 1 张候选卡；relations=4
 [PASS] 03 当前查询 (V3-A02): answer='当前目标客群是符合准入要求的存量客户。', version=LLD-724_1, citation_excerpts=['当前目标客群是符合准入要求的存量客户。']
 [PASS] 04 Lint: issue=ISSUE-74C2DDBE13743AEA87E0, relations=5
-[PASS] 05 人工决定: decision=DECISION-4538F8770B194D5C96F4106F1383070F, change=CHANGE-073C9B2F61C140A0AF290A7AE56A0A61, relations=7
-[PASS] 05b 决定幂等重放: 重放返回原决定 DECISION-4538F8770B194D5C96F4106F1383070F，relations 仍为 7
-[PASS] 06 人工批准: change=CHANGE-073C9B2F61C140A0AF290A7AE56A0A61 approved
+[PASS] 05 人工决定: decision=DECISION-32A31C0E95E542C7B4FC3FA0B18C60EE, change=CHANGE-5FBE505AFC344F8CBD2CB0A2AB4A0685, relations=7
+[PASS] 05b 决定幂等重放: 重放返回原决定 DECISION-32A31C0E95E542C7B4FC3FA0B18C60EE，relations 仍为 7
+[PASS] 06 人工批准: change=CHANGE-5FBE505AFC344F8CBD2CB0A2AB4A0685 approved
 [PASS] 07 原子发布: baseline=BASE-LLD-724_2 effective，relations=9（+approved_as/supersedes）
 [PASS] 08 发布后当前查询 (V3-A03): answer='目标客群收紧为符合准入要求且通过风险评估的存量客户。', version=LLD-724_2, citation_excerpts=['目标客群收紧为符合准入要求且通过风险评估的存量客户。']
 [PASS] 09 历史查询 (V3-A04): answer='当前目标客群是符合准入要求的存量客户。', version=LLD-724_1, citation_excerpts=['当前目标客群是符合准入要求的存量客户。']
