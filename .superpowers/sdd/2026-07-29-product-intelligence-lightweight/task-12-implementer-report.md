@@ -68,16 +68,27 @@
 
 第 18 条（独立 reviewer 复验签认）留待评审方执行，本报告不代签。
 
-## 完整验证结果（2026-08-06 整改轮，当前有效）
+## 独立评审第二轮整改（2026-08-06，提交 `7fefc1f`）
 
-- 全套：`.venv/bin/python -m pytest -q` → `709 passed`（初版 690 + 整改净增 19）。
-- 覆盖率：domain+application `95%`，门槛 90% 通过。
-- 静态检查：`ruff check src tests scripts` 全过；`ruff format` 已应用；`compileall` 与 `git diff --check` 干净。
-- 联合验收：全新临时根复跑 T10/T11 联合验收 14 步全 PASS，无回归（realtime 路径 auto-put 缓存属预期新行为，无副作用）。
+第一轮合入后评审再报 1 个 Critical + 2 个 Important，本轮全部关闭：
+
+1. **Critical：任意普通目录仍可被快照覆盖** → `_checked_output_dir` 新增非快照拒止：输出目录已存在且含内容时，必须是快照形态（`manifest.json` + `payload/`）才允许被原子换入，否则 `SNAPSHOT_OUTPUT_NONSNAPSHOT` fail closed；`project_root/src` 等目录内的哨兵文件逐字节保留。快照形态目录允许重复捕获换入、空目录允许使用（两项回归同测锁定）。
+2. **Important：重置锁未与应用协同** → 新增 `src/infrastructure/db/state_lock.py`（`STATE_LOCK_REL` 单一来源）：`build_container` 返回可用容器前持 `LOCK_SH|LOCK_NB`（重置进行中则 `APP_STATE_LOCKED` fail closed），`restore_snapshot` 持 `LOCK_EX|LOCK_NB`（应用运行则 `RESET_LOCKED`），分裂状态在锁层被排除；`AppContainer.close()` 幂等释放（进程退出时 flock 亦自动释放）。应用持锁期间重置被拒且四目标指纹不变、关闭后恢复成功，集成测试锁定。
+3. **Important：来源种子部分复制失败无法完整回滚** → 种子复制改为「先登记回滚 + 临时文件 + `os.replace` 原子换入 + finally 清临时文件」：注入部分写入后失败，目标路径不出现残缺文件、无 `.seed-*.tmp` 残留，下一次恢复不命中 `ARCHIVE_CONFLICT`（负向测试锁定）。
+
+对应测试：`test_capture_refuses_to_overwrite_non_snapshot_directory`、`test_capture_allows_recapture_over_snapshot_shaped_directory`、`test_restore_blocked_while_app_holds_state_lock`、`test_restore_rolls_back_partial_seed_copy`；R14 三连重置测试适配为「先 `container.close()` 再重置」。
+
+## 完整验证结果（2026-08-06 第二轮整改后，当前有效）
+
+- 全套：`.venv/bin/python -m pytest -q` → `713 passed`（第一轮 709 + 第二轮净增 4）。
+- 覆盖率：domain+application `95%`（TOTAL 2560 行缺 124），门槛 90% 通过。
+- 静态检查：`ruff check src tests scripts` 全过；`ruff format --check` 153 files；`compileall` 与 `git diff --check` 干净。
+- 联合验收：全新临时根复跑 T10/T11 联合验收 14 步全 PASS，无回归。
 - CLI 冒烟：空目录 `--snapshot initial` / `--snapshot frozen` 恢复均 `RESET_OK` + `VALIDATION_OK baseline=LLD-724_1`，恢复目录零侧车/零 staging 残留。
-- 浏览器复验：`46de3fd` 上完整复现「篡改归档 → 发布失败（`PUBLISH_SOURCE_INTEGRITY_FAILED`）→ 还原重试成功」，服务端状态直查两端均正确，详见 `browser-acceptance.md`。
+- 浏览器复验（第一轮 R15）：`46de3fd` 上完整复现「篡改归档 → 发布失败（`PUBLISH_SOURCE_INTEGRITY_FAILED`）→ 还原重试成功」，服务端状态直查两端均正确，详见 `browser-acceptance.md`；第二轮改动不涉及发布页行为。
 
 ## 提交
 
 - 初版：分支 `codex/t12-demo-snapshots`，feat `feat: add deterministic demo snapshots and reset` + docs 提交，fast-forward 合入 `feat/lightweight-t01`。
-- 整改轮：分支 `codex/t12-remediation`，feat `46de3fd fix: close snapshot safety gaps and wire query lint cache consumers`（src/scripts/tests/data/demo_snapshots），docs（本报告、progress 台账、评审文档、浏览器证据、联合验收日志）单独提交；随后 fast-forward 合入 `feat/lightweight-t01`。T12 整改独立提交，未夹入任何 T13 产物。
+- 整改第一轮：feat `46de3fd fix: close snapshot safety gaps and wire query lint cache consumers` + docs 提交。
+- 整改第二轮：feat `7fefc1f fix: protect ordinary directories and coordinate reset lock with app`（scripts/src/tests）+ docs 提交；随后 fast-forward 合入 `feat/lightweight-t01`。T12 整改独立提交，未夹入任何 T13 产物。
