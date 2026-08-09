@@ -38,14 +38,21 @@ def _build(
     monkeypatch: pytest.MonkeyPatch,
     timeout_tasks: frozenset[str],
     http_factory=None,
+    record: list[dict] | None = None,
 ) -> AppContainer:
     # 归档与缓存根目录按 CWD 解析，固定到临时工程根。
     monkeypatch.chdir(root)
     return build_container(
         root / "config" / "app.yaml",
         environ=MOCK_ENVIRON,
-        http_factory=http_factory or (lambda: mock_http_factory(timeout_tasks)),
+        http_factory=http_factory or (lambda: mock_http_factory(timeout_tasks, record=record)),
     )
+
+
+@pytest.fixture
+def gateway_calls() -> list[dict]:
+    """按时间顺序收集本轮测试的全部出站网关调用（顺序敏感断言的见证）。"""
+    return []
 
 
 @pytest.fixture
@@ -81,8 +88,12 @@ def demo_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def container(demo_root: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[AppContainer]:
-    container = _build(demo_root, monkeypatch, frozenset())
+def container(
+    demo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gateway_calls: list[dict],
+) -> Iterator[AppContainer]:
+    container = _build(demo_root, monkeypatch, frozenset(), record=gateway_calls)
     try:
         yield container
     finally:

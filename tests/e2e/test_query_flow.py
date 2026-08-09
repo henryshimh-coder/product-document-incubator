@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from streamlit.testing.v1 import AppTest
 
+from src.domain.enums import CallResultMode
 from src.domain.models import QueryResponse
 
 
@@ -167,7 +168,7 @@ def test_cached_result_shows_frozen_cache_baseline_and_generation_time() -> None
         _response()
         .model_copy(
             update={
-                "result_mode": "cache",
+                "result_mode": CallResultMode.CACHE,
                 "model_call_id": None,
                 "cache_generated_at": cached_at,
             }
