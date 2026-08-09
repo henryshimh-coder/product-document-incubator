@@ -11,9 +11,10 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| 测试总数 | 727 |
-| 通过 | 727 |
+| 测试总数 | 730 |
+| 通过 | 730 |
 | 失败 | 0 |
+| 警告 | 0（T13-O04 已消除 Pydantic 枚举序列化警告） |
 | 领域 + application 覆盖率（计划门槛口径） | 95.40%（2587 语句，119 未覆盖；门槛 ≥85%，达标） |
 | 全 src 覆盖率（参考口径） | 93%（5800 语句，426 未覆盖） |
 
@@ -22,7 +23,7 @@
 ```bash
 .venv/bin/python -m pytest -q --cov=src/domain --cov=src/application \
   --cov-report=term --cov-fail-under=85
-# Required test coverage of 85% reached. Total coverage: 95.40%. 725 passed.
+# Required test coverage of 85% reached. Total coverage: 95.40%. 730 passed.
 ```
 
 ## 二、黄金指标（真实复算值）
@@ -42,14 +43,16 @@
 
 ## 三、E2E 与安全测试
 
-- `tests/golden` + `tests/e2e` + `tests/security` 合计 80 项，全部通过。
-- 计划点名的 4 个 E2E 场景共 6 测试，全部通过：
-  - 完整成功链路（导入→查询→自检→会议决定→变更单→审批→发布→Manifest/基线落账）：`test_full_success.py::test_complete_governed_product_change`
+- `tests/golden` + `tests/e2e` + `tests/security` 合计 83 项，全部通过，0 警告。
+- 计划点名的 4 个 E2E 场景共 8 测试，全部通过：
+  - 完整成功链路（**导入→查询→自检→决定→变更单→审批→发布→发布后查询**，计划规定顺序）：`test_full_success.py::test_complete_governed_product_change`
   - 发布产物断言的破坏性反证（产物被改回旧规则时断言必然失败）：`test_full_success.py::test_publish_artifact_assertions_fail_when_content_reverted`
+  - SQLite 生效卡片断言的破坏性反证（`content`/`product_version`/`status` 任一被篡改时断言必然失败，参数化 3 例）：`test_full_success.py::test_sqlite_effective_card_assertions_fail_when_tampered`
   - 实时超时回退精确缓存并继续：`test_realtime_timeout_fallback.py`
   - 发布失败保持旧版本（Manifest 逐字节不变）：`test_release_failure.py`
   - 安全阻断（L3 资料绝不发起模型调用）：`test_security_block.py`
-- 完整成功 E2E 的发布内容证明（独立评审 T13-R02 整改后）：删除恒真断言，改为从 Manifest 指向的可信产物验证——`full.md` 含新规则文本且不再含旧规则文本；`cards.json` 中 `RULE-LLD-001.content == 变更单 after_content`；发布后实时查询的回答与版本分别等于新规则文本与 `LLD-724_2`；保留旧基线 `superseded` / 新基线 `effective` / Manifest 指向新版本的既有断言。
+- 完整成功 E2E 的流程顺序证明（T13-R03 整改后）：出站网关调用的前三次必须为 `ingest → query → lint`（网关级顺序见证 `gateway_calls`）；变异实证——把 Query 移回导入前时断言以 `['query','ingest','lint'] != ['ingest','query','lint']` 失败，恢复规定顺序后通过。导入后、发布前的查询断言 `baseline_version == LLD-724_1` 且存在 citations。
+- 完整成功 E2E 的三方一致证明（T13-R02/R03 整改后）：删除恒真断言，直接验证三方——发布产物（`full.md` 含新规则文本且不再含旧规则文本；`cards.json` 中 `RULE-LLD-001.content == 变更单 after_content`）；SQLite 生效卡片（`knowledge_cards` 直接断言 `id=RULE-LLD-001`、`product_version=LLD-724_2`、`status=effective`、`content=新规则文本`）；Manifest（指向新版本，旧基线 `superseded`、新基线 `effective`）。发布后实时查询的回答与版本分别等于新规则文本与 `LLD-724_2`。
 - 安全测试要点：
   - Prompt 注入文本只落入 `inputs.source_chunks[...]`，顶层键全集不含越权字段；
   - 证件号/手机号在出站前掩码为 `[已脱敏:id_card]` / `[已脱敏:phone]`，日志与安全证明复核无残留（`tests/security/test_log_redaction.py`、`test_prompt_injection.py`）。
@@ -57,9 +60,9 @@
 ## 四、三次连续全流程（计划 Step 9，重置与测试分别 fail-fast）
 
 ```text
-RUN 1: RESET_OK snapshot=initial → VALIDATION_OK baseline=LLD-724_1 → test_full_success 2 passed
-RUN 2: RESET_OK snapshot=initial → VALIDATION_OK baseline=LLD-724_1 → test_full_success 2 passed
-RUN 3: RESET_OK snapshot=initial → VALIDATION_OK baseline=LLD-724_1 → test_full_success 2 passed
+RUN 1: RESET_OK snapshot=initial → VALIDATION_OK baseline=LLD-724_1 → test_full_success 5 passed
+RUN 2: RESET_OK snapshot=initial → VALIDATION_OK baseline=LLD-724_1 → test_full_success 5 passed
+RUN 3: RESET_OK snapshot=initial → VALIDATION_OK baseline=LLD-724_1 → test_full_success 5 passed
 ```
 
 执行形式（重置与测试各自 fail-fast，不以循环最终退出码代替恢复证据）：
@@ -85,10 +88,12 @@ done
 3. 旧 UI 测试 9 个用例因导入页默认值变化失败 → 显式设置适用版本（`tests/e2e/test_ingest_flow.py`）。
 4. 追溯主链断链：ingest 来源冲突问题未持久化 `target_rule_id` 与规则卡回连关系，发布后追溯主链仍终止于已替代基线 → `import_source._to_domain` 持久化回连（与 run_lint 同约定）、`IngestUnitOfWork.complete` 补齐 `target_rule_id` 列、`build_trace._walk_chain` 同级多链决胜改为「链长 + 链尾节点发生时间」；新增回归测试 `test_trace_prefers_latest_complete_chain_on_ties`。
 
-## 六之二、独立评审整改（2026-08-09，T13-R01/T13-R02 已关闭）
+## 六之二、独立评审整改（2026-08-09，T13-R01/T13-R02/T13-R03 已关闭）
 
 - **T13-R01（查询页冻结缓存态证据缺口）**：查询页新增「查询方式：实时查询／冻结缓存」选择（`preferred_mode` 透传至 `RunQueryInput`）；缓存态标签由「演示缓存」更正为「冻结缓存」，与缓存生成时间同行单行展示。新增 UI 回归测试 `test_cached_result_shows_frozen_cache_baseline_and_generation_time`——移除缓存标签映射时失败、恢复后通过（变异已实证）。浏览器实演：从 frozen 快照恢复独立目录启动应用，选择冻结缓存执行「当前目标客群是什么？」，命中真实冻结缓存，1440×1024 截图同屏可见问题、回答、基线版本 `LLD-724_1` 与「冻结缓存 · 缓存生成时间 2026-08-07T04:20:46+00:00」，无横向滚动、无标签截断（`03b-query-cache.png`；查询方式区补充 `03c-query-cache-mode.png`）。
 - **T13-R02（完整成功 E2E 恒真断言）**：见第三节。恒真断言已删除，发布产物内容、SQLite 生效卡片与 Manifest 三方版本/内容一致；破坏性反证用例常驻套件。
+- **T13-R03（流程顺序与 SQLite 生效卡片验证缺口）**：完整成功 E2E 恢复计划规定顺序「导入→查询→自检」，导入后、发布前的查询断言 `baseline_version == LLD-724_1` 且存在 citations；新增网关级顺序见证 `gateway_calls`，断言出站调用前三次为 `ingest → query → lint`——变异实证：把查询移回导入前时断言失败，恢复后通过。SQLite 生效卡片由间接 baselines 推断改为直接 SQL 断言 `knowledge_cards` 的 `(id, product_version, status, content) == (RULE-LLD-001, LLD-724_2, effective, 新规则文本)`；新增参数化破坏性反证 `test_sqlite_effective_card_assertions_fail_when_tampered`（content/product_version/status 任一篡改时断言必然失败，3 例）。
+- **T13-O04（Pydantic 枚举序列化警告）**：缓存 UI 测试改用 `CallResultMode.CACHE` 枚举替代 `"cache"` 字符串，警告消除；整改后专项 83 项与全量 730 项均为 0 警告。
 - 评审非阻断项处理：静态检查范围已在报告头部如实写明（T13-O02）；三次连续演练已采用重置与测试分别 fail-fast 的形式（T13-O03，见第四节）；首页眉题裁切（T13-O01）保持 Minor 观察项，未在本轮改动。
 
 ## 七、已知限制（如实说明）
@@ -105,7 +110,9 @@ done
 | `c8d658a` | test: verify governed demo workflow and release safety |
 | `9a7e6b9` | fix: 验收中发现的 4 项缺陷修复 |
 | `8ff01c6` | docs: T13 验收证据与测试报告 |
-| （见本文件 git 历史） | fix: 独立评审整改 T13-R01（查询页缓存态 UI）与 T13-R02（发布产物断言） |
-| （见本文件 git 历史） | docs: 整改证据（03b/03c 截图）与报告、台账更新 |
+| `7d73250` | fix: 独立评审整改 T13-R01（查询页缓存态 UI）与 T13-R02（发布产物断言） |
+| `1fb35a2` | docs: 整改证据（03b/03c 截图）与报告、台账更新 |
+| `001894e` | test: 独立评审整改 T13-R03（恢复规定流程顺序、SQLite 生效卡片直接断言）与 T13-O04（枚举警告消除） |
+| （见本文件 git 历史） | docs: R03 整改报告与台账更新 |
 
 最终合入 SHA 与台账见 `.superpowers/sdd/2026-07-29-product-intelligence-lightweight/progress.md`。

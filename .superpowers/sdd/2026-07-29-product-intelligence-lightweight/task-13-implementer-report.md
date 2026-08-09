@@ -2,7 +2,9 @@
 
 > 本报告为 T13 完成时（2026-08-09）的最终事实版。T13 准入门禁（T12 评审签署项）由用户 2026-08-07 直接指令「开始完成T13」放行，此处如实记录。计划中的 `uv run` 一律以 `.venv/bin/python` 等价执行。本轮 E2E 与浏览器验收的外部模型侧为本地 mock 网关（与联合验收同构 fixtures），未连接真实 Dify。
 >
-> **2026-08-09 独立评审整改轮**：评审结论「暂不签署无条件进入 T14，2 项 Important 证据缺口」（`docs/superpowers/handoffs/2026-08-09-t13-independent-review-and-t14-readiness.md`）。T13-R01（查询页冻结缓存态证据）与 T13-R02（完整成功 E2E 恒真断言）均已关闭，见文末整改轮章节；本报告主体数值已按整改后状态更新（727 passed、专项 80 passed）。
+> **2026-08-09 独立评审整改轮**：评审结论「暂不签署无条件进入 T14，2 项 Important 证据缺口」（`docs/superpowers/handoffs/2026-08-09-t13-independent-review-and-t14-readiness.md`）。T13-R01（查询页冻结缓存态证据）与 T13-R02（完整成功 E2E 恒真断言）均已关闭，见文末整改轮章节。
+>
+> **2026-08-09 整改复核第二轮**：复核报告（`docs/superpowers/handoffs/2026-08-09-t13-remediation-rereview-and-t14-readiness.md`）判定 R01 关闭、R02 部分关闭，新增 T13-R03（流程顺序与 SQLite 生效卡片验证缺口）与 T13-O04（枚举序列化警告），均已关闭，见文末第二轮整改章节；本报告主体数值已按最终整改后状态更新（730 passed、专项 83 passed、0 警告）。
 
 ## 实现摘要
 
@@ -43,3 +45,12 @@
 - **T13-R02 关闭（恒真断言改为发布产物断言）**：`tests/e2e/test_full_success.py` 删除 `assert PUBLISHED_RULE_CONTENT`，新增 `_assert_published_artifacts`：从 Manifest 指向的可信产物读取——`full.md` 含 `PUBLISHED_RULE_CONTENT` 且不再含旧规则文本；`cards.json` 中 `RULE-LLD-001.content == PUBLISHED_RULE_CONTENT`（与变更单 `after_content` 一致）；补发布后实时查询断言（回答 == 新规则文本、版本 == `LLD-724_2`）；保留 superseded/effective/Manifest 指向既有断言。常驻破坏性反证用例 `test_publish_artifact_assertions_fail_when_content_reverted`：发布后将 `full.md` 改回旧规则，产物断言必然 `AssertionError`。
 - **非阻断项处理**：T13-O02 报告头部如实写明 scoped ruff 命令（`src scripts tests streamlit_app.py`，163 文件格式检查通过），不把 scoped pass 写成 repo-wide pass；T13-O03 三次连续演练采用重置与测试分别 `|| exit 1` 的形式并记录 `RESET_OK`/`VALIDATION_OK`；T13-O01 首页眉题裁切保持 Minor 观察项。
 - **整改轮验证**：专项 `tests/golden tests/e2e tests/security` 80 passed；全量 727 passed（725+2 新增），domain+application 覆盖率 95.40%（门槛 85）；scoped ruff check/format、compileall、`git diff --check` 全部通过；三次 fail-fast 连续演练均 `RESET_OK → VALIDATION_OK → 2 passed`；工作区干净。
+
+## 整改复核第二轮（2026-08-09，branch codex/t13-remediation，base 6329e56）
+
+复核报告（`docs/superpowers/handoffs/2026-08-09-t13-remediation-rereview-and-t14-readiness.md`）判定 T13-R01 关闭、T13-R02 部分关闭，新增 1 项 Important（T13-R03）与 1 项 Minor（T13-O04），本轮全部关闭。
+
+- **T13-R03 关闭（流程顺序 + SQLite 生效卡片验证）**：`tests/e2e/test_full_success.py` 恢复计划规定顺序「导入→查询→自检」——`_run_flow_to_publish` 内 import_source 之后立即查询并断言 `baseline_version == LLD-724_1` 且 citations 非空，随后才 run_lint；主测试开头不再有导入前查询。新增网关级顺序见证：`conftest.py` 的 `mock_http_factory` 调用挂 `record` 列表，`gateway_calls` fixture 收集出站调用，主测试断言前三次任务为 `["ingest", "query", "lint"]`——变异实证：临时把查询移回导入前，断言以 `['query','ingest','lint'] != ['ingest','query','lint']` 失败，恢复规定顺序后通过。SQLite 生效卡片由间接 baselines 推断改为直接 SQL 断言：`_assert_sqlite_effective_card` 查询 `knowledge_cards` 并断言 `(id, product_version, status, content) == (RULE-LLD-001, LLD-724_2, effective, 新规则文本)`；新增参数化破坏性反证 `test_sqlite_effective_card_assertions_fail_when_tampered`（3 例：content 改回旧文本 / product_version 改回 LLD-724_1 / status 改回 candidate，UPDATE 后断言必然 `AssertionError`）。曾尝试以 model_call_logs 表做顺序见证，实测该表仅 ingest 写调用日志（query/lint 不写），弃用并改用网关 record，如实记录。
+- **T13-O04 关闭（Pydantic 枚举序列化警告）**：`tests/e2e/test_query_flow.py` 改用 `CallResultMode.CACHE` 枚举替代 `"cache"` 字符串字面量，警告消除。
+- **第二轮验证**：专项 `tests/golden tests/e2e tests/security` 83 passed（0 警告）；全量 730 passed（727+3 参数化反证），0 警告，domain+application 覆盖率 95.40%（门槛 85）；scoped ruff check/format（163 文件）、compileall、`git diff --check` 全部通过；三次 fail-fast 连续演练均 `RESET_OK → VALIDATION_OK → 5 passed`；工作区干净。
+- **提交**：`001894e` test: restore mandated flow order and assert sqlite effective card in full-success E2E + docs 提交（测试报告 R03/O04 关闭与 0 警告口径、本报告、台账、复核 handoff 纳入跟踪）。
