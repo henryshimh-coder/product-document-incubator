@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from src.application.dto.trace import BuildTraceInput
 from src.application.ports.baseline_cards import BaselineCardReader
@@ -390,7 +390,9 @@ class BuildTrace:
                     *sub_edges,
                 )
                 candidate = (chain_nodes, chain_edges, sub_missing)
-                if best is None or len(candidate[0]) > len(best[0]):
+                # 先比链长，等长再比链尾节点的发生时间：主链反映当前内容的
+                # 最新一次演化（最新基线），与问题创建顺序无关。
+                if best is None or self._chain_rank(candidate[0]) >= self._chain_rank(best[0]):
                     best = candidate
             if best is None:
                 return (), (), kind
@@ -398,6 +400,10 @@ class BuildTrace:
 
         nodes, edges, missing = walk(card.id, 0)
         return list(nodes), list(edges), missing
+
+    @staticmethod
+    def _chain_rank(chain_nodes: tuple[TraceNode, ...]) -> tuple[int, datetime]:
+        return (len(chain_nodes), chain_nodes[-1].happened_at)
 
     def _first_entity(
         self,

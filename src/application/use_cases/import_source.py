@@ -641,6 +641,7 @@ class ImportSource:
                         status=IssueStatus.OPEN,
                         title=item.title,
                         description=item.content,
+                        target_rule_id=item.target_card_id,
                         evidence=[
                             IssueEvidence(
                                 source_id=target.source_refs[0],
@@ -719,6 +720,21 @@ class ImportSource:
                 created_at=now,
             )
             for card_id in sorted(card_id_set)
+        )
+        # 与 run_lint 同约定：冲突问题必须回连目标规则卡，否则发布后
+        # 追溯主链无法从规则卡走到新决定/变更单/基线（六节点主链只承认持久化 Relation）。
+        relations.extend(
+            Relation(
+                id=f"REL-{issue.target_rule_id}-CONFLICTS-WITH-{issue.id}",
+                project_id=source.project_id,
+                source_id=issue.target_rule_id or "",
+                relation_type="conflicts_with",
+                target_id=issue.id,
+                source_ref=source.id,
+                created_at=now,
+            )
+            for issue in issues
+            if issue.target_rule_id
         )
         return cards, relations, issues
 

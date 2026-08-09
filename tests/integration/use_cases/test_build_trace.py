@@ -47,6 +47,9 @@ from src.infrastructure.files.extractor import extract_document_bytes
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.observability.model_call_logger import ModelCallLogger
 from tests.integration.release_env import (
+    BASE_RULE_CHUNK_ID,
+    BASE_RULE_LOCATOR,
+    BEFORE_CONTENT,
     CHANGE_ID,
     CURRENT_BASELINE_ID,
     CURRENT_VERSION,
@@ -55,6 +58,8 @@ from tests.integration.release_env import (
     NOW,
     PROJECT_ID,
     REVIEWER,
+    RISK_CHUNK_ID,
+    RISK_LOCATOR,
     TARGET_BASELINE_ID,
     TARGET_VERSION,
     _write_source_archive,
@@ -357,6 +362,125 @@ def test_trace_ignores_newer_unconnected_issue_and_decision(tmp_path):
         DECISION_ID,
         CHANGE_ID,
         TARGET_BASELINE_ID,
+    ]
+    assert trace.missing_links == []
+
+
+def test_trace_prefers_latest_complete_chain_on_ties(tmp_path):
+    """同一规则卡存在多条等长完整链时，主链取链尾最新的一条（反映最新基线）。
+
+    新链的问题/决定/变更单创建时间早于旧链（与真实演示数据同构），
+    只有按链尾基线时间决胜才会选中通往最新基线的链。
+    """
+    env = _approved_env(tmp_path)
+    _publish(env)
+    _seed_chain(env)
+    earlier = NOW - timedelta(days=1)
+    later = NOW + timedelta(days=1)
+    newer_issue = "ISSUE-002"
+    newer_decision = "DECISION-002"
+    newer_change = "CHANGE-002"
+    newer_baseline = "BASE-LLD-724_3"
+    SqliteIssueRepository(env.db_path).add_many(
+        [
+            IssueCard(
+                id=newer_issue,
+                project_id=PROJECT_ID,
+                issue_type="conflict",
+                severity=IssueSeverity.PENDING_DECISION,
+                status=IssueStatus.DECIDED,
+                title="客群口径再次收紧",
+                description="年度复核要求并入目标客群口径。",
+                evidence=[
+                    IssueEvidence(
+                        source_id="SRC-BASE",
+                        citation_id=BASE_RULE_CHUNK_ID,
+                        excerpt=BEFORE_CONTENT,
+                        document_version="v1.0",
+                        page_or_section=BASE_RULE_LOCATOR,
+                        side=EvidenceSide.CURRENT_BASELINE,
+                    ),
+                    IssueEvidence(
+                        source_id="SRC-RISK",
+                        citation_id=RISK_CHUNK_ID,
+                        excerpt="风险意见要求收紧客群。",
+                        document_version="v1.0",
+                        page_or_section=RISK_LOCATOR,
+                        side=EvidenceSide.CHALLENGING_SOURCE,
+                    ),
+                ],
+                impacted_domains=["产品"],
+                options=[],
+                ai_recommendation=None,
+                ai_confidence=None,
+                uncertainty="待会议确认",
+                owner=None,
+                due_at=None,
+                created_at=earlier,
+                updated_at=earlier,
+            )
+        ]
+    )
+    SqliteDecisionRepository(env.db_path).add(
+        Decision(
+            id=newer_decision,
+            project_id=PROJECT_ID,
+            issue_id=newer_issue,
+            action=DecisionAction.ACCEPT_CHANGE,
+            conclusion="会议确认再次收紧。",
+            confirmed_by=REVIEWER,
+            responsible_party="产品负责人",
+            due_at=None,
+            verification_condition="回归测试通过且审批完成。",
+            created_at=earlier,
+        ),
+        idempotency_key="DECISION-KEY-002",
+    )
+    env.changes.add(
+        make_change(
+            ChangeStatus.PUBLISHED,
+            change_id=newer_change,
+            target_version="LLD-724_3",
+            idempotency_key="REVIEW-KEY-002",
+        ).model_copy(
+            update={
+                "issue_id": newer_issue,
+                "decision_id": newer_decision,
+                "created_at": earlier,
+                "updated_at": earlier,
+            }
+        )
+    )
+    env.baselines.add(
+        Baseline(
+            id=newer_baseline,
+            project_id=PROJECT_ID,
+            version="LLD-724_3",
+            parent_baseline_id=TARGET_BASELINE_ID,
+            status=BaselineStatus.EFFECTIVE,
+            full_document_path="data/obsidian_vault/02_Current_Baseline/LLD-724_3/full.md",
+            card_snapshot_path="data/obsidian_vault/02_Current_Baseline/LLD-724_3/cards.json",
+            manifest_sha256="d" * 64,
+            change_request_id=newer_change,
+            approved_by=REVIEWER,
+            effective_at=later,
+            created_at=later,
+        )
+    )
+    _add_relation(env, "REL-CONFLICT-2", CARD_ID, "conflicts_with", newer_issue)
+    _add_relation(env, "REL-RESOLVED-2", newer_issue, "resolved_by", newer_decision)
+    _add_relation(env, "REL-PROPOSES-2", newer_decision, "proposes_change_to", newer_change)
+    _add_relation(env, "REL-APPROVED-2", newer_change, "approved_as", newer_baseline)
+
+    trace = _use_case(env).execute(BuildTraceInput(entity_id=CARD_ID))
+
+    assert [node.entity_id for node in trace.main_chain] == [
+        "SRC-BASE",
+        CARD_ID,
+        newer_issue,
+        newer_decision,
+        newer_change,
+        newer_baseline,
     ]
     assert trace.missing_links == []
 

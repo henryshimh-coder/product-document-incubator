@@ -297,7 +297,7 @@ def test_import_source_creates_conflict_without_changing_effective_baseline(
             ).fetchone()[0]
             == 1
         )
-        assert connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 3
         derived = connection.execute(
             "SELECT source_id, target_id FROM relations WHERE relation_type = 'derived_from'"
         ).fetchall()
@@ -306,6 +306,16 @@ def test_import_source_creates_conflict_without_changing_effective_baseline(
         assert derived[0][1] in {
             row[0] for row in connection.execute("SELECT id FROM knowledge_cards").fetchall()
         }
+        issue_row = connection.execute("SELECT id, target_rule_id FROM issue_cards").fetchone()
+        assert issue_row[1] == "RULE-001"
+        conflict_backlink = connection.execute(
+            "SELECT id, source_id, target_id FROM relations"
+            " WHERE relation_type = 'conflicts_with' AND target_id = ?",
+            (issue_row[0],),
+        ).fetchall()
+        assert conflict_backlink == [
+            (f"REL-RULE-001-CONFLICTS-WITH-{issue_row[0]}", "RULE-001", issue_row[0])
+        ]
         evidence = json.loads(
             connection.execute("SELECT evidence_json FROM issue_cards").fetchone()[0]
         )
@@ -348,7 +358,7 @@ def test_completed_duplicate_returns_original_ids_without_rewriting(
             ).fetchone()[0]
             == 1
         )
-        assert connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0] == 3
         assert connection.execute("SELECT COUNT(*) FROM issue_cards").fetchone()[0] == 1
 
 

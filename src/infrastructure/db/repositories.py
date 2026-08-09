@@ -1130,8 +1130,9 @@ class SqliteIngestUnitOfWork:
                     INSERT INTO issue_cards (
                         id, project_id, issue_type, severity, status, title, description,
                         evidence_json, impacted_domains_json, options_json, ai_recommendation,
-                        ai_confidence, uncertainty, owner, due_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ai_confidence, uncertainty, target_rule_id, owner, due_at,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         issue.id,
@@ -1147,6 +1148,7 @@ class SqliteIngestUnitOfWork:
                         issue.ai_recommendation,
                         issue.ai_confidence,
                         issue.uncertainty,
+                        issue.target_rule_id,
                         issue.owner,
                         _iso_or_none(issue.due_at),
                         issue.created_at.isoformat(),

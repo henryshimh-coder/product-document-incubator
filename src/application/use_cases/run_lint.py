@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -39,6 +40,8 @@ from src.infrastructure.cache.ai_cache import AiCache, CacheIdentity
 from src.infrastructure.files.markdown_store import MarkdownStore
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.gateways._common import (
+    MAX_CANONICAL_PAYLOAD_CHARS,
+    MAX_OUTBOUND_COVERAGE,
     create_outbound_safety_proof,
     new_workflow_task_id,
 )
@@ -264,6 +267,15 @@ class RunLint:
             _validate_cached_issue_evidence(raw_issues, comparison.inputs)
             workflow_run_id = None
         else:
+            # 与导入同约定：先以准确错误码拦截覆盖率/尺寸越界，再走完整安全证明，
+            # 避免小材料被笼统报成“资料尚未完成脱敏确认”。
+            outbound_chars = _canonical_input_chars(comparison.inputs)
+            outbound_coverage = outbound_chars / comparison.source_total_chars
+            if (
+                outbound_chars > MAX_CANONICAL_PAYLOAD_CHARS
+                or outbound_coverage > MAX_OUTBOUND_COVERAGE
+            ):
+                raise DomainError(ErrorCode.OUTBOUND_COVERAGE_EXCEEDED)
             proof = create_outbound_safety_proof(
                 LintWorkflowInput,
                 comparison.inputs,
@@ -685,6 +697,18 @@ class SafeLintComparisonBuilder:
             security_level=security_level,
             cache_source_sha256=cache_source_sha256,
         )
+
+
+def _canonical_input_chars(inputs: Mapping[str, Any]) -> int:
+    serialized = LintWorkflowInput.model_validate(inputs).model_dump(mode="json")
+    return len(
+        json.dumps(
+            serialized,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def issue_fingerprint(

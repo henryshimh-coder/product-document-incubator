@@ -7,6 +7,7 @@ import streamlit as st
 from pydantic import BaseModel, ConfigDict
 
 from src.application.container import AppContainer, ImportSourceService
+from src.application.dto.dashboard import GetDashboardInput
 from src.application.dto.ingest import ImportSourceInput
 from src.domain.enums import AuthorityLevel, SecurityLevel
 from src.domain.errors import AppError, ErrorCode
@@ -188,6 +189,19 @@ def build_feedback(error: AppError) -> UserFeedback:
     )
 
 
+def _default_baseline_version(container: AppContainer) -> str:
+    """适用产品版本默认取 Manifest 当前基线，不再硬编码历史版本。"""
+    if container.dashboard is None:
+        return ""
+    try:
+        view = container.dashboard.execute(
+            GetDashboardInput(project_id=container.settings.project_id)
+        )
+    except (KeyError, OSError, ValueError):
+        return ""
+    return "" if view.current_baseline is None else view.current_baseline.version
+
+
 def render(container: AppContainer) -> None:
     st.title("资料导入")
     st.caption(f"为项目 {container.settings.project_id} 导入并编译新资料")
@@ -238,7 +252,7 @@ def render(container: AppContainer) -> None:
             document_version = st.text_input("文件版本 *", key="ingest_version")
             baseline_version = st.text_input(
                 "适用产品版本 *",
-                value="LLD-724_1",
+                value=_default_baseline_version(container),
                 key="ingest_baseline",
             )
             security_level = st.radio(
