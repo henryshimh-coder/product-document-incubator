@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from streamlit.testing.v1 import AppTest
 
 from src.domain.models import QueryResponse
@@ -152,6 +154,41 @@ def test_query_result_renders_required_hierarchy_citation_and_runtime_status() -
     assert len(page.expander) == 1
     assert "CIT-SRC-001-01" in page.expander[0].label
     assert "当前产品方案.md" in page.expander[0].label
+
+
+def test_cached_result_shows_frozen_cache_baseline_and_generation_time() -> None:
+    """Catches the query page hiding frozen-cache provenance or mislabeling it as realtime.
+
+    移除 ``cache`` 标签映射会触发 KeyError 使本用例失败；缓存响应必须同时展示
+    「冻结缓存」、当前基线版本与可审计的缓存生成时间，且不得出现「实时生成」。
+    """
+    cached_at = datetime(2026, 8, 6, 9, 30, 0, tzinfo=UTC)
+    cached_response = QueryResponse.model_validate_json(
+        _response()
+        .model_copy(
+            update={
+                "result_mode": "cache",
+                "model_call_id": None,
+                "cache_generated_at": cached_at,
+            }
+        )
+        .model_dump_json()
+    )
+    page = AppTest.from_function(
+        _render_query_page,
+        args=(cached_response.model_dump_json(),),
+    ).run()
+
+    page.radio(key="query_mode").set_value("cache").run()
+    page = _submit(page)
+
+    assert not page.exception
+    rendered = _html(page)
+    assert "冻结缓存" in rendered
+    assert "LLD-724_1" in rendered
+    assert cached_at.isoformat(timespec="seconds") in rendered
+    assert "实时生成" not in rendered
+    assert page.session_state["query_test_command"]["preferred_mode"] == "cache"
 
 
 def test_candidate_and_conflict_are_not_interpolated_into_the_answer_block() -> None:

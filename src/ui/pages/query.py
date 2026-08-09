@@ -25,6 +25,11 @@ _SCOPE_LABELS = {
     "historical": "指定历史版本",
 }
 
+_MODE_LABELS = {
+    "realtime": "实时查询",
+    "cache": "冻结缓存",
+}
+
 
 def _fill_question(question: str) -> None:
     st.session_state["query_question"] = question
@@ -70,6 +75,16 @@ def render(container: AppContainer) -> None:
         )
         st.caption("历史版本 · 只读查询")
     historical_ready = scope != "historical" or bool((historical_version or "").strip())
+    preferred_mode = st.radio(
+        "查询方式",
+        options=tuple(_MODE_LABELS),
+        format_func=_MODE_LABELS.__getitem__,
+        horizontal=True,
+        index=0,
+        key="query_mode",
+    )
+    if preferred_mode == "cache":
+        st.caption("冻结缓存 · 仅匹配与演示快照完全相同的问题、版本与材料")
 
     with st.form("query_form"):
         question = st.text_input(
@@ -113,6 +128,7 @@ def render(container: AppContainer) -> None:
                 question=question,
                 scope=scope,
                 historical_version=historical_version,
+                preferred_mode=preferred_mode,
             )
         )
     except AppError as error:
@@ -170,10 +186,15 @@ def _render_response(response: QueryResponse, scope: str) -> None:
     _heading("实时／缓存状态", "query-runtime")
     runtime = {
         "realtime": "实时生成",
-        "cache": "演示缓存",
+        "cache": "冻结缓存",
         "local_only": "本地结果",
     }[response.result_mode.value]
+    status_text = runtime
+    if response.result_mode.value == "cache" and response.cache_generated_at is not None:
+        status_text = (
+            f"{runtime} · 缓存生成时间 {response.cache_generated_at.isoformat(timespec='seconds')}"
+        )
     st.markdown(
-        f'<div class="pi-query-status">{escape(runtime)}</div>',
+        f'<div class="pi-query-status">{escape(status_text)}</div>',
         unsafe_allow_html=True,
     )
