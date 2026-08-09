@@ -1,6 +1,8 @@
 # Task 13 实施报告（黄金测试、E2E、安全测试和设计验收）
 
 > 本报告为 T13 完成时（2026-08-09）的最终事实版。T13 准入门禁（T12 评审签署项）由用户 2026-08-07 直接指令「开始完成T13」放行，此处如实记录。计划中的 `uv run` 一律以 `.venv/bin/python` 等价执行。本轮 E2E 与浏览器验收的外部模型侧为本地 mock 网关（与联合验收同构 fixtures），未连接真实 Dify。
+>
+> **2026-08-09 独立评审整改轮**：评审结论「暂不签署无条件进入 T14，2 项 Important 证据缺口」（`docs/superpowers/handoffs/2026-08-09-t13-independent-review-and-t14-readiness.md`）。T13-R01（查询页冻结缓存态证据）与 T13-R02（完整成功 E2E 恒真断言）均已关闭，见文末整改轮章节；本报告主体数值已按整改后状态更新（727 passed、专项 80 passed）。
 
 ## 实现摘要
 
@@ -34,3 +36,10 @@
 - 文档：`docs/qa/ui-acceptance-1440x1024.md`、`docs/qa/test-report-2026-08-24.md`、`docs/qa/ui-1440x1024/*.png`（8 张）
 - 配置：`.gitignore`（再生目录）、`.superpowers/sdd/.gitignore`（T13 报告白名单）
 - 提交与合入记录：见 progress.md 台账（codex/t13 → feat/lightweight-t01 fast-forward）
+
+## 独立评审整改轮（2026-08-09，branch codex/t13-remediation，base 8ff01c6）
+
+- **T13-R01 关闭（查询页冻结缓存态真实 UI 证据）**：`src/ui/pages/query.py` 新增「查询方式」radio（实时查询／冻结缓存，`preferred_mode` 透传 `RunQueryInput`）；缓存态运行时标签由「演示缓存」更正为「冻结缓存」，并与缓存生成时间同行单行展示（`冻结缓存 · 缓存生成时间 <iso>`，单行布局是为满足 1440×1024 一屏同显问题/回答/版本/标签且无截断的刻意设计）。新增 UI 回归测试 `test_cached_result_shows_frozen_cache_baseline_and_generation_time`：断言「冻结缓存」、基线版本、`cache_generated_at` ISO 时间、「实时生成」不出现、命令携带 `preferred_mode=cache`；变异实证——移除 `cache` 标签映射后该用例失败（KeyError→page.exception），恢复后通过。浏览器实演：`data/demo_snapshots/frozen` 恢复至独立目录 `/tmp/t13_frozen_demo`（`restore_snapshot` ok + 复制 config），真实 Chrome 选择冻结缓存执行「当前目标客群是什么？」命中真实冻结缓存；`03b-query-cache.png`（1440×1024）同屏可见问题、回答、`LLD-724_1`、`冻结缓存 · 缓存生成时间 2026-08-07T04:20:46+00:00`，无横向滚动、无标签截断；`03c-query-cache-mode.png` 补证查询方式选择态。
+- **T13-R02 关闭（恒真断言改为发布产物断言）**：`tests/e2e/test_full_success.py` 删除 `assert PUBLISHED_RULE_CONTENT`，新增 `_assert_published_artifacts`：从 Manifest 指向的可信产物读取——`full.md` 含 `PUBLISHED_RULE_CONTENT` 且不再含旧规则文本；`cards.json` 中 `RULE-LLD-001.content == PUBLISHED_RULE_CONTENT`（与变更单 `after_content` 一致）；补发布后实时查询断言（回答 == 新规则文本、版本 == `LLD-724_2`）；保留 superseded/effective/Manifest 指向既有断言。常驻破坏性反证用例 `test_publish_artifact_assertions_fail_when_content_reverted`：发布后将 `full.md` 改回旧规则，产物断言必然 `AssertionError`。
+- **非阻断项处理**：T13-O02 报告头部如实写明 scoped ruff 命令（`src scripts tests streamlit_app.py`，163 文件格式检查通过），不把 scoped pass 写成 repo-wide pass；T13-O03 三次连续演练采用重置与测试分别 `|| exit 1` 的形式并记录 `RESET_OK`/`VALIDATION_OK`；T13-O01 首页眉题裁切保持 Minor 观察项。
+- **整改轮验证**：专项 `tests/golden tests/e2e tests/security` 80 passed；全量 727 passed（725+2 新增），domain+application 覆盖率 95.40%（门槛 85）；scoped ruff check/format、compileall、`git diff --check` 全部通过；三次 fail-fast 连续演练均 `RESET_OK → VALIDATION_OK → 2 passed`；工作区干净。
