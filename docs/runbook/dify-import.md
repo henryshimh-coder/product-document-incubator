@@ -7,9 +7,10 @@
 ## 一、创建三个 Workflow 并取 Key
 
 1. 在 Dify 控制台分别创建三个 **Workflow** 类型应用，建议命名：`产品智策-导入`、`产品智策-查询`、`产品智策-自检`。
-2. 按第四节的最小节点映射编排各工作流，**发布**（只有已发布版本才能被 API 调用）。
-3. 每个应用进入「访问 API / API Access」页，生成**各自独立**的 API Key（`app-` 前缀）。
-4. 将三个 Key 填入项目根 `.env`（模板 `.env.example`；Key 只属于本地环境，绝不提交仓库、截图或日志）：
+2. 为工作区配置任一有效的模型供应商（OpenAI / Anthropic / Gemini / 通义 / 硅基流动等均可，需有可用额度；Dify 托管试用额度耗尽后必须自行配置凭据，否则所有模型调用报 400 "Model is not configured"）。2026-08-09 真实联通演练使用硅基流动 `Pro/deepseek-ai/DeepSeek-V3.2`（temperature 0.1，max_tokens 4096）。
+3. 按第四节的最小节点映射编排各工作流，**发布**（只有已发布版本才能被 API 调用）。
+4. 每个应用进入「访问 API / API Access」页，生成**各自独立**的 API Key（`app-` 前缀）。
+5. 将三个 Key 填入项目根 `.env`（模板 `.env.example`；Key 只属于本地环境，绝不提交仓库、截图或日志）：
 
 ```text
 DIFY_BASE_URL=https://api.dify.ai/v1
@@ -23,6 +24,11 @@ DIFY_LINT_API_KEY=app-...
 ## 二、输入契约（开始节点变量）
 
 三个工作流公共字段：`schema_version`（固定 `"1.0"`）、`project_id`、`baseline_version`、`task_id`、`language`（固定 `"zh-CN"`）。
+
+> **传输编码（硬约束，2026-08-09 实测确认）**：Dify 开始节点变量不支持数组值——`json_object` 类型只接受对象（数组被 API 层拒绝："must be a dict"），`paragraph` 只接受字符串。因此应用在网关层把所有**数组值编码为 JSON 字符串**（`src/infrastructure/gateways/dify_client.py` 的 `encode_for_dify_transport()`，UTF-8 不转义），对象与标量原样传输。对应地：
+>
+> 1. 下表中所有 `[]` 结尾的数组变量，在开始节点必须声明为 **paragraph（长文本）类型**；
+> 2. 每个工作流开始节点之后必须紧跟一个**「解析输入」代码节点**，对数组变量执行 `json.loads(raw or "[]")` 还原为数组，后续节点一律引用解析节点的输出（见第四节）。
 
 ### 导入（Ingest）
 
@@ -107,39 +113,38 @@ DIFY_LINT_API_KEY=app-...
 
 ## 四、最小节点映射
 
-### 导入工作流
+三个工作流统一拓扑（2026-08-09 真实联通演练实测通过的结构）：
 
 ```text
-开始节点：声明第二节导入输入的全部变量
-  → 模型节点：阅读 source_chunks，对照 baseline_rules 产出候选/冲突条目；
-     提示词必须要求：item 逐条附 source_citations（chunk_id 逐字取自输入）、
-     confidence ∈ [0,1]、task_id 原样回传、不发明 chunk 中不存在的文本
-  → 代码/模板节点（可选）：把模型输出整理为第三节导入输出结构
-  → 结束节点：输出变量 result = 上述 JSON
+开始（声明第二节全部变量，数组变量声明为 paragraph）
+  → 解析输入（代码节点：json.loads 还原数组）
+  → 模型（LLM，temperature 0.1，max_tokens ≥ 4096）
+  → JSON 提取（代码节点：剥离 ``` 围栏、截取首个 { 到末个 }，json.loads）
+  → 结束（输出变量名为 result）
 ```
 
-### 查询工作流
+**平台陷阱（均为实测踩坑，必须遵守）**：
 
-```text
-开始节点：声明第二节查询输入的全部变量
-  → 模型节点：仅用 effective_cards 与 citations 回答 question；
-     提示词必须要求：effective_rules 只填卡片 ID（来自输入 effective_cards[].id）、
-     citations 只从输入 citations 原样选取、answer ≤500 字、
-     证据不足时 evidence_sufficiency=insufficient
-  → 结束节点：输出变量 result = 第三节查询输出结构
-```
+1. **节点 ID 只允许字母、数字、下划线，严禁连字符**。Dify 模板引用 `{{#节点ID.变量#}}` 的正则不匹配带连字符的节点 ID：不报错、不插值，模板原文透传给模型（实测 `{{#start-query.question#}}` 原样出现在模型输入中）。手工编排时不要改名，使用 Dify 自动生成的数字 ID 即可；DSL 导入时自定义 ID 必须去连字符。
+2. **max_tokens 必须显式设置（建议 ≥4096）**。缺省时模型输出可能在 JSON 中途截断，`result` 成为非法 JSON 字符串，应用报 `DIFY_RESPONSE_INVALID`（fail-closed）。
+3. 模型输出篇幅要设上限（提示词中约束 items/issues ≤3 条、摘要/描述字数上限），防止长输出截断与超时。
 
-### 自检工作流
+### 导入工作流提示词硬规则
 
-```text
-开始节点：声明第二节自检输入的全部变量（含 input_contract_version="2.0"）
-  → 模型节点：以 deterministic_findings 为锚，比较 baseline_rules 与
-     comparison_items，发现冲突/缺失/过期等问题；
-     提示词必须要求：severity 用 blocking/pending_decision/pending_info、
-     每条 evidence 标注 side=current_baseline|challenging_source 且
-     citation_id 逐字取自对应侧输入、重大问题双侧证据
-  → 结束节点：输出变量 result = 第三节自检输出结构
-```
+- `task_id` 原样回传；`status` 与 `result_type` 固定映射：`candidate→candidate`、`conflict_discussion→conflict`、`information_gap→ai_inferred`；
+- `relations` 硬约束：`conflict_discussion` 条目必须有且仅有 1 条 `conflicts_with` 指向其 `target_card_id`；`candidate` 且 `target_card_id` 非空的条目必须有且仅有 1 条 `proposes_change_to`；其余条目不得有任何关系；`relation_type` 只允许这两种（应用侧逐条校验，违反即 `CONFLICT_RELATION_REQUIRED` / `CANDIDATE_RELATION_REQUIRED` 等 fail-closed）；
+- `source_citations`：`source_id` 等于输入 `source.id`，`chunk_id` / `locator` 逐字等于输入 chunk，`excerpt` 为 chunk 原文逐字连续片段；
+- **`content` 必须是 chunk 原文的逐字连续片段**（下游自检要求条目内容能在来源原文中逐字命中，否则报 `LINT_COMPARISON_TEXT_MISMATCH`）；概括性描述写入 `title`/`summary`。
+
+### 查询工作流提示词硬规则
+
+- 仅用 `effective_cards` 与 `citations` 回答；`effective_rules` 只填卡片 ID；`citations` 只从输入原样选取且与所用卡片 `source_citations` 相交；`answer` ≤500 字且不复述 notices；
+- **有相关生效卡片时 `answer` 必须逐字引用卡片 `content` 作答且 `evidence_sufficiency=sufficient`**，严禁输出"资料不足"类措辞；仅当输入中没有任何相关生效卡片时才允许回答资料不足。
+
+### 自检工作流提示词硬规则
+
+- 以 `deterministic_findings` 为锚比较 `baseline_rules` 与 `comparison_items`；
+- `severity` 用 `blocking`/`pending_decision`/`pending_info`；每条 `evidence` 标注 `side=current_baseline|challenging_source`，`citation_id` 逐字取自对应侧输入；重大问题双侧证据且来自至少两个不同来源。
 
 ## 五、blocking 响应结构
 
@@ -188,3 +193,18 @@ uv run streamlit run streamlit_app.py --server.headless true
 5. 演练结束执行 `reset_demo.py` + `validate_data.py` + 全量测试，全部通过。
 
 如实说明：T13 联合验收的外部模型侧为本地 mock 网关（fixtures 与本契约同构）；本节真实联通演练是交付前必做项，其证据与「干净设备可启动（HTTP 200）」是两类不同证据，交付清单分别记录。
+
+### 2026-08-09 真实联通演练实录（已完成）
+
+环境：干净克隆（仅仓库跟踪文件 + `.env` 三个互异真实 Key）+ `uv sync --frozen`；Dify 云工作区三个已发布工作流；模型硅基流动 `Pro/deepseek-ai/DeepSeek-V3.2`。全链路证据（脱敏，无 Key）存档于 [../qa/dify-live-e2e-2026-08-09.json](../qa/dify-live-e2e-2026-08-09.json)，代码 SHA 见证据内 `git_sha` 字段。
+
+| 步骤 | 结果 | workflow run ID | 耗时 |
+| --- | --- | --- | --- |
+| 真实导入（风险意见） | 产出 1 条 conflict 条目，引用锚定来源 chunk | `a9db4486-9713-4592-99a1-8abcc6bbd99b` | 16.8s |
+| 发布前真实查询 | 命中 LLD-724_1，逐字答出现行规则，引用 `CIT-SRC-LLD-BASE-01` | `ef9f2db9-f96c-4ec7-98a3-210d482e3265` | 16.8s |
+| 真实自检 | 1 条 blocking 冲突，双侧证据（current_baseline + challenging_source） | `7ce68fe5-676a-4e00-a338-ca7e897bf97c` | 28.1s |
+| 决定→变更单→审批→发布 | accept_change → approved → 发布 **LLD-724_1 → LLD-724_2** | （本地治理，无模型调用） | — |
+| 发布后真实查询 | 命中 **LLD-724_2**，逐字答出新规则，引用新版 `CIT-BASE-LLD-724_2-01` | `b6a1e4b6-c67e-471c-bf8e-ae36ad7c00c6` | 14.3s |
+| 追溯主链 | 6 节点齐全（source→knowledge→issue→decision→change→baseline），`missing_links=[]` | — | — |
+
+全链路无重试、无错误码；演练后 `reset_demo` + `validate_data` + 全量测试 + 静态门禁复跑全部通过（见交付清单 v0.1.1 增补节）。

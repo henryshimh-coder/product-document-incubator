@@ -2,7 +2,7 @@
 
 面向产品团队的轻量知识治理演示系统：以 Streamlit 单页应用承载「基线 → 导入 → 查询 → 自检 → 决定 → 变更单 → 审批 → 发布 → 追溯」全链路，外部模型侧为三个独立治理的 Dify Workflow（导入 / 查询 / 自检），本地侧为 SQLite + Markdown Vault + 来源归档的可审计状态。
 
-- 版本：`v0.1.0-lightweight`（2026-08-24 轻量交付）
+- 版本：`v0.1.1-lightweight`（2026-08-24 轻量交付；含 T14 整改增补，基线 `v0.1.0-lightweight` 不变）
 - Python：`>=3.11, <3.13`
 - 依赖管理：`uv`（锁文件 `uv.lock`）
 
@@ -39,7 +39,7 @@ uv run streamlit run streamlit_app.py --server.headless true
 uv run python scripts/reset_demo.py --snapshot initial   # 重置到初始基线 LLD-724_1
 uv run python scripts/reset_demo.py --snapshot frozen    # 重置到冻结演示态（含冻结缓存）
 uv run python scripts/validate_data.py                   # 校验 Manifest / SQLite / 缓存 / 归档
-uv run pytest                                            # 全量自动测试（730 项）
+uv run pytest                                            # 全量自动测试（752 项）
 ```
 
 详细操作手册见 [docs/runbook/](docs/runbook/)：

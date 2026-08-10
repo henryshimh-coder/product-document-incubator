@@ -1,0 +1,130 @@
+{
+  "started_at": "2026-08-10T04:08:57.208064+00:00",
+  "git_sha": "e6b95cbdb7231483385c3b73e0d75e7073a10150",
+  "steps": [
+    {
+      "step": "container_assembled",
+      "at": "2026-08-10T04:08:57.304616+00:00",
+      "ingest": true,
+      "query": true,
+      "lint": true
+    },
+    {
+      "step": "ingest",
+      "at": "2026-08-10T04:09:14.091595+00:00",
+      "elapsed_s": 16.79,
+      "source_id": "SRC-739BF7DF1497A8C1",
+      "candidate_count": 0,
+      "conflict_count": 1,
+      "item_statuses": [
+        "conflict"
+      ],
+      "model_call_id": "CALL-5B647153891346C28D84B6C241BC06BC",
+      "result_mode": "realtime",
+      "dify_workflow_run_id": "a9db4486-9713-4592-99a1-8abcc6bbd99b"
+    },
+    {
+      "step": "query_before_publish",
+      "at": "2026-08-10T04:09:30.877567+00:00",
+      "elapsed_s": 16.79,
+      "baseline_version": "LLD-724_1",
+      "answer": "当前目标客群是符合准入要求的存量客户。",
+      "effective_rules": [
+        "RULE-LLD-001"
+      ],
+      "citation_ids": [
+        "CIT-SRC-LLD-BASE-01"
+      ],
+      "model_call_id": null,
+      "result_mode": "realtime",
+      "dify_workflow_run_id": "ef9f2db9-f96c-4ec7-98a3-210d482e3265"
+    },
+    {
+      "step": "lint",
+      "at": "2026-08-10T04:09:58.945364+00:00",
+      "elapsed_s": 28.07,
+      "issues": 1,
+      "issue_ids": [
+        "ISSUE-74C2DDBE13743AEA87E0"
+      ],
+      "issue_types": [
+        "conflict"
+      ],
+      "severities": [
+        "blocking"
+      ],
+      "evidence_sides": [
+        [
+          "current_baseline",
+          "challenging_source"
+        ]
+      ],
+      "model_call_id": "7ce68fe5-676a-4e00-a338-ca7e897bf97c",
+      "dify_workflow_run_id": "7ce68fe5-676a-4e00-a338-ca7e897bf97c"
+    },
+    {
+      "step": "decision_and_change_request",
+      "at": "2026-08-10T04:09:58.948802+00:00",
+      "decision_id": "DECISION-87A8291467A548348BEB72223FCAF2B5",
+      "change_request_id": "CHANGE-D19CAF9FF2334DACA5143FDCA67A57C9",
+      "action": "accept_change",
+      "target_version": "LLD-724_2"
+    },
+    {
+      "step": "approve",
+      "at": "2026-08-10T04:09:58.951112+00:00",
+      "change_request_id": "CHANGE-D19CAF9FF2334DACA5143FDCA67A57C9",
+      "status": "approved"
+    },
+    {
+      "step": "publish",
+      "at": "2026-08-10T04:09:58.966516+00:00",
+      "version": "LLD-724_2",
+      "previous": "LLD-724_1"
+    },
+    {
+      "step": "query_after_publish",
+      "at": "2026-08-10T04:10:13.277559+00:00",
+      "elapsed_s": 14.31,
+      "baseline_version": "LLD-724_2",
+      "answer": "目标客群收紧为符合准入要求且通过风险评估的存量客户。",
+      "effective_rules": [
+        "RULE-LLD-001"
+      ],
+      "citation_ids": [
+        "CIT-BASE-LLD-724_2-01"
+      ],
+      "model_call_id": null,
+      "result_mode": "realtime",
+      "dify_workflow_run_id": "b6a1e4b6-c67e-471c-bf8e-ae36ad7c00c6"
+    },
+    {
+      "step": "trace",
+      "at": "2026-08-10T04:10:13.287348+00:00",
+      "entity_id": "RULE-LLD-001",
+      "trace_nodes": 6,
+      "trace_kinds": [
+        "source",
+        "knowledge",
+        "issue",
+        "decision",
+        "change",
+        "baseline"
+      ],
+      "missing_links": [],
+      "model_calls": [
+        {
+          "task_type": "ingest",
+          "workflow_run_id": "a9db4486-9713-4592-99a1-8abcc6bbd99b"
+        }
+      ]
+    }
+  ],
+  "finished_at": "2026-08-10T04:10:13.287383+00:00",
+  "result": "FULL_CHAIN_OK",
+  "dify_provider": "langgenius/siliconflow/siliconflow",
+  "dify_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+  "error_codes": [],
+  "note": "干净克隆（/tmp/t14_e2e_repo，SHA 见 git_sha）真实 Dify 全流程；无 API Key、无未脱敏材料；全链路无重试、无错误码。",
+  "e2e_environment": "clean git clone + uv sync --frozen + .env 三个互异真实 Key（仅环境变量，未入库）"
+}
