@@ -35,6 +35,25 @@ def _contains_sensitive_key(value: Any) -> bool:
     return False
 
 
+def encode_for_dify_transport(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Encode workflow inputs for the Dify start-node form.
+
+    Dify start nodes cannot receive arrays: json_object variables only accept
+    objects and paragraph variables only accept strings (both verified against
+    the live API). Array values therefore travel as JSON strings
+    (ensure_ascii=False) and are parsed back by the workflow's first code node;
+    mappings and scalars pass through unchanged. The application-level contract
+    in schemas.py is unaffected — encoding happens only at the transport edge.
+    """
+    encoded: dict[str, Any] = {}
+    for key, value in inputs.items():
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            encoded[str(key)] = json.dumps(value, ensure_ascii=False)
+        else:
+            encoded[str(key)] = value
+    return encoded
+
+
 class DifyClient:
     """Blocking Dify workflow client with bounded retries and safe errors."""
 
@@ -62,7 +81,7 @@ class DifyClient:
         if _contains_sensitive_key(inputs):
             raise GatewayError.input_rejected()
         request_body = {
-            "inputs": inputs,
+            "inputs": encode_for_dify_transport(inputs),
             "response_mode": "blocking",
             "user": user,
         }
