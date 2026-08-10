@@ -41,3 +41,15 @@
 | 交付提交 | 见 progress.md 台账（`docs: package August 24 lightweight delivery`） |
 | 标签 | `v0.1.0-lightweight`（附注提交） |
 | 合入 | `codex/t14` → `feat/lightweight-t01` fast-forward |
+
+## 独立评审整改轮（2026-08-09，branch codex/t14-remediation，base 5bcc3d7）
+
+评审报告（`docs/superpowers/handoffs/2026-08-09-t14-independent-review-and-t15-readiness.md`）判定 T14 不通过、3 项 Important。整改状态：R01/R02 已关闭，R03 阻塞于真实 Dify 登录态（如实记录，见下）。
+
+- **T14-R01 关闭（.env 配置真实生效，路线 A）**：新增 `python-dotenv` 依赖（pyproject + uv.lock，65 packages，`uv lock --check` 通过）；`container._build_stateful_container` 在默认组合根（`environ=None`）从 `project_root/.env` 加载配置且不覆盖进程环境变量，显式 `environ` 注入路径不触碰 `.env`。新增 `tests/unit/test_container_dotenv.py` 四项用例：`.env` 有效装配三项实时服务、空 Key 保持本地模式、重复 Key 拒绝（`ConfigurationError: ... must be distinct`）、Key 不进入异常文本或 settings repr。**测试还抓出一个真实泄漏**：pydantic ValidationError 文本内嵌原始输入（含 API Key），已在组合根包装为只透传校验消息的 `ConfigurationError`（`from None` 切断链）。干净克隆实证：只执行 README 命令、填写 `.env`、显式清除进程变量后默认 `build_container()` 的 import/query/lint 全部装配（True/True/True）。
+- **T14-R02 关闭（Dify 契约与示例）**：`docs/runbook/dify-import.md` 按 `schemas.py` 与 application 二次校验完整重写——`authority_level` 四枚举（formal_effective/formal_decision/professional_opinion/discussion_reference）、`severity`（blocking/pending_decision/pending_info）、evidence `side`（current_baseline/challenging_source）、Query `effective_rules` 为可信卡片 ID 且引用相交（附 `UNKNOWN_EFFECTIVE_RULE`/`EFFECTIVE_RULE_CITATION_MISSING` 后果说明）、notices 逐字匹配与 answer 不复述约束、blocking 响应 `data.outputs.result` 结构、三工作流最小节点映射与发布取 Key 步骤。六份示例落为版本化 fixture（`docs/runbook/fixtures/dify/*.json`）；`tests/unit/test_dify_runbook_fixtures.py` 14 用例：六 fixture 模型校验、Query/Lint 语义检查、五个枚举变异（改回 L2/L1/critical/baseline/effective 必失败）、effective_rules 填规则文本的语义变异必失败。
+- **T14-R03 阻塞（真实 Dify 联通）**：本机无 `.env` 无任何 Key；WebBridge 真实浏览器实测 `console.dify.ai` 连接被断（ERR_CONNECTION_CLOSED），`cloud.dify.ai` 可达但跳转登录页（用户未登录，GitHub/Google OAuth 不可代操作）；本机 3000/5001/80/8080 无自托管 Dify。**需要用户在浏览器登录 Dify 或提供三个互异 Key 后才能执行**：建工作流 → 干净克隆真实全流程（Ingest→Query→Lint→决定→审批→发布→发布后查询→追溯）→ 非敏感证据（时间/SHA/run ID/版本/引用/追溯节点）→ 演练后全门禁复跑。
+- **T14-O01 关闭**：交付清单材料安全复核改为可追责记录——复核人 `shiminghao`（本机交付账号）、精确时间与时区、材料清单与 SHA-256（`71d19c2f...`，与 T12 浏览器证据同源一致）、结论与例外项（无）。
+- **T14-O02 关闭**：README 明确「首次 `uv sync --frozen` 需要网络或预热 uv 缓存，本交付不是离线安装包」。
+- **附带修正**：应用从不读取 `st.secrets`，删除误导性的 `.streamlit/secrets.toml.example`（`git rm`），README/local-development 配置路径口径统一为「`.env` 自动加载 + 进程环境变量优先」；README 与交付清单明确区分「启动证据（HTTP 200）」与「业务流程证据」，不再混述。
+- **整改轮验证**：全量 734 passed（730+4 dotenv）；fixture 契约 14 passed；干净克隆 `.env` 装配实证通过。

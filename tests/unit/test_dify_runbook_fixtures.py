@@ -22,19 +22,20 @@ from src.infrastructure.gateways.schemas import (
     QueryWorkflowOutput,
 )
 
-FIXTURE_DIR = (
-    Path(__file__).resolve().parents[2] / "docs" / "runbook" / "fixtures" / "dify"
-)
+FIXTURE_DIR = Path(__file__).resolve().parents[2] / "docs" / "runbook" / "fixtures" / "dify"
 
 
 def _load(name: str) -> dict:
     return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
-def _assert_query_semantics(query_input: QueryWorkflowInput, query_output: QueryWorkflowOutput) -> None:
+def _assert_query_semantics(
+    query_input: QueryWorkflowInput, query_output: QueryWorkflowOutput
+) -> None:
     trusted_card_ids = {card.id for card in query_input.effective_cards}
     assert set(query_output.effective_rules) <= trusted_card_ids, (
-        "effective_rules 必须只含输入 effective_cards 的卡片 ID（否则应用报 UNKNOWN_EFFECTIVE_RULE）"
+        "effective_rules 必须只含输入 effective_cards 的卡片 ID"
+        "（否则应用报 UNKNOWN_EFFECTIVE_RULE）"
     )
     returned_citation_ids = {citation.id for citation in query_output.citations}
     card_citations = {card.id: set(card.source_citations) for card in query_input.effective_cards}

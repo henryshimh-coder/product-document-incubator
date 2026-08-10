@@ -16,11 +16,13 @@ uv run python scripts/validate_data.py    # 校验演示环境，输出 VALIDATI
 uv run streamlit run streamlit_app.py --server.headless true
 ```
 
-浏览器打开 `http://localhost:8501`。以上流程已在一台干净目录（仅含仓库跟踪文件）实测通过，无需任何手工代码改动。
+浏览器打开 `http://localhost:8501`。以上流程已在一台干净目录（仅含仓库跟踪文件）实测通过，无需任何手工代码改动。该实测是**启动证据**（安装 → 初始化 → 校验 → HTTP 200）；接入真实 Dify 后的**完整业务流程证据**见 [docs/runbook/dify-import.md](docs/runbook/dify-import.md) 第七节，交付清单对两类证据分别记录。
+
+首次执行 `uv sync --frozen` 需要网络或预热好的 uv 缓存；本交付不是离线安装包。
 
 ## 外部模型配置
 
-应用读取环境变量（`.env` 或 `.streamlit/secrets.toml`，模板分别为 `.env.example` 与 `.streamlit/secrets.toml.example`）：
+应用在容器构建时自动加载项目根 `.env`（模板 `.env.example`；已存在的进程环境变量优先，不会被 `.env` 覆盖）：
 
 | 变量 | 用途 |
 | --- | --- |
@@ -29,7 +31,7 @@ uv run streamlit run streamlit_app.py --server.headless true
 | `DIFY_QUERY_API_KEY` | 查询 Workflow Key |
 | `DIFY_LINT_API_KEY` | 自检 Workflow Key |
 
-三个 Key 必须互不相同（启动时校验）。**未配置 Key 时应用仍可启动**，但仅提供本地治理功能（首页 / 决定 / 审批 / 发布 / 追溯）；导入、查询、自检的实时与缓存能力需要 Key。三个 Workflow 的输入输出契约与导入步骤见 [docs/runbook/dify-import.md](docs/runbook/dify-import.md)。
+三个 Key 必须互不相同（启动时校验，Key 不进入异常文本或日志）。**未配置 Key 时应用仍可启动**，但仅提供本地治理功能（首页 / 决定 / 审批 / 发布 / 追溯）；导入、查询、自检的实时与缓存能力需要 Key。三个 Workflow 的输入输出契约与导入步骤见 [docs/runbook/dify-import.md](docs/runbook/dify-import.md)。
 
 ## 常用操作
 

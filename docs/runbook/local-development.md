@@ -41,7 +41,7 @@ uv run ruff format --check src scripts tests streamlit_app.py
 - `config/app.yaml`：项目标识（`LLD`）、超时（导入 60s / 查询 30s / 自检 60s）、缓存精确键匹配、发布需人工审批。
 - `config/schema.yaml`：对象 / 状态 / 关系类型字典；实时自检部署必须显式声明 `lint_input_contract_version: "2.0"`（仓库已含）。
 - `config/lint_rules.yaml`：确定性自检规则。
-- `.env` 模板见 `.env.example`；Streamlit secrets 模板见 `.streamlit/secrets.toml.example`。
+- `.env` 模板见 `.env.example`，容器构建时自动加载（进程环境变量优先）。
 
 ## 目录与数据约定
 
