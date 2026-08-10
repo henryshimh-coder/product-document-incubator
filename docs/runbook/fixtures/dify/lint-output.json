@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "issues": [
+    {
+      "issue_type": "conflict",
+      "severity": "blocking",
+      "title": "目标客群口径冲突",
+      "description": "风险意见建议收紧目标客群，与现行基线规则冲突，需会议决定。",
+      "evidence": [
+        {
+          "source_id": "SRC-LLD-BASE",
+          "citation_id": "CIT-BASE-001",
+          "excerpt": "当前目标客群是符合准入要求的存量客户。",
+          "document_version": "v1.0",
+          "page_or_section": "当前产品方案 > 目标客群",
+          "side": "current_baseline"
+        },
+        {
+          "source_id": "SRC-EXAMPLE-001",
+          "citation_id": "SRC-EXAMPLE-001-C01",
+          "excerpt": "建议将目标客群收紧为近一年有活跃交易记录的存量客户。",
+          "document_version": "v1.0",
+          "page_or_section": "风险意见.md > 第1段",
+          "side": "challenging_source"
+        }
+      ],
+      "impacted_domains": ["目标客群"],
+      "options": [
+        {
+          "code": "accept_change",
+          "label": "接受迭代",
+          "impact": "基线规则按风险意见修订，发布新版本"
+        },
+        {
+          "code": "keep_current",
+          "label": "维持现状",
+          "impact": "保留现行目标客群口径，冲突记录留痕"
+        }
+      ],
+      "ai_recommendation": "建议召开会议人工决定",
+      "ai_confidence": 0.78,
+      "uncertainty": "活跃交易的统计口径待定"
+    }
+  ]
+}

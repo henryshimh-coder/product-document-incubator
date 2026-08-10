@@ -9,6 +9,7 @@ from typing import Literal, Protocol
 
 import httpx
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.application.dto.dashboard import DashboardView, GetDashboardInput
@@ -318,6 +319,10 @@ def _build_stateful_container(
         lock_path=(project_root / "data/local_state/locks" / f"{settings.project_id}.release.lock"),
         now=lambda: datetime.now(UTC),
     )
+    if environ is None:
+        # 默认组合根从项目根 .env 加载配置（不覆盖已存在的进程环境变量）；
+        # 显式 environ 注入的测试/嵌入路径不触碰 .env。
+        load_dotenv(project_root / ".env")
     runtime = os.environ if environ is None else environ
 
     def dictionary(name: str) -> tuple[str, ...]:
@@ -367,12 +372,18 @@ def _build_stateful_container(
             "Live Lint deployment requires explicit "
             "lint_input_contract_version: '2.0' in schema configuration"
         )
-    gateway_settings = DifyGatewaySettings(
-        base_url=required[0],
-        ingest_api_key=required[1],
-        query_api_key=required[2],
-        lint_api_key=required[3],
-    )
+    try:
+        gateway_settings = DifyGatewaySettings(
+            base_url=required[0],
+            ingest_api_key=required[1],
+            query_api_key=required[2],
+            lint_api_key=required[3],
+        )
+    except ValidationError as error:
+        # pydantic 的 ValidationError 文本会内嵌原始输入（含 API Key）；
+        # 只透传校验消息本身，切断 Key 进入异常文本与日志的路径。
+        message = "; ".join(entry["msg"] for entry in error.errors())
+        raise ConfigurationError(f"Invalid Dify gateway configuration: {message}") from None
     gateways = build_workflow_gateways(
         gateway_settings,
         http_factory=http_factory or httpx.Client,

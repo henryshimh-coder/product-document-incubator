@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "project_id": "LLD",
+  "baseline_version": "LLD-724_1",
+  "task_id": "TASK-LINT-EXAMPLE",
+  "language": "zh-CN",
+  "input_contract_version": "2.0",
+  "baseline_rules": [
+    {
+      "id": "BASE-RULE-REF-01",
+      "source_id": "SRC-LLD-BASE",
+      "citation_id": "CIT-BASE-001",
+      "document_version": "v1.0",
+      "page_or_section": "当前产品方案 > 目标客群",
+      "excerpt": "当前目标客群是符合准入要求的存量客户。"
+    }
+  ],
+  "comparison_items": [
+    {
+      "id": "CMP-REF-01",
+      "source_id": "SRC-EXAMPLE-001",
+      "citation_id": "SRC-EXAMPLE-001-C01",
+      "document_version": "v1.0",
+      "page_or_section": "风险意见.md > 第1段",
+      "excerpt": "建议将目标客群收紧为近一年有活跃交易记录的存量客户。"
+    }
+  ],
+  "deterministic_findings": [],
+  "allowed_issue_types": ["conflict", "omission", "stale"]
+}

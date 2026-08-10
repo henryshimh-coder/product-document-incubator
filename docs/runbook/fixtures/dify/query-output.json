@@ -1,0 +1,21 @@
+{
+  "answer": "当前目标客群是符合准入要求的存量客户。",
+  "effective_rules": ["RULE-LLD-001"],
+  "citations": [
+    {
+      "id": "CIT-SRC-BASE-01",
+      "source_id": "SRC-LLD-BASE",
+      "filename": "当前产品方案.md",
+      "document_version": "v1.0",
+      "section": "当前产品方案 > 目标客群",
+      "excerpt": "当前目标客群是符合准入要求的存量客户。",
+      "authority_level": "formal_effective"
+    }
+  ],
+  "candidate_notice": null,
+  "conflict_notice": null,
+  "baseline_version": "LLD-724_1",
+  "evidence_sufficiency": "sufficient",
+  "result_mode": "realtime",
+  "model_call_id": "CALL-QUERY-EXAMPLE"
+}

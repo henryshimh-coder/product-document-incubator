@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "project_id": "LLD",
+  "baseline_version": "LLD-724_1",
+  "task_id": "TASK-QUERY-EXAMPLE",
+  "language": "zh-CN",
+  "scope": "effective",
+  "question": "当前目标客群是什么？",
+  "effective_cards": [
+    {
+      "id": "RULE-LLD-001",
+      "title": "目标客群",
+      "content": "当前目标客群是符合准入要求的存量客户。",
+      "source_citations": ["CIT-SRC-BASE-01"]
+    }
+  ],
+  "notices": [],
+  "citations": [
+    {
+      "id": "CIT-SRC-BASE-01",
+      "source_id": "SRC-LLD-BASE",
+      "filename": "当前产品方案.md",
+      "document_version": "v1.0",
+      "section": "当前产品方案 > 目标客群",
+      "excerpt": "当前目标客群是符合准入要求的存量客户。",
+      "authority_level": "formal_effective"
+    }
+  ]
+}

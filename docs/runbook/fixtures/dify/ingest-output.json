@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "task_id": "TASK-INGEST-EXAMPLE",
+  "summary": "风险意见建议收紧目标客群，与现行基线规则存在冲突。",
+  "items": [
+    {
+      "item_id": "ITEM-EXAMPLE-001",
+      "item_type": "professional_opinion",
+      "title": "目标客群收紧建议",
+      "content": "建议将目标客群收紧为近一年有活跃交易记录的存量客户。",
+      "target_card_id": "RULE-LLD-001",
+      "result_type": "conflict_discussion",
+      "status": "conflict",
+      "source_citations": [
+        {
+          "source_id": "SRC-EXAMPLE-001",
+          "chunk_id": "SRC-EXAMPLE-001-C01",
+          "locator": "风险意见.md > 第1段",
+          "excerpt": "建议将目标客群收紧为近一年有活跃交易记录的存量客户。"
+        }
+      ],
+      "confidence": 0.86,
+      "uncertainty": "活跃交易的统计口径需会议确认"
+    }
+  ],
+  "relations": [
+    {
+      "source_id": "ITEM-EXAMPLE-001",
+      "relation_type": "conflicts_with",
+      "target_id": "RULE-LLD-001"
+    }
+  ]
+}
