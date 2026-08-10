@@ -54,6 +54,27 @@ def encode_for_dify_transport(inputs: Mapping[str, Any]) -> dict[str, Any]:
     return encoded
 
 
+def decode_for_dify_transport(inputs: Mapping[str, Any]) -> dict[str, Any]:
+    """Inverse of encode_for_dify_transport, mirroring the workflow parse node.
+
+    Only strings that encode a JSON array are restored; any string that does not
+    parse as a JSON array passes through unchanged. Mock gateways in tests use
+    this to reproduce the workflow's first code node (json.loads per variable).
+    """
+    decoded: dict[str, Any] = {}
+    for key, value in inputs.items():
+        restored = value
+        if isinstance(value, str) and value.lstrip().startswith("["):
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                restored = parsed
+        decoded[str(key)] = restored
+    return decoded
+
+
 class DifyClient:
     """Blocking Dify workflow client with bounded retries and safe errors."""
 

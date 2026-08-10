@@ -11,7 +11,11 @@ import json
 
 import httpx
 
-from src.infrastructure.gateways.dify_client import DifyClient, encode_for_dify_transport
+from src.infrastructure.gateways.dify_client import (
+    DifyClient,
+    decode_for_dify_transport,
+    encode_for_dify_transport,
+)
 
 
 def test_arrays_are_encoded_as_json_strings_and_round_trip():
@@ -85,3 +89,18 @@ def test_dify_client_sends_encoded_arrays_on_the_wire():
     assert wire_inputs["source"] == {"id": "SRC-1"}
     assert isinstance(wire_inputs["baseline_rules"], str)
     assert json.loads(wire_inputs["baseline_rules"]) == [{"id": "R1"}]
+
+
+def test_decode_restores_arrays_and_leaves_plain_strings_alone():
+    """Catches the workflow-side parse step mangling legitimate string inputs."""
+    inputs = {
+        "effective_cards": [{"id": "RULE-LLD-001"}],
+        "notices": [],
+        "question": "[重点关注] 目标客群是什么？",
+        "source": {"id": "SRC-1"},
+        "task_id": "TASK-1",
+    }
+
+    decoded = decode_for_dify_transport(encode_for_dify_transport(inputs))
+
+    assert decoded == inputs

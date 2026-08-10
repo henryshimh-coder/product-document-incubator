@@ -36,6 +36,7 @@ from src.domain.models import (
     LintReport,
     QueryResponse,
 )
+from src.infrastructure.gateways.dify_client import decode_for_dify_transport
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "sources"
 
@@ -198,7 +199,8 @@ def mock_http_factory(
 
     def handler(request: httpx.Request) -> httpx.Response:
         auth = request.headers.get("authorization", "")
-        inputs = json.loads(request.content.decode("utf-8"))["inputs"]
+        # 与真实工作流一致：数组在线路上是 JSON 字符串，先经“解析输入”节点还原。
+        inputs = decode_for_dify_transport(json.loads(request.content.decode("utf-8"))["inputs"])
         if "ingest" in auth:
             task = "ingest"
             result_factory = _ingest_result

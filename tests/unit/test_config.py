@@ -249,6 +249,7 @@ def test_build_container_runs_real_query_vertical_slice_with_manifest_and_truste
         SqliteSourceRepository,
     )
     from src.infrastructure.files.archive import SourceArchive
+    from src.infrastructure.gateways.dify_client import decode_for_dify_transport
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -353,7 +354,7 @@ app:
 
     def http_factory():
         def handler(request):
-            inputs = json.loads(request.content)["inputs"]
+            inputs = decode_for_dify_transport(json.loads(request.content)["inputs"])
             result = {
                 "answer": inputs["effective_cards"][0]["content"],
                 "effective_rules": [inputs["effective_cards"][0]["id"]],
@@ -504,6 +505,7 @@ def test_build_container_runs_real_ingest_vertical_slice_from_composition_root(
     from src.domain.enums import AuthorityLevel, KnowledgeStatus, SecurityLevel
     from src.domain.models import KnowledgeCard
     from src.infrastructure.db.repositories import SqliteKnowledgeRepository
+    from src.infrastructure.gateways.dify_client import decode_for_dify_transport
 
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -552,7 +554,7 @@ app:
 
     def http_factory():
         def handler(request):
-            inputs = json.loads(request.content)["inputs"]
+            inputs = decode_for_dify_transport(json.loads(request.content)["inputs"])
             chunk = inputs["source_chunks"][0]
             result = {
                 "schema_version": "1.0",
