@@ -41,16 +41,24 @@
 
 ### 3.2 整改后 Lint 实时重采样
 
-> 待干净克隆真实复验后回填（10 次，绑定整改后 SHA，目标 P95 < 45s、0 失败）。
+干净克隆 `/tmp/t15_r2`（SHA `5869748`，仅 `uv sync --frozen` + `.env` 三个互异 Key，零手工改动）真实 Dify 复验，2026-08-10 晚：
+
+- **运行时观测**：`build_container()` 三个网关超时实测为 ingest 60s / query 30s / lint 60s，与 `config/app.yaml` 声明一致（修复前实测均为隐式 30s）。
+- **三服务冒烟**：Ingest 实时 16.859s 成功（run ID `CALL-39B542237C1B4EF2AD0457BD61ABF70F`）；Query 实时 11.683s 成功；错误码均无。
+- **Lint 实时重采样 ×10**（同一对照材料，`all_current_sources` 范围，逐次记录 run ID）：n=10，min 21.184s，P50 24.915s，**P95 26.855s（目标 < 45s）**，max 26.855s，**失败 0**。样本已并入 [t15-performance-samples.json](evidence/t15-performance-samples.json) remediation 轮，确定性重算测试 4/4 通过。
+- 结论：R01 修复后 Lint 实时调用在 60 秒配置上限下稳定成功，原 30 秒隐性上限已消除；T15-R01/R02 关闭。
 
 ### 3.3 全量验证
 
 ```text
-uv run pytest（整改后）                → 待最终门禁回填
-ruff check/format（src scripts tests streamlit_app.py）→ 待最终门禁回填
-compileall src scripts tests           → 待最终门禁回填
-git diff --check                       → 待最终门禁回填
-连续三次 reset + 完整流程 E2E           → 待最终门禁回填
+uv run pytest（整改后）                → 778 passed, 0 failed（770 + 8 整改新增）
+ruff check/format（src scripts tests streamlit_app.py）→ All checks passed / 171 files already formatted
+compileall src scripts tests           → 通过
+git diff --check                       → 通过
+uv lock --check                        → 65 packages 一致，未变更
+连续三次 reset + 完整流程 E2E           → 3 × (RESET_OK → VALIDATION_OK → 5 passed)
+干净克隆真实复验                        → /tmp/t15_r2 @ 5869748：运行时超时实测 60/30/60，
+                                          三服务冒烟成功，Lint ×10 重采样 0 失败（见 3.2）
 ```
 
 ## 四、实时失败自动提示（T15 Step 2，原交付，保持有效）
@@ -67,6 +75,6 @@ git diff --check                       → 待最终门禁回填
 
 | 计划验收 | 证据 |
 | --- | --- |
-| 现场可优先使用实时 Dify | 原采样 70/70 达标（第一节）；整改后 Lint 重采样（第三节，复验后回填）；T14-R03 真实全链证据 [dify-live-e2e-2026-08-09.json](dify-live-e2e-2026-08-09.json) |
+| 现场可优先使用实时 Dify | 原采样 70/70 达标（第一节）；整改后 Lint 重采样 10/10、P95 26.855s（第三节）；T14-R03 真实全链证据 [dify-live-e2e-2026-08-09.json](dify-live-e2e-2026-08-09.json) |
 | 实时异常时只使用完全匹配缓存 | 查询页与自检页超时→精确缓存探测接线 + UI 测试；T13/T15-R02 缓存接续 E2E（接续后完成决定/发布） |
 | 切换后仍能真实执行人工决定和本地发布 | `tests/e2e/test_lint_timeout_fallback.py` 缓存接续→决定→审批→发布；发布操作采样 10/10 成功 |
