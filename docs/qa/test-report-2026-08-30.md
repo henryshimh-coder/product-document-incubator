@@ -44,8 +44,8 @@
 干净克隆 `/tmp/t15_r2`（SHA `5869748`，仅 `uv sync --frozen` + `.env` 三个互异 Key，零手工改动）真实 Dify 复验，2026-08-10 晚：
 
 - **运行时观测**：`build_container()` 三个网关超时实测为 ingest 60s / query 30s / lint 60s，与 `config/app.yaml` 声明一致（修复前实测均为隐式 30s）。
-- **三服务冒烟**：Ingest 实时 16.859s 成功（run ID `CALL-39B542237C1B4EF2AD0457BD61ABF70F`）；Query 实时 11.683s 成功；错误码均无。
-- **Lint 实时重采样 ×10**（同一对照材料，`all_current_sources` 范围，逐次记录 run ID）：n=10，min 21.184s，P50 24.915s，**P95 26.855s（目标 < 45s）**，max 26.855s，**失败 0**。样本已并入 [t15-performance-samples.json](evidence/t15-performance-samples.json) remediation 轮，确定性重算测试 4/4 通过。
+- **三服务冒烟**：Ingest 实时 16.859s 成功，远端 `workflow_run_id` `dbee74a8-7326-4d7e-a1e2-fd61dbd39e3f`（`CALL-39B542237C1B4EF2AD0457BD61ABF70F` 为应用模型调用 ID，落库于 `model_call_logs`，不是 Dify 远端 ID）；Query 实时 14.116s 成功，远端 `workflow_run_id` `805056e9-c30e-48dc-91b3-3bae29f95d3b`（2026-08-10 22:00 经响应钩子补采）；错误码均无。
+- **Lint 实时重采样 ×10**（同一对照材料，`all_current_sources` 范围）：n=10，min 21.184s，P50 24.915s，**P95 26.855s（目标 < 45s）**，max 26.855s，**失败 0**；十条的远端 `workflow_run_id` 逐次归档于 [t15-live-smoke-2026-08-10.json](evidence/t15-live-smoke-2026-08-10.json)（该文件同时归档 Ingest/Query 远端 ID 与 reviewer 独立 Lint ID `63ad32c9-033e-4929-a18d-610cf6ba5baf`；不含 Key、请求正文或未脱敏材料）。耗时样本见 [t15-performance-samples.json](evidence/t15-performance-samples.json) remediation 轮，确定性重算测试通过。
 - 结论：R01 修复后 Lint 实时调用在 60 秒配置上限下稳定成功，原 30 秒隐性上限已消除；T15-R01/R02 关闭。
 
 ### 3.3 全量验证

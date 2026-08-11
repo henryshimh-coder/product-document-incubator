@@ -11,7 +11,7 @@
 | 5 | 系统时间正确 | 与网络时间误差 < 1 分钟 | 对比 `time.is`；时间错误会导致缓存生成时间与追溯时间线不可信 |
 | 6 | 初始快照校验通过 | `VALIDATION_OK baseline=LLD-724_1` | `uv run python scripts/reset_demo.py --snapshot initial && uv run python scripts/validate_data.py` |
 | 7 | 缓存完整 | frozen 快照三类冻结缓存齐全且可命中 | `uv run python scripts/reset_demo.py --snapshot frozen && uv run python scripts/validate_data.py`，随后恢复 initial |
-| 8 | 备用演示视频可播放 | 本地视频文件离线可播、音画正常 | 开场前完整试播一次（仓库不含视频工件，由现场负责人在演示设备上补证） |
+| 8 | 备用演示视频可播放 | 本地视频文件离线可播、音画正常 | 开场前完整试播一次（仓库不含视频工件，由现场负责人在演示设备上补证；补证记录见 `docs/demo/backup-video-evidence.md`，记录完成前本项不得勾为通过） |
 | 9 | 日志目录可写 | `data/local_state/` 可写，无磁盘不足告警 | 启动应用执行一次首页读取；`df -h` 确认余量 |
 | 10 | 连续三次主流程无阻断 | 连续三轮 `reset → 全流程 E2E` 全过 | `for i in 1 2 3; do uv run python scripts/reset_demo.py && uv run pytest tests/e2e/test_full_success.py -q || exit 1; done` |
 

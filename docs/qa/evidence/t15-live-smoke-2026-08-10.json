@@ -1,0 +1,130 @@
+{
+ "schema": "t15-live-smoke/v1",
+ "note": "T15 整改后真实 Dify 调用的远端 workflow_run_id 归档（干净克隆 /tmp/t15_r2，SHA 5869748，真实 Dify + 硅基流动 DeepSeek-V3.2）。workflow_run_id 为 Dify 返回的远端运行标识；app_model_call_id 为应用侧模型调用 ID（CALL-…，仅 Ingest 经 ModelCallLogger 落库），二者不得混用。ingest 的远端 ID 提取自克隆数据库 model_call_logs 表；query 为响应钩子直接补采；lint 十条为整改重采样逐次记录。reviewer_independent 为独立复核在同一代码上的额外 Lint 证据。本文件不含 Key、请求正文或未脱敏材料。",
+ "rounds": [
+  {
+   "round": "remediation-smoke",
+   "code_sha": "586974827cff6bc6b758b82a58e0979dfcc5ea06",
+   "environment": "macOS 本地干净克隆 /tmp/t15_r2（uv 管理环境，真实 Dify 工作流，硅基流动 DeepSeek-V3.2）",
+   "calls": [
+    {
+     "workflow": "ingest",
+     "called_at": "2026-08-10T20:41:40",
+     "seconds": 16.859,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "dbee74a8-7326-4d7e-a1e2-fd61dbd39e3f",
+     "app_model_call_id": "CALL-39B542237C1B4EF2AD0457BD61ABF70F"
+    },
+    {
+     "workflow": "query",
+     "called_at": "2026-08-10T22:00:27",
+     "seconds": 14.116,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "805056e9-c30e-48dc-91b3-3bae29f95d3b",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:42:29",
+     "seconds": 25.292,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "39c7bdcd-61c2-4a88-b27a-aa00ac4b7209",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:42:55",
+     "seconds": 26.464,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "62c81f06-44b4-4b6d-bcd1-55490e7a817a",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:43:19",
+     "seconds": 23.672,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "bd901c76-2729-4e8a-b6c1-4c343af409f2",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:43:41",
+     "seconds": 21.7,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "8bbc9f36-63e6-45c0-a5fc-9b03a00d33e1",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:44:02",
+     "seconds": 21.878,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "c75437fa-21b2-4be5-bf55-6c1ac44f6942",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:44:33",
+     "seconds": 21.184,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "ae3bce11-8972-4ec1-a167-5d2420e60f7c",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:44:59",
+     "seconds": 26.855,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "ae85f950-412a-47f5-9a0c-0d3c2c9e464f",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:45:25",
+     "seconds": 25.728,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "e996b3a0-1b15-4d2d-85ec-b9456ea8df69",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:45:50",
+     "seconds": 25.239,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "e9dbf1db-cd84-4e41-942d-8c9a6e06312f",
+     "app_model_call_id": null
+    },
+    {
+     "workflow": "lint",
+     "called_at": "2026-08-10T20:46:15",
+     "seconds": 24.59,
+     "ok": true,
+     "error": null,
+     "workflow_run_id": "287eb139-7de1-41b2-8f2d-0712fe69d971",
+     "app_model_call_id": null
+    }
+   ]
+  }
+ ],
+ "reviewer_independent": {
+  "workflow": "lint",
+  "code_sha": "8aa5d45b8a894dd5b62779c481ce4148d795056c",
+  "called_at": "2026-08-10",
+  "seconds": 26.754,
+  "ok": true,
+  "workflow_run_id": "63ad32c9-033e-4929-a18d-610cf6ba5baf",
+  "source": "docs/superpowers/handoffs/2026-08-10-t15-remediation-independent-rereview.md"
+ }
+}
