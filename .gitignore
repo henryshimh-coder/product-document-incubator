@@ -14,3 +14,6 @@ data/local_state/
 # reset_demo 从 data/demo_snapshots（已跟踪）恢复出的演示运行态，可随时再生成
 data/obsidian_vault/
 data/source_archive/
+
+# T15-O01 备用演示视频：工件体积大且为演示设备预置文件，不入库
+backups/
