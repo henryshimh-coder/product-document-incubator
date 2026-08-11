@@ -6,9 +6,10 @@ import streamlit as st
 
 from src.application.container import AppContainer
 from src.application.dto.query import RunQueryInput
-from src.domain.errors import AppError
+from src.domain.errors import AppError, ErrorCode
 from src.domain.models import QueryResponse
 from src.ui.components.citation_block import render_citation
+from src.ui.components.fallback_state import build_fallback_state
 
 QUICK_QUESTIONS = (
     "当前目标客群是什么？",
@@ -121,19 +122,37 @@ def render(container: AppContainer) -> None:
     if not question.strip():
         st.warning("请输入问题后再查询。")
         return
+    command = RunQueryInput(
+        project_id=container.settings.project_id,
+        question=question,
+        scope=scope,
+        historical_version=historical_version,
+        preferred_mode=preferred_mode,
+    )
     try:
-        response = container.query.execute(
-            RunQueryInput(
-                project_id=container.settings.project_id,
-                question=question,
-                scope=scope,
-                historical_version=historical_version,
-                preferred_mode=preferred_mode,
-            )
-        )
+        response = container.query.execute(command)
     except AppError as error:
-        st.error(f"{error.user_message}  \n错误码：`{error.code}`")
-        return
+        if error.code == ErrorCode.MODEL_TIMEOUT and preferred_mode != "cache":
+            # 实时超时：只允许完全匹配（同问题、同版本、同材料）的冻结缓存继续；
+            # 没有完全匹配缓存时明确告知，不提供近似缓存（T15 Step 2）。
+            state = build_fallback_state(
+                task_type="query",
+                realtime_error_code="DIFY_TIMEOUT",
+                exact_cache_available=False,
+            )
+            try:
+                response = container.query.execute(
+                    command.model_copy(update={"preferred_mode": "cache"})
+                )
+            except AppError as cache_error:
+                if cache_error.code == ErrorCode.CACHE_NOT_FOUND:
+                    st.warning(f"{state.title} · {state.detail}  \n错误码：`{error.code}`")
+                    return
+                st.error(f"{cache_error.user_message}  \n错误码：`{cache_error.code}`")
+                return
+        else:
+            st.error(f"{error.user_message}  \n错误码：`{error.code}`")
+            return
     except (KeyError, OSError, ValueError):
         st.error("查询未完成，请检查本地版本和材料后重试。")
         return

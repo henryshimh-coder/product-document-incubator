@@ -12,6 +12,7 @@ def _render_query_page(
     response_json: str,
     *,
     raises: str | None = None,
+    cache_raises: str | None = None,
     configured_scope: str = "effective",
 ) -> None:
     import streamlit as st
@@ -28,7 +29,9 @@ def _render_query_page(
 
         def execute(self, command):
             st.session_state["query_test_command"] = command.model_dump(mode="json")
-            if raises is not None:
+            if command.preferred_mode == "cache" and cache_raises is not None:
+                raise DomainError(ErrorCode(cache_raises))
+            if command.preferred_mode != "cache" and raises is not None:
                 raise DomainError(ErrorCode(raises))
             return QueryResponse.model_validate_json(response_json)
 
@@ -276,4 +279,56 @@ def test_switching_scope_clears_response_instead_of_relabeling_old_answer() -> N
 
     page.radio(key="query_scope").set_value("effective_with_notices").run()
 
+    assert "当前回答" not in _html(page)
+
+
+def test_realtime_timeout_continues_with_exact_frozen_cache() -> None:
+    """Catches the timeout path ignoring an exact cache or hiding its provenance.
+
+    实时超时后页面必须以同问题、同版本、同材料的冻结缓存继续（第二次调用
+    preferred_mode == "cache"），且按缓存口径标注，不得显示“未找到缓存”。
+    """
+    cached = _response().model_copy(
+        update={
+            "result_mode": CallResultMode.CACHE,
+            "model_call_id": None,
+            "cache_generated_at": datetime(2026, 8, 6, 9, 30, 0, tzinfo=UTC),
+        }
+    )
+    page = AppTest.from_function(
+        _render_query_page,
+        args=(cached.model_dump_json(),),
+        kwargs={"raises": "MODEL_TIMEOUT"},
+    ).run()
+
+    page = _submit(page)
+
+    assert not page.exception
+    rendered = _html(page)
+    assert "当前回答" in rendered
+    assert "冻结缓存" in rendered
+    assert "实时生成" not in rendered
+    assert page.session_state["query_test_command"]["preferred_mode"] == "cache"
+    warnings = "\n".join(item.value for item in page.warning)
+    assert "未找到同材料、同版本的可用缓存" not in warnings
+
+
+def test_realtime_timeout_without_exact_cache_shows_disabled_fallback() -> None:
+    """Catches offering an approximate cache or hiding the no-exact-cache fact.
+
+    实时超时且探测返回 CACHE_NOT_FOUND 时，必须展示「实时分析超时」与
+    「未找到同材料、同版本的可用缓存」，且不得渲染回答区。
+    """
+    page = AppTest.from_function(
+        _render_query_page,
+        args=(_response().model_dump_json(),),
+        kwargs={"raises": "MODEL_TIMEOUT", "cache_raises": "CACHE_NOT_FOUND"},
+    ).run()
+
+    page = _submit(page)
+
+    assert not page.exception
+    warnings = "\n".join(item.value for item in page.warning)
+    assert "实时分析超时" in warnings
+    assert "未找到同材料、同版本的可用缓存" in warnings
     assert "当前回答" not in _html(page)
