@@ -364,6 +364,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )

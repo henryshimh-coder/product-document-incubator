@@ -6,6 +6,7 @@ import httpx
 
 from src.infrastructure.gateways.composition import (
     DifyGatewaySettings,
+    WorkflowTimeouts,
     build_workflow_gateways,
 )
 
@@ -43,7 +44,11 @@ def test_composition_builds_three_isolated_clients_with_task_specific_keys():
         lint_api_key=keys[2],
     )
 
-    gateways = build_workflow_gateways(settings, http_factory=http_factory)
+    gateways = build_workflow_gateways(
+        settings,
+        timeouts=WorkflowTimeouts(ingest_seconds=60, query_seconds=30, lint_seconds=60),
+        http_factory=http_factory,
+    )
 
     clients: list[Any] = [
         gateways.ingest.client,

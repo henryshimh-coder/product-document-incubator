@@ -1,0 +1,645 @@
+{
+ "schema": "t15-performance-samples/v1",
+ "note": "T15 实时性能证据。original 轮为 v0.2.0-live-demo（00df0c4）冻结前采样；独立验收发现 Lint 运行时超时未生效（T15-R01）后，remediation 轮以整改后 SHA 重新采样 Lint 实时 10 次。每条样本只保留操作/序号/开始时间/耗时/成功/公开错误码；轮次级字段保留代码 SHA 与环境标识。",
+ "rounds": [
+  {
+   "round": "original",
+   "code_sha": "00df0c4a08f49a575fb5d0ef4d57c15f02a784d6",
+   "environment": "macOS 本地干净克隆（uv 管理环境，真实 Dify 工作流，硅基流动 DeepSeek-V3.2）",
+   "samples": [
+    {
+     "operation": "home",
+     "iteration": 0,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.003,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 1,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.002,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 2,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.003,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 3,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.002,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 4,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.002,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 5,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.002,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 6,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.002,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 7,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.002,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 8,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.002,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "home",
+     "iteration": 9,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 0,
+     "started_at": "2026-08-10T18:37:33",
+     "seconds": 16.412,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 1,
+     "started_at": "2026-08-10T18:37:49",
+     "seconds": 15.605,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 2,
+     "started_at": "2026-08-10T18:38:07",
+     "seconds": 17.765,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 3,
+     "started_at": "2026-08-10T18:38:27",
+     "seconds": 19.861,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 4,
+     "started_at": "2026-08-10T18:38:47",
+     "seconds": 19.65,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 5,
+     "started_at": "2026-08-10T18:39:05",
+     "seconds": 17.404,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 6,
+     "started_at": "2026-08-10T18:39:22",
+     "seconds": 16.45,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 7,
+     "started_at": "2026-08-10T18:39:38",
+     "seconds": 15.759,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 8,
+     "started_at": "2026-08-10T18:39:55",
+     "seconds": 17.273,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "ingest",
+     "iteration": 9,
+     "started_at": "2026-08-10T18:40:12",
+     "seconds": 16.072,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 0,
+     "started_at": "2026-08-10T18:34:56",
+     "seconds": 12.764,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 1,
+     "started_at": "2026-08-10T18:35:09",
+     "seconds": 13.032,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 2,
+     "started_at": "2026-08-10T18:35:20",
+     "seconds": 11.391,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 3,
+     "started_at": "2026-08-10T18:35:34",
+     "seconds": 13.537,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 4,
+     "started_at": "2026-08-10T18:35:47",
+     "seconds": 13.22,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 5,
+     "started_at": "2026-08-10T18:35:59",
+     "seconds": 12.235,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 6,
+     "started_at": "2026-08-10T18:36:14",
+     "seconds": 14.234,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 7,
+     "started_at": "2026-08-10T18:36:26",
+     "seconds": 12.953,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 8,
+     "started_at": "2026-08-10T18:36:38",
+     "seconds": 11.373,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "query",
+     "iteration": 9,
+     "started_at": "2026-08-10T18:36:49",
+     "seconds": 11.36,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 0,
+     "started_at": "2026-08-10T18:41:20",
+     "seconds": 20.947,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 1,
+     "started_at": "2026-08-10T18:41:44",
+     "seconds": 23.972,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 2,
+     "started_at": "2026-08-10T18:42:06",
+     "seconds": 22.006,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 3,
+     "started_at": "2026-08-10T18:42:30",
+     "seconds": 23.639,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 4,
+     "started_at": "2026-08-10T18:42:56",
+     "seconds": 25.696,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 5,
+     "started_at": "2026-08-10T18:43:24",
+     "seconds": 27.496,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 6,
+     "started_at": "2026-08-10T18:43:49",
+     "seconds": 25.19,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 7,
+     "started_at": "2026-08-10T18:44:10",
+     "seconds": 21.376,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 8,
+     "started_at": "2026-08-10T18:44:35",
+     "seconds": 24.6,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "lint",
+     "iteration": 9,
+     "started_at": "2026-08-10T18:45:03",
+     "seconds": 27.737,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 0,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.013,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 1,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 2,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 3,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 4,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 5,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 6,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 7,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 8,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "cache",
+     "iteration": 9,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.001,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 0,
+     "started_at": "2026-08-10T18:34:09",
+     "seconds": 0.01,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 1,
+     "started_at": "2026-08-10T18:34:10",
+     "seconds": 0.009,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 2,
+     "started_at": "2026-08-10T18:34:10",
+     "seconds": 0.012,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 3,
+     "started_at": "2026-08-10T18:34:10",
+     "seconds": 0.009,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 4,
+     "started_at": "2026-08-10T18:34:11",
+     "seconds": 0.009,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 5,
+     "started_at": "2026-08-10T18:34:11",
+     "seconds": 0.009,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 6,
+     "started_at": "2026-08-10T18:34:11",
+     "seconds": 0.009,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 7,
+     "started_at": "2026-08-10T18:34:12",
+     "seconds": 0.009,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 8,
+     "started_at": "2026-08-10T18:34:12",
+     "seconds": 0.009,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "publish",
+     "iteration": 9,
+     "started_at": "2026-08-10T18:34:12",
+     "seconds": 0.01,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 0,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.315,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 1,
+     "started_at": "2026-08-10T18:34:05",
+     "seconds": 0.316,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 2,
+     "started_at": "2026-08-10T18:34:06",
+     "seconds": 0.308,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 3,
+     "started_at": "2026-08-10T18:34:06",
+     "seconds": 0.308,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 4,
+     "started_at": "2026-08-10T18:34:06",
+     "seconds": 0.31,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 5,
+     "started_at": "2026-08-10T18:34:07",
+     "seconds": 0.312,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 6,
+     "started_at": "2026-08-10T18:34:07",
+     "seconds": 0.308,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 7,
+     "started_at": "2026-08-10T18:34:07",
+     "seconds": 0.312,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 8,
+     "started_at": "2026-08-10T18:34:08",
+     "seconds": 0.31,
+     "ok": true,
+     "error": null
+    },
+    {
+     "operation": "reset",
+     "iteration": 9,
+     "started_at": "2026-08-10T18:34:08",
+     "seconds": 0.313,
+     "ok": true,
+     "error": null
+    }
+   ],
+   "summary": {
+    "home": {
+     "n": 10,
+     "min": 0.001,
+     "p50": 0.002,
+     "p95": 0.003,
+     "max": 0.003,
+     "failures": 0,
+     "target": 3.0,
+     "pass": true
+    },
+    "ingest": {
+     "n": 10,
+     "min": 15.605,
+     "p50": 16.861,
+     "p95": 19.861,
+     "max": 19.861,
+     "failures": 0,
+     "target": 45.0,
+     "pass": true
+    },
+    "query": {
+     "n": 10,
+     "min": 11.36,
+     "p50": 12.858,
+     "p95": 14.234,
+     "max": 14.234,
+     "failures": 0,
+     "target": 20.0,
+     "pass": true
+    },
+    "lint": {
+     "n": 10,
+     "min": 20.947,
+     "p50": 24.286,
+     "p95": 27.737,
+     "max": 27.737,
+     "failures": 0,
+     "target": 45.0,
+     "pass": true
+    },
+    "cache": {
+     "n": 10,
+     "min": 0.001,
+     "p50": 0.001,
+     "p95": 0.013,
+     "max": 0.013,
+     "failures": 0,
+     "target": null,
+     "pass": null
+    },
+    "publish": {
+     "n": 10,
+     "min": 0.009,
+     "p50": 0.009,
+     "p95": 0.012,
+     "max": 0.012,
+     "failures": 0,
+     "target": null,
+     "pass": null
+    },
+    "reset": {
+     "n": 10,
+     "min": 0.308,
+     "p50": 0.311,
+     "p95": 0.316,
+     "max": 0.316,
+     "failures": 0,
+     "target": null,
+     "pass": null
+    }
+   }
+  }
+ ]
+}

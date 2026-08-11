@@ -32,6 +32,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip()
 
 _SCHEMA_YAML = "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n"

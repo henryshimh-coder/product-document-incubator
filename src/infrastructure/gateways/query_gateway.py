@@ -19,8 +19,9 @@ INSUFFICIENT_EVIDENCE_ANSWER = "现有证据不足，无法给出确定性结论
 
 
 class QueryGateway:
-    def __init__(self, client: WorkflowGateway) -> None:
+    def __init__(self, client: WorkflowGateway, *, timeout_seconds: int) -> None:
         self.client = client
+        self.timeout_seconds = timeout_seconds
 
     def run(
         self,
@@ -28,7 +29,7 @@ class QueryGateway:
         *,
         safety_proof: OutboundSafetyProof,
         user: str | None = None,
-        timeout_seconds: int = 30,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         validated_inputs = validate_input(
             QueryWorkflowInput,
@@ -36,7 +37,10 @@ class QueryGateway:
             invalid_detail="QUERY_INPUT_INVALID",
             safety_proof=safety_proof,
         )
-        workflow_run_id, raw_output = invoke(self.client, validated_inputs, user, timeout_seconds)
+        # 超时一律来自组合根注入的配置（T15-R01）；调用方仅可在测试等
+        # 受控场景显式覆盖。
+        effective_timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        workflow_run_id, raw_output = invoke(self.client, validated_inputs, user, effective_timeout)
         try:
             output = QueryWorkflowOutput.model_validate(raw_output)
         except ValidationError as error:

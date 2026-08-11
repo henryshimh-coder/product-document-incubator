@@ -255,7 +255,7 @@ def _prepare(
             source_id=source_id,
         ),
         extractor=extract_document,
-        gateway=IngestGateway(client),
+        gateway=IngestGateway(client, timeout_seconds=60),
         cache=AiCache(db_path),
         manifest_store=manifest_store,
         model_call_logger=ModelCallLogger(db_path),

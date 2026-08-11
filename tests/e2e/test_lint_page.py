@@ -54,6 +54,9 @@ def _render(
     configured: bool = True,
     change_result: bool = False,
     navigation_probe: bool = False,
+    raises: str | None = None,
+    cache_raises: str | None = None,
+    report_json: str | None = None,
 ) -> None:
     import streamlit as st
 
@@ -72,6 +75,17 @@ def _render(
     class LintService:
         def execute(self, command):
             st.session_state["lint_test_run_command"] = command.model_dump(mode="json")
+            from src.domain.errors import DomainError, ErrorCode
+
+            if command.preferred_mode == "cache" and cache_raises is not None:
+                raise DomainError(ErrorCode(cache_raises))
+            if command.preferred_mode != "cache" and raises is not None:
+                raise DomainError(ErrorCode(raises))
+            if report_json is not None:
+                from src.domain.models import LintReport
+
+                return LintReport.model_validate_json(report_json)
+            return None
 
         def list_open(self, project_id):
             from src.domain.models import IssueCard
@@ -314,3 +328,96 @@ def test_accept_change_success_flashes_pending_change_and_navigates_release() ->
     page.button(key="lint_go_release").click().run()
     assert not page.exception
     assert page.session_state["lint_test_switched_page"] == "REGISTERED-RELEASE"
+
+
+def _report(
+    *,
+    result_mode: str = "realtime",
+    cached_at: datetime | None = None,
+    baseline_version: str | None = None,
+) -> str:
+    from src.domain.enums import CallResultMode
+    from src.domain.models import LintReport
+
+    return LintReport(
+        issues=[_issue()],
+        deterministic_count=0,
+        semantic_count=1,
+        result_mode=CallResultMode(result_mode),
+        model_call_id=None if result_mode == "cache" else "CALL-LINT-001",
+        cache_generated_at=cached_at,
+        baseline_version=baseline_version,
+    ).model_dump_json()
+
+
+def test_lint_timeout_continues_with_exact_frozen_cache() -> None:
+    """Catches the lint page dropping the flow instead of continuing via exact cache.
+
+    实时超时后页面必须以同材料、同版本的冻结缓存继续（第二次调用
+    preferred_mode == "cache"），且不得显示「未找到缓存」（T15-R02）。
+    """
+    page = AppTest.from_function(
+        _render,
+        args=(_issue().model_dump_json(),),
+        kwargs={"raises": "MODEL_TIMEOUT", "report_json": _report(result_mode="cache")},
+    ).run()
+
+    page.button(key="lint_run").click().run()
+
+    assert not page.exception
+    successes = "\n".join(item.value for item in page.success)
+    assert "自检完成" in successes
+    assert "冻结缓存" in successes
+    assert page.session_state["lint_test_run_command"]["preferred_mode"] == "cache"
+    warnings = "\n".join(item.value for item in page.warning)
+    assert "未找到同材料、同版本的可用缓存" not in warnings
+
+
+def test_lint_timeout_without_exact_cache_disables_fallback() -> None:
+    """Catches offering an approximate cache or hiding the no-exact-cache fact.
+
+    实时超时且探测返回 CACHE_NOT_FOUND 时，必须展示「实时分析超时」与
+    「未找到同材料、同版本的可用缓存」，且不得显示自检完成（T15-R02）。
+    """
+    page = AppTest.from_function(
+        _render,
+        args=(_issue().model_dump_json(),),
+        kwargs={"raises": "MODEL_TIMEOUT", "cache_raises": "CACHE_NOT_FOUND"},
+    ).run()
+
+    page.button(key="lint_run").click().run()
+
+    assert not page.exception
+    warnings = "\n".join(item.value for item in page.warning)
+    assert "实时分析超时" in warnings
+    assert "未找到同材料、同版本的可用缓存" in warnings
+    assert not page.success
+
+
+def test_lint_fallback_displays_cache_provenance() -> None:
+    """Catches the cache continuation hiding frozen-cache provenance.
+
+    缓存接续必须展示「冻结缓存」、可审计的缓存生成时间与当前基线版本，
+    且不得被标注为实时结果（T15-R02）。
+    """
+    cached_at = datetime(2026, 8, 6, 9, 30, 0, tzinfo=UTC)
+    page = AppTest.from_function(
+        _render,
+        args=(_issue().model_dump_json(),),
+        kwargs={
+            "raises": "MODEL_TIMEOUT",
+            "report_json": _report(
+                result_mode="cache",
+                cached_at=cached_at,
+                baseline_version="LLD-724_1",
+            ),
+        },
+    ).run()
+
+    page.button(key="lint_run").click().run()
+
+    assert not page.exception
+    successes = "\n".join(item.value for item in page.success)
+    assert "冻结缓存" in successes
+    assert cached_at.isoformat(timespec="seconds") in successes
+    assert "LLD-724_1" in successes

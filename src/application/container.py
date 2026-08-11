@@ -77,7 +77,12 @@ from src.infrastructure.files.manifest_integrity import ManifestIntegrityChecker
 from src.infrastructure.files.manifest_store import ManifestStore
 from src.infrastructure.files.markdown_store import MarkdownStore
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
-from src.infrastructure.gateways.composition import DifyGatewaySettings, build_workflow_gateways
+from src.infrastructure.gateways.composition import (
+    DifyGatewaySettings,
+    WorkflowTimeouts,
+    build_workflow_gateways,
+    default_workflow_timeouts,
+)
 from src.infrastructure.observability.event_logger import EventLogger
 from src.infrastructure.observability.model_call_logger import ModelCallLogger
 from src.infrastructure.recovery.reconciliation_service import ReconciliationService
@@ -165,6 +170,9 @@ class AppSettings(BaseModel):
     demo_mode: bool
     schema_version: str = Field(min_length=1)
     lint_input_contract_version: Literal["2.0"] = "2.0"
+    # T15-R01：三个受治理 Workflow 的显式超时（秒）。YAML 加载路径强制
+    # 要求 timeouts 节点；直接构造（UI 测试等）使用 60/30/60 默认。
+    timeouts: WorkflowTimeouts = Field(default_factory=default_workflow_timeouts)
 
 
 @dataclass(frozen=True)
@@ -197,6 +205,9 @@ def _load_settings(app_path: Path, schema_path: Path) -> tuple[AppSettings, bool
         app_document = yaml.safe_load(app_path.read_text(encoding="utf-8"))
         schema_document = yaml.safe_load(schema_path.read_text(encoding="utf-8"))
         app_data = app_document["app"]
+        # T15-R01：timeouts 节点必须显式存在；缺失、非整数、零、负值或超过
+        # 上限都使配置失败，禁止运行时回落隐式默认超时。
+        timeouts_data = app_document["timeouts"]
         schema_version = schema_document["schema_version"]
         has_explicit_lint_contract = "lint_input_contract_version" in schema_document
         lint_input_contract_version = schema_document.get(
@@ -207,6 +218,7 @@ def _load_settings(app_path: Path, schema_path: Path) -> tuple[AppSettings, bool
             **app_data,
             schema_version=schema_version,
             lint_input_contract_version=lint_input_contract_version,
+            timeouts=WorkflowTimeouts(**timeouts_data),
         )
         return settings, has_explicit_lint_contract
     except (OSError, KeyError, TypeError, yaml.YAMLError, ValidationError) as error:
@@ -386,6 +398,7 @@ def _build_stateful_container(
         raise ConfigurationError(f"Invalid Dify gateway configuration: {message}") from None
     gateways = build_workflow_gateways(
         gateway_settings,
+        timeouts=settings.timeouts,
         http_factory=http_factory or httpx.Client,
     )
     event_logger.reconcile()

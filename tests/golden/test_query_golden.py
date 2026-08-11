@@ -367,7 +367,7 @@ def _build_use_case(client):
         sources=Sources([_source(row) for row in (*CORPUS, CANDIDATE)]),
         baseline_cards=BaselineCards(cards),
         material_reader=MaterialReader(),
-        gateway=QueryGateway(client),
+        gateway=QueryGateway(client, timeout_seconds=30),
         customer_names=(),
         strategy_terms=(),
         financial_terms=(),

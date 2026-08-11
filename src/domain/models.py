@@ -322,6 +322,8 @@ class LintReport(DomainModel):
     result_mode: CallResultMode
     model_call_id: NonEmptyStr | None
     cache_generated_at: datetime | None = None
+    # T15-R02：缓存接续溯源需要向演示者展示当前基线版本。
+    baseline_version: str | None = None
 
 
 class DecisionResult(DomainModel):

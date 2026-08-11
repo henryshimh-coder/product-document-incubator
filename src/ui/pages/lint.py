@@ -6,16 +6,22 @@ import streamlit as st
 
 from src.application.container import AppContainer
 from src.application.dto.lint import ListLintIssuesInput, RunLintInput
-from src.domain.enums import EvidenceSide, IssueStatus
-from src.domain.errors import AppError
-from src.domain.models import IssueCard, IssueEvidence
+from src.domain.enums import CallResultMode, EvidenceSide, IssueStatus
+from src.domain.errors import AppError, ErrorCode
+from src.domain.models import IssueCard, IssueEvidence, LintReport
 from src.ui.components.decision_bar import clear_decision_idempotency, render_decision_bar
+from src.ui.components.fallback_state import build_fallback_state
 from src.ui.components.issue_list import render_issue_list
 
 _SCOPE_LABELS = {
     "current": "当前基线",
     "current_plus_source": "当前基线＋本次新资料",
     "all_current_sources": "全部当前资料",
+}
+
+_MODE_LABELS = {
+    "realtime": "实时自检",
+    "cache": "冻结缓存",
 }
 
 _VIEW_LABELS = {
@@ -67,6 +73,15 @@ def render(container: AppContainer) -> None:
             format_func={"severity": "严重度", "updated": "最近更新"}.__getitem__,
             key="lint_sort",
         )
+        preferred_mode = st.radio(
+            "自检方式",
+            options=tuple(_MODE_LABELS),
+            format_func=_MODE_LABELS.__getitem__,
+            horizontal=True,
+            key="lint_mode",
+        )
+        if preferred_mode == "cache":
+            st.caption("冻结缓存 · 仅匹配与演示快照完全相同的材料与基线版本")
         run_clicked = st.button(
             "启动一键自检",
             type="primary",
@@ -79,19 +94,43 @@ def render(container: AppContainer) -> None:
             issues: list[IssueCard] = []
         else:
             if run_clicked:
+                command = RunLintInput(
+                    project_id=container.settings.project_id,
+                    scope=scope,
+                    source_id=source_id,
+                    preferred_mode=preferred_mode,
+                )
+                report: LintReport | None = None
                 try:
-                    container.lint.execute(
-                        RunLintInput(
-                            project_id=container.settings.project_id,
-                            scope=scope,
-                            source_id=source_id,
-                        )
-                    )
-                    st.success("自检完成，问题列表已更新。")
+                    report = container.lint.execute(command)
                 except AppError as error:
-                    st.error(f"{error.user_message}  \n错误码：`{error.code}`")
+                    if error.code == ErrorCode.MODEL_TIMEOUT and preferred_mode != "cache":
+                        # 实时超时：只允许完全匹配（同材料、同版本）的冻结缓存继续；
+                        # 没有完全匹配缓存时明确告知，不提供近似缓存（T15-R02）。
+                        state = build_fallback_state(
+                            task_type="lint",
+                            realtime_error_code="DIFY_TIMEOUT",
+                            exact_cache_available=False,
+                        )
+                        try:
+                            report = container.lint.execute(
+                                command.model_copy(update={"preferred_mode": "cache"})
+                            )
+                        except AppError as cache_error:
+                            if cache_error.code == ErrorCode.CACHE_NOT_FOUND:
+                                st.warning(
+                                    f"{state.title} · {state.detail}  \n错误码：`{error.code}`"
+                                )
+                            else:
+                                st.error(
+                                    f"{cache_error.user_message}  \n错误码：`{cache_error.code}`"
+                                )
+                    else:
+                        st.error(f"{error.user_message}  \n错误码：`{error.code}`")
                 except (KeyError, OSError, ValueError):
                     st.error("自检未完成，请检查当前基线和比较资料。")
+                if report is not None:
+                    _render_run_outcome(report)
             try:
                 issues = container.lint.list_issues(
                     ListLintIssuesInput(
@@ -133,6 +172,21 @@ def render(container: AppContainer) -> None:
             "change_id": None if result.change_request is None else result.change_request.id
         }
         st.rerun()
+
+
+def _render_run_outcome(report: LintReport) -> None:
+    if report.result_mode == CallResultMode.CACHE:
+        # 缓存接续必须向演示者展示溯源信息（T15-R02）：冻结缓存标识、
+        # 缓存生成时间与当前基线版本。
+        provenance = "冻结缓存"
+        if report.cache_generated_at is not None:
+            generated = report.cache_generated_at.isoformat(timespec="seconds")
+            provenance += f" · 缓存生成时间 {generated}"
+        if report.baseline_version:
+            provenance += f" · 基线版本 {report.baseline_version}"
+        st.success(f"自检完成（{provenance}），问题列表已更新。")
+        return
+    st.success("自检完成，问题列表已更新。")
 
 
 def _go_to_release() -> None:

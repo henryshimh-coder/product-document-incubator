@@ -15,7 +15,7 @@ from src.infrastructure.files.redactor import RedactionResult
 def _gateway(name: str, client: Any):
     module = importlib.import_module(f"src.infrastructure.gateways.{name}_gateway")
     gateway = getattr(module, f"{name.title()}Gateway")
-    return gateway(client)
+    return gateway(client, timeout_seconds=30)
 
 
 class FakeDifyClient:

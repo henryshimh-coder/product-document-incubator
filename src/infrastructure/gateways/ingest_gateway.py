@@ -13,8 +13,9 @@ from src.infrastructure.gateways.schemas import IngestWorkflowInput, IngestWorkf
 
 
 class IngestGateway:
-    def __init__(self, client: WorkflowGateway) -> None:
+    def __init__(self, client: WorkflowGateway, *, timeout_seconds: int) -> None:
         self.client = client
+        self.timeout_seconds = timeout_seconds
 
     def run(
         self,
@@ -22,7 +23,7 @@ class IngestGateway:
         *,
         safety_proof: OutboundSafetyProof,
         user: str | None = None,
-        timeout_seconds: int = 30,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         validated_inputs = validate_input(
             IngestWorkflowInput,
@@ -30,7 +31,10 @@ class IngestGateway:
             invalid_detail="INGEST_INPUT_INVALID",
             safety_proof=safety_proof,
         )
-        workflow_run_id, raw_output = invoke(self.client, validated_inputs, user, timeout_seconds)
+        # 超时一律来自组合根注入的配置（T15-R01）；调用方仅可在测试等
+        # 受控场景显式覆盖。
+        effective_timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        workflow_run_id, raw_output = invoke(self.client, validated_inputs, user, effective_timeout)
         try:
             output = IngestWorkflowOutput.model_validate(raw_output)
         except ValidationError as error:

@@ -67,7 +67,7 @@ class LintWorkflowGateway(Protocol):
         *,
         safety_proof: Any,
         user: str | None = None,
-        timeout_seconds: int = 30,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -360,6 +360,7 @@ class RunLint:
             ),
             model_call_id=workflow_run_id,
             cache_generated_at=cache_generated_at,
+            baseline_version=comparison.inputs["baseline_version"],
         )
 
     def list_open(self, project_id: str) -> list[IssueCard]:

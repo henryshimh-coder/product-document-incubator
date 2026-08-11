@@ -53,7 +53,7 @@ class QueryWorkflowGateway(Protocol):
         *,
         safety_proof: Any,
         user: str | None = None,
-        timeout_seconds: int = 30,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]: ...
 
 

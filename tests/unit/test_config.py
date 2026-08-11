@@ -36,6 +36,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -62,6 +67,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -88,6 +98,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -116,6 +131,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -152,6 +172,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -171,6 +196,11 @@ app:
         "demo_mode": True,
         "schema_version": "1.0",
         "lint_input_contract_version": "2.0",
+        "timeouts": {
+            "ingest_seconds": 60,
+            "query_seconds": 30,
+            "lint_seconds": 60,
+        },
     }
     assert result.import_source is None
     assert result.lint is None
@@ -196,6 +226,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -264,6 +299,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -434,6 +474,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -520,6 +565,11 @@ app:
   max_upload_mb: 20
   accepted_extensions: [pdf, docx, txt, md]
   demo_mode: true
+
+timeouts:
+  ingest_seconds: 60
+  query_seconds: 30
+  lint_seconds: 60
 """.strip(),
         encoding="utf-8",
     )
@@ -636,3 +686,149 @@ app:
 
     assert report.conflict_count == 1
     assert report.model_call_id is not None
+
+
+def test_load_settings_reads_all_workflow_timeouts(tmp_path):
+    """Catches the declared ingest/query/lint timeouts never reaching settings (T15-R01)."""
+    container = importlib.import_module("src.application.container")
+    app_yaml = tmp_path / "app.yaml"
+    schema_yaml = tmp_path / "schema.yaml"
+    app_yaml.write_text(
+        """
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions: [pdf, docx, txt, md]
+  demo_mode: true
+
+timeouts:
+  ingest_seconds: 61
+  query_seconds: 31
+  lint_seconds: 62
+""".strip(),
+        encoding="utf-8",
+    )
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
+
+    settings = container.load_settings(app_yaml, schema_yaml)
+
+    assert settings.timeouts.ingest_seconds == 61
+    assert settings.timeouts.query_seconds == 31
+    assert settings.timeouts.lint_seconds == 62
+
+
+@pytest.mark.parametrize(
+    "timeouts_block",
+    (
+        pytest.param("", id="missing-timeouts-node"),
+        pytest.param(
+            "timeouts:\n  ingest_seconds: 60\n  query_seconds: 30",
+            id="missing-lint-timeout",
+        ),
+        pytest.param(
+            "timeouts:\n  ingest_seconds: '60'\n  query_seconds: 30\n  lint_seconds: 60",
+            id="non-integer-timeout",
+        ),
+        pytest.param(
+            "timeouts:\n  ingest_seconds: 60.5\n  query_seconds: 30\n  lint_seconds: 60",
+            id="float-timeout",
+        ),
+        pytest.param(
+            "timeouts:\n  ingest_seconds: 0\n  query_seconds: 30\n  lint_seconds: 60",
+            id="zero-timeout",
+        ),
+        pytest.param(
+            "timeouts:\n  ingest_seconds: 60\n  query_seconds: -30\n  lint_seconds: 60",
+            id="negative-timeout",
+        ),
+        pytest.param(
+            "timeouts:\n  ingest_seconds: 60\n  query_seconds: 30\n  lint_seconds: 601",
+            id="unreasonable-timeout",
+        ),
+        pytest.param(
+            "timeouts:\n  ingest_seconds: 60\n  query_seconds: 30\n  lint_seconds: 60\n"
+            "  extra_seconds: 10",
+            id="unknown-timeout-key",
+        ),
+    ),
+)
+def test_invalid_workflow_timeout_fails_configuration(tmp_path, timeouts_block):
+    """Catches missing/non-integer/zero/negative/unreasonable timeouts starting the app."""
+    container = importlib.import_module("src.application.container")
+    app_yaml = tmp_path / "app.yaml"
+    schema_yaml = tmp_path / "schema.yaml"
+    app_yaml.write_text(
+        """
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions: [pdf, docx, txt, md]
+  demo_mode: true
+""".strip()
+        + ("\n\n" + timeouts_block if timeouts_block else "")
+        + "\n",
+        encoding="utf-8",
+    )
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(container.ConfigurationError):
+        container.load_settings(app_yaml, schema_yaml)
+
+
+def test_container_routes_distinct_timeouts_to_each_workflow(tmp_path, monkeypatch):
+    """Catches all three workflows sharing one hidden default timeout (T15-R01)."""
+    from scripts.bootstrap_demo import bootstrap
+
+    container_module = importlib.import_module("src.application.container")
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    app_yaml = config_dir / "app.yaml"
+    schema_yaml = config_dir / "schema.yaml"
+    app_yaml.write_text(
+        """
+app:
+  name: 产品智策
+  project_id: LLD
+  default_query_scope: effective
+  max_upload_mb: 20
+  accepted_extensions: [pdf, docx, txt, md]
+  demo_mode: true
+
+timeouts:
+  ingest_seconds: 61
+  query_seconds: 31
+  lint_seconds: 62
+""".strip(),
+        encoding="utf-8",
+    )
+    schema_yaml.write_text(
+        "schema_version: '1.0'\nlint_input_contract_version: '2.0'\n",
+        encoding="utf-8",
+    )
+    bootstrap(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    container = container_module.build_container(
+        app_yaml,
+        schema_yaml,
+        environ={
+            "DIFY_BASE_URL": "https://dify.example.test/v1",
+            "DIFY_INGEST_API_KEY": "app-ingest-secret",
+            "DIFY_QUERY_API_KEY": "app-query-secret",
+            "DIFY_LINT_API_KEY": "app-lint-secret",
+        },
+    )
+
+    assert container.import_source.gateway.timeout_seconds == 61
+    assert container.query.gateway.timeout_seconds == 31
+    assert container.lint.gateway.timeout_seconds == 62
