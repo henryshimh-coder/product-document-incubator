@@ -42,6 +42,49 @@ from src.infrastructure.db.repositories import (
 NOW = datetime(2026, 7, 29, 7, 0, tzinfo=UTC)
 
 
+def test_project_repository_lists_projects_by_recent_activity_then_id(tmp_path: Path) -> None:
+    """Catches project cards appearing in stale or nondeterministic order."""
+    db_path = tmp_path / "product_incubator.db"
+    migrate(db_path)
+    repository = SqliteProjectRepository(db_path)
+    projects = [
+        Project(
+            id="PROJECT_B",
+            name="项目 B",
+            product_line="说明 B",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="说明 A",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        Project(
+            id="PROJECT_NEW",
+            name="新项目",
+            product_line="最近更新",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW + timedelta(minutes=1),
+        ),
+    ]
+    for project in projects:
+        repository.add(project)
+
+    assert repository.list_all() == [projects[2], projects[1], projects[0]]
+
+
 def test_source_repository_round_trip_and_hash_lookup(tmp_path: Path) -> None:
     """Protects duplicate-source detection and exact SourceRecord restoration."""
     db_path = tmp_path / "product_intelligence.db"

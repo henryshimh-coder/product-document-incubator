@@ -11,6 +11,8 @@ __pycache__/
 *.py[cod]
 .streamlit/secrets.toml
 data/local_state/
+# Owner 选择的 2.0 项目库路径指针（运行态，不入库）
+data/local_state/incubator-root.json
 # reset_demo 从 data/demo_snapshots（已跟踪）恢复出的演示运行态，可随时再生成
 data/obsidian_vault/
 data/source_archive/

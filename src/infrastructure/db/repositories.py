@@ -100,9 +100,14 @@ class SqliteProjectRepository:
                 "project",
                 project_id,
             )
-        data = _row_data(row)
-        data["allow_external_model"] = bool(data["allow_external_model"])
-        return Project.model_validate(data)
+        return self._to_model(row)
+
+    def list_all(self) -> list[Project]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT * FROM projects ORDER BY updated_at DESC, id"
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
 
     def update_current_baseline(self, project_id: str, baseline_id: str) -> None:
         with connect(self.db_path) as connection:
@@ -112,6 +117,12 @@ class SqliteProjectRepository:
             )
             if result.rowcount != 1:
                 raise KeyError(f"project not found: {project_id}")
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> Project:
+        data = _row_data(row)
+        data["allow_external_model"] = bool(data["allow_external_model"])
+        return Project.model_validate(data)
 
 
 class SqliteSourceRepository:
