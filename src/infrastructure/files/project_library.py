@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+
+from src.domain.incubator import IncubatorSettings
 
 PROJECT_ID_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,63}$")
 
@@ -28,7 +31,12 @@ class ProjectPaths:
             raise ValueError("project_id must match ^[A-Z0-9][A-Z0-9_-]{0,63}$")
 
         resolved_library = library_root.expanduser().resolve()
-        resolved_project = (resolved_library / project_id).resolve()
+        lexical_project = resolved_library / project_id
+        if lexical_project.is_symlink():
+            raise ValueError("project root must not be a symlink")
+        resolved_project = lexical_project.resolve()
+        if resolved_project != lexical_project:
+            raise ValueError("project root must resolve to its declared project_id")
         if not resolved_project.is_relative_to(resolved_library):
             raise ValueError("project path resolves outside library_root")
 
@@ -60,12 +68,14 @@ class ProjectLibraryLocator:
         self,
         pointer_path: Path = Path("data/local_state/incubator-root.json"),
         home_directory: Path | None = None,
+        environ: Mapping[str, str] | None = None,
     ) -> None:
         self.pointer_path = pointer_path
         self.home_directory = home_directory or Path.home()
+        self.environ = os.environ if environ is None else environ
 
     def resolve(self) -> Path:
-        environment_root = os.getenv("INCUBATOR_LIBRARY_ROOT")
+        environment_root = self.environ.get("INCUBATOR_LIBRARY_ROOT")
         if environment_root and environment_root.strip():
             return Path(environment_root).expanduser().resolve()
 
@@ -81,9 +91,7 @@ class ProjectLibraryLocator:
     def save_pointer(self, library_root: Path) -> Path:
         resolved_root = library_root.expanduser().resolve()
         self.pointer_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = self.pointer_path.parent / (
-            f".{self.pointer_path.name}.tmp-{uuid4().hex}"
-        )
+        temporary_path = self.pointer_path.parent / (f".{self.pointer_path.name}.tmp-{uuid4().hex}")
         try:
             temporary_path.write_text(
                 json.dumps(
@@ -98,3 +106,36 @@ class ProjectLibraryLocator:
         finally:
             temporary_path.unlink(missing_ok=True)
         return resolved_root
+
+
+class JsonIncubatorSettingsStore:
+    def __init__(self, library_root: Path) -> None:
+        self.library_root = library_root.expanduser().resolve()
+        self.settings_path = (self.library_root / ".incubator/settings.json").resolve()
+        if not self.settings_path.is_relative_to(self.library_root):
+            raise ValueError("settings path resolves outside library_root")
+
+    def load(self) -> IncubatorSettings | None:
+        if not self.settings_path.is_file():
+            return None
+        payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        settings = IncubatorSettings.model_validate(payload)
+        saved_root = Path(settings.library_root).expanduser().resolve()
+        if saved_root != self.library_root:
+            raise ValueError("settings library_root does not match settings store")
+        return settings
+
+    def save(self, settings: IncubatorSettings) -> None:
+        saved_root = Path(settings.library_root).expanduser().resolve()
+        if saved_root != self.library_root:
+            raise ValueError("settings library_root does not match settings store")
+        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.settings_path.parent / f".settings.json.tmp-{uuid4().hex}"
+        try:
+            temporary_path.write_text(
+                json.dumps(settings.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary_path, self.settings_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)

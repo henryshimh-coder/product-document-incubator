@@ -19,9 +19,11 @@ from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
+from src.application.ports.incubator import ProjectManagement
 from src.application.use_cases.build_trace import BuildTrace
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
+from src.application.use_cases.manage_projects import ManageProjects
 from src.application.use_cases.publish_baseline import PublishBaseline
 from src.application.use_cases.record_decision import RecordDecision
 from src.application.use_cases.review_change_request import ReviewChangeRequest
@@ -76,6 +78,11 @@ from src.infrastructure.files.extractor import extract_document
 from src.infrastructure.files.manifest_integrity import ManifestIntegrityChecker
 from src.infrastructure.files.manifest_store import ManifestStore
 from src.infrastructure.files.markdown_store import MarkdownStore
+from src.infrastructure.files.project_library import (
+    JsonIncubatorSettingsStore,
+    ProjectLibraryLocator,
+)
+from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.gateways.composition import (
     DifyGatewaySettings,
@@ -178,6 +185,7 @@ class AppSettings(BaseModel):
 @dataclass(frozen=True)
 class AppContainer:
     settings: AppSettings
+    manage_projects: ProjectManagement | None = None
     state_lock_fd: int | None = None
     import_source: ImportSourceService | None = None
     dashboard: DashboardService | None = None
@@ -239,10 +247,14 @@ def build_container(
 ) -> AppContainer:
     settings, has_explicit_lint_contract = _load_settings(app_path, schema_path)
     project_root = app_path.resolve().parent.parent
+    project_management = _build_project_management(
+        project_root=project_root,
+        environ=environ,
+    )
     db_path = project_root / "data/local_state/product_intelligence.db"
     manifest_path = project_root / "data/local_state/current_baseline.json"
     if not manifest_path.is_file():
-        return AppContainer(settings=settings)
+        return AppContainer(settings=settings, manage_projects=project_management)
     # 状态锁必须在读取 Manifest、执行迁移或对账之前获取（评审第三轮 Important）；
     # 构建失败必须释放锁，成功时锁随容器持有直至 close()/进程退出。
     lock_fd = acquire_shared(project_root)
@@ -256,6 +268,7 @@ def build_container(
             environ=environ,
             http_factory=http_factory,
             lock_fd=lock_fd,
+            project_management=project_management,
         )
     except BaseException:
         release(lock_fd)
@@ -272,6 +285,7 @@ def _build_stateful_container(
     environ: Mapping[str, str] | None,
     http_factory,
     lock_fd: int,
+    project_management: ProjectManagement,
 ) -> AppContainer:
     migrate(db_path)
     manifest_store = ManifestStore(manifest_path, project_root=project_root)
@@ -341,6 +355,7 @@ def _build_stateful_container(
         return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
 
     local_services = {
+        "manage_projects": project_management,
         "dashboard": dashboard,
         "record_decision": decision_service,
         "review_change_request": review_service,
@@ -480,4 +495,39 @@ def _build_stateful_container(
         query=query_service,
         lint=lint_service,
         **local_services,
+    )
+
+
+def _build_project_management(
+    *,
+    project_root: Path,
+    environ: Mapping[str, str] | None,
+) -> ManageProjects:
+    runtime = os.environ if environ is None else environ
+    locator = ProjectLibraryLocator(
+        pointer_path=project_root / "data/local_state/incubator-root.json",
+        environ=runtime,
+    )
+    library_root = locator.resolve()
+    settings_store = JsonIncubatorSettingsStore(library_root)
+    database_path = library_root / ".incubator/product_incubator.db"
+    if settings_store.load() is not None:
+        migrate(database_path)
+    schema_source = Path(__file__).resolve().parents[2] / "assets/incubator_schema"
+
+    def now() -> datetime:
+        return datetime.now(UTC)
+
+    return ManageProjects(
+        library_root=library_root,
+        projects=SqliteProjectRepository(database_path),
+        scaffolder=ProjectScaffolder(
+            library_root=library_root,
+            schema_source=schema_source,
+            now=now,
+        ),
+        settings=settings_store,
+        now=now,
+        locator=locator,
+        schema_source=schema_source,
     )

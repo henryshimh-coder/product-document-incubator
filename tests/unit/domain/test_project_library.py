@@ -60,8 +60,21 @@ def test_project_paths_reject_existing_symlink_escape(tmp_path: Path) -> None:
     outside.mkdir()
     (library_root / "ESCAPE").symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="outside library_root"):
+    with pytest.raises(ValueError, match="symlink|outside library_root"):
         ProjectPaths.for_project(library_root, "ESCAPE")
+
+
+def test_project_paths_reject_symlink_to_another_project_in_same_library(tmp_path: Path) -> None:
+    """Catches one project ID resolving to another project's files inside the library."""
+    from src.infrastructure.files.project_library import ProjectPaths
+
+    library_root = tmp_path / "library"
+    project_b = library_root / "PROJECT_B"
+    project_b.mkdir(parents=True)
+    (library_root / "PROJECT_A").symlink_to(project_b, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="project root must not be a symlink"):
+        ProjectPaths.for_project(library_root, "PROJECT_A")
 
 
 def test_project_paths_reject_manifest_symlink_escape(tmp_path: Path) -> None:
@@ -116,3 +129,48 @@ def test_library_locator_uses_pointer_then_owner_home_default(
         "library_root": str((tmp_path / "owner-library").resolve())
     }
     assert not list(pointer.parent.glob(".incubator-root.json.tmp-*"))
+
+
+def test_settings_store_rejects_system_directory_symlink_escape(tmp_path: Path) -> None:
+    """Catches Owner settings being written outside the selected project library."""
+    from src.domain.incubator import IncubatorSettings
+    from src.infrastructure.files.project_library import JsonIncubatorSettingsStore
+
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (library_root / ".incubator").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="outside library_root"):
+        JsonIncubatorSettingsStore(library_root).save(
+            IncubatorSettings(
+                owner_name="产品经理",
+                library_root=str(library_root),
+                current_project_id=None,
+            )
+        )
+
+    assert not (outside / "settings.json").exists()
+
+
+def test_settings_store_rejects_payload_for_a_different_library_root(tmp_path: Path) -> None:
+    """Catches UI paths and filesystem operations silently targeting different libraries."""
+    from src.infrastructure.files.project_library import JsonIncubatorSettingsStore
+
+    library_root = tmp_path / "library-a"
+    settings_path = library_root / ".incubator/settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(
+        json.dumps(
+            {
+                "owner_name": "产品经理",
+                "library_root": str((tmp_path / "library-b").resolve()),
+                "current_project_id": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not match settings store"):
+        JsonIncubatorSettingsStore(library_root).load()
