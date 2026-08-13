@@ -9,10 +9,11 @@ from src.application.dto.documents import (
     ArchiveRawSourceInput,
     IncubateDocumentInput,
     IncubationView,
+    PublishDocumentDraftInput,
 )
 from src.application.dto.projects import CreateProjectInput, ProjectSelection
 from src.domain.incubator import DocumentDraft, IncubatorSettings, ProjectSummary
-from src.domain.models import Project
+from src.domain.models import Baseline, Project
 
 
 class IncubatorSettingsStore(Protocol):
@@ -66,6 +67,10 @@ class DocumentIncubation(Protocol):
     def list_drafts(self, project_id: str) -> list[DocumentDraft]: ...
 
     def save_draft(self, project_id: str, draft_id: str, markdown: str) -> DocumentDraft: ...
+
+
+class DocumentDraftPublisher(Protocol):
+    def execute(self, command: PublishDocumentDraftInput) -> Baseline: ...
 
 
 class SessionStateCleaner(Protocol):

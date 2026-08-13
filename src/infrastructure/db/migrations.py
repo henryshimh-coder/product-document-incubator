@@ -272,6 +272,7 @@ def migrate(db_path: Path) -> None:
         _add_column_if_missing(connection, "issue_cards", "target_rule_id", "TEXT")
         _add_column_if_missing(connection, "baselines", "full_document_sha256", "TEXT")
         _add_column_if_missing(connection, "baselines", "card_snapshot_sha256", "TEXT")
+        _add_column_if_missing(connection, "baselines", "display_version", "TEXT")
         _add_column_if_missing(
             connection,
             "decisions",

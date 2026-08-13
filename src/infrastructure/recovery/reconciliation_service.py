@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from contextlib import suppress
 from pathlib import Path
@@ -41,6 +42,10 @@ class ReconciliationService:
             return RepairResult(
                 success=False, repaired_entities=[], error_code="MANIFEST_ASSETS_INVALID"
             )
+        if _is_document_manifest(manifest) and not self._document_mirror_matches(manifest):
+            return RepairResult(
+                success=False, repaired_entities=[], error_code="DOCUMENT_MIRROR_MISMATCH"
+            )
         if not self._mirror_matches(manifest, snapshot.sha256):
             return RepairResult(success=False, repaired_entities=[], error_code="MIRROR_MISMATCH")
         return RepairResult(success=True, repaired_entities=[], error_code=None)
@@ -63,6 +68,9 @@ class ReconciliationService:
         repaired: list[str] = []
         connection: sqlite3.Connection | None = None
         try:
+            if _is_document_manifest(manifest):
+                self._rebuild_document_current_mirror(manifest)
+                repaired.append("document_current_mirror")
             connection = connect(self.db_path)
             connection.execute("BEGIN IMMEDIATE")
             project_row = connection.execute(
@@ -86,18 +94,20 @@ class ReconciliationService:
                 approved_by=manifest.approved_by,
                 effective_at=manifest.published_at,
                 created_at=manifest.published_at,
+                display_version=manifest.display_version,
             )
             connection.execute(
                 """
                 INSERT INTO baselines (
-                    id, project_id, version, parent_baseline_id, status,
+                    id, project_id, version, display_version, parent_baseline_id, status,
                     full_document_path, card_snapshot_path, manifest_sha256,
                     full_document_sha256, card_snapshot_sha256,
                     change_request_id, approved_by, effective_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     project_id = excluded.project_id,
                     version = excluded.version,
+                    display_version = excluded.display_version,
                     parent_baseline_id = excluded.parent_baseline_id,
                     status = excluded.status,
                     full_document_path = excluded.full_document_path,
@@ -113,6 +123,7 @@ class ReconciliationService:
                     baseline.id,
                     baseline.project_id,
                     baseline.version,
+                    baseline.display_version,
                     baseline.parent_baseline_id,
                     baseline.status.value,
                     baseline.full_document_path,
@@ -211,7 +222,7 @@ class ReconciliationService:
                 )
             repaired.append("knowledge_cards")
             connection.commit()
-        except sqlite3.Error:
+        except (OSError, sqlite3.Error):
             if connection is not None:
                 with suppress(Exception):
                     connection.rollback()
@@ -223,6 +234,40 @@ class ReconciliationService:
                 with suppress(Exception):
                     connection.close()
         return RepairResult(success=True, repaired_entities=repaired, error_code=None)
+
+    def _document_mirror_matches(self, manifest: BaselineManifest) -> bool:
+        current_document = (self.project_root / "wiki/current/当前产品方案.md").resolve()
+        try:
+            return (
+                current_document.is_relative_to(self.project_root)
+                and hashlib.sha256(current_document.read_bytes()).hexdigest()
+                == manifest.full_document_sha256
+            )
+        except OSError:
+            return False
+
+    def _rebuild_document_current_mirror(self, manifest: BaselineManifest) -> None:
+        """Restore the 2.0 current Markdown mirror from Manifest-owned bytes."""
+        version_document = (self.project_root / manifest.full_document_path).resolve()
+        current_document = (self.project_root / "wiki/current/当前产品方案.md").resolve()
+        if not (
+            version_document.is_relative_to(self.project_root)
+            and current_document.is_relative_to(self.project_root)
+        ):
+            raise OSError("document current mirror path is unsafe")
+        payload = version_document.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != manifest.full_document_sha256:
+            raise OSError("manifest document hash is invalid")
+        current_document.parent.mkdir(parents=True, exist_ok=True)
+        temporary = current_document.with_name(f".{current_document.name}.rebuild.tmp")
+        try:
+            with temporary.open("xb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, current_document)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _fail(self, connection: sqlite3.Connection, error_code: str) -> RepairResult:
         with suppress(Exception):
@@ -331,3 +376,7 @@ class ReconciliationService:
         except sqlite3.Error:
             return False
         return True
+
+
+def _is_document_manifest(manifest: BaselineManifest) -> bool:
+    return manifest.full_document_path.startswith("wiki/versions/")

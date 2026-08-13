@@ -137,6 +137,7 @@ class Baseline(DomainModel):
     approved_by: NonEmptyStr
     effective_at: datetime | None
     created_at: datetime
+    display_version: NonEmptyStr | None = None
 
 
 class IssueEvidence(DomainModel):
@@ -350,6 +351,7 @@ class BaselineManifest(DomainModel):
     change_request_id: NonEmptyStr | None
     approved_by: NonEmptyStr
     published_at: datetime
+    display_version: NonEmptyStr | None = None
 
 
 class ModelCallLog(DomainModel):

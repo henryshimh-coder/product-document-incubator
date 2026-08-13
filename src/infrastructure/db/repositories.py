@@ -347,16 +347,17 @@ class SqliteBaselineRepository:
             connection.execute(
                 """
                 INSERT INTO baselines (
-                    id, project_id, version, parent_baseline_id, status,
+                    id, project_id, version, display_version, parent_baseline_id, status,
                     full_document_path, card_snapshot_path, manifest_sha256,
                     full_document_sha256, card_snapshot_sha256,
                     change_request_id, approved_by, effective_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     baseline.id,
                     baseline.project_id,
                     baseline.version,
+                    baseline.display_version,
                     baseline.parent_baseline_id,
                     baseline.status.value,
                     baseline.full_document_path,

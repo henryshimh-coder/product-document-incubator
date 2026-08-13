@@ -52,3 +52,12 @@ class IncubationView(BaseModel):
 
     draft: DocumentDraft
     markdown: str
+
+
+class PublishDocumentDraftInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    project_id: str = Field(min_length=1)
+    draft_id: str = Field(min_length=1)
+    owner_name: str = Field(min_length=1, max_length=100)
+    display_version: str = Field(min_length=1, max_length=50)

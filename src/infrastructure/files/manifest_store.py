@@ -132,3 +132,32 @@ class ManifestStore:
             raise ManifestDurabilityUncertainError(
                 f"Manifest replacement completed but durability is uncertain: {self.path}"
             ) from error
+
+    def build_initial_candidate(
+        self,
+        *,
+        project_id: str,
+        version: str,
+        display_version: str,
+        approved_by: str,
+        published_at: datetime,
+        full_document_path: str,
+        card_snapshot_path: str,
+        full_document_sha256: str,
+        card_snapshot_sha256: str,
+    ) -> BaselineManifest:
+        return BaselineManifest(
+            schema_version="2.0",
+            project_id=project_id,
+            current_baseline_id=f"BASE-{version}",
+            current_version=version,
+            parent_baseline_id=None,
+            full_document_path=full_document_path,
+            card_snapshot_path=card_snapshot_path,
+            full_document_sha256=full_document_sha256,
+            card_snapshot_sha256=card_snapshot_sha256,
+            change_request_id=None,
+            approved_by=approved_by,
+            published_at=published_at,
+            display_version=display_version,
+        )

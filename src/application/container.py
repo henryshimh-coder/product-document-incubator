@@ -20,7 +20,11 @@ from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
-from src.application.ports.incubator import DocumentIncubation, ProjectManagement
+from src.application.ports.incubator import (
+    DocumentDraftPublisher,
+    DocumentIncubation,
+    ProjectManagement,
+)
 from src.application.project_context import ProjectContext
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.build_trace import BuildTrace
@@ -29,6 +33,7 @@ from src.application.use_cases.import_source import ImportSource
 from src.application.use_cases.incubate_document import IncubateDocument
 from src.application.use_cases.manage_projects import ManageProjects
 from src.application.use_cases.publish_baseline import PublishBaseline
+from src.application.use_cases.publish_document_draft import PublishDocumentDraft
 from src.application.use_cases.record_decision import RecordDecision
 from src.application.use_cases.review_change_request import ReviewChangeRequest
 from src.application.use_cases.run_lint import (
@@ -204,6 +209,7 @@ class AppContainer:
     active_project: ProjectContext | None = None
     archive_raw_source: RawSourceArchiveService | None = None
     incubate_document: DocumentIncubation | None = None
+    publish_document_draft: DocumentDraftPublisher | None = None
     state_lock_fd: int | None = None
     import_source: ImportSourceService | None = None
     dashboard: DashboardService | None = None
@@ -298,6 +304,7 @@ def build_container(
                     environ=environ,
                     http_factory=http_factory,
                 ),
+                publish_document_draft=_build_document_draft_publisher(active_project),
             )
         lock_fd = acquire_shared(active_project.paths.project_root)
         try:
@@ -434,6 +441,9 @@ def _build_stateful_container(
                 environ=environ,
                 http_factory=http_factory,
             )
+        ),
+        "publish_document_draft": (
+            None if active_project is None else _build_document_draft_publisher(active_project)
         ),
         "dashboard": dashboard,
         "record_decision": decision_service,
@@ -687,4 +697,24 @@ def _build_document_incubation(
         financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
         leader_names=dictionary("REDACTION_LEADER_NAMES"),
         unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
+    )
+
+
+def _build_document_draft_publisher(active_project: ProjectContext) -> PublishDocumentDraft:
+    manifest = ManifestStore(
+        active_project.paths.manifest_path,
+        project_root=active_project.paths.project_root,
+    )
+    return PublishDocumentDraft(
+        paths=active_project.paths,
+        projects=SqliteProjectRepository(active_project.db_path),
+        sources=SqliteSourceRepository(active_project.db_path),
+        drafts=SqliteDocumentDraftRepository(active_project.db_path),
+        store=DocumentStore(active_project.paths),
+        manifest=manifest,
+        reconciliation=ReconciliationService(
+            manifest_store=manifest,
+            db_path=active_project.db_path,
+            project_root=active_project.paths.project_root,
+        ),
     )
