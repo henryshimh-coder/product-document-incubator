@@ -6,6 +6,7 @@ import json
 import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -13,11 +14,12 @@ if __package__ in {None, ""}:
 
 from src.application.dto.projects import CreateProjectInput
 from src.domain.enums import BaselineStatus
+from src.domain.incubator import IncubatorSettings
 from src.domain.models import Baseline, BaselineManifest, Project, SourceRecord
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import SqliteBaselineRepository, SqliteKnowledgeRepository
 from src.infrastructure.files.manifest_store import ManifestStore
-from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.project_library import JsonIncubatorSettingsStore, ProjectPaths
 from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 
 
@@ -64,9 +66,23 @@ def migrate_lld(source_root: Path, library_root: Path, *, dry_run: bool = False)
         raise
     try:
         _write_library_database(library_root, committed, legacy)
+        _ensure_library_settings(library_root, legacy["manifest"])
     except BaseException:
         raise RuntimeError("MIGRATION_DATABASE_WRITE_FAILED") from None
     return MigrationResult("MIGRATED", committed.project_root)
+
+
+def _ensure_library_settings(library_root: Path, manifest: BaselineManifest) -> None:
+    settings = JsonIncubatorSettingsStore(library_root)
+    if settings.load() is not None:
+        return
+    settings.save(
+        IncubatorSettings(
+            owner_name=manifest.approved_by,
+            library_root=str(library_root),
+            current_project_id="LLD",
+        )
+    )
 
 
 def _read_legacy(source_root: Path) -> dict:
@@ -110,6 +126,21 @@ def _read_hashed_file(root: Path, relative: str, digest: str) -> bytes:
 
 
 def _read_legacy_database(
+    db_path: Path, manifest: BaselineManifest
+) -> tuple[Project, Baseline, list[SourceRecord]]:
+    # SQLite may checkpoint a live WAL while opening a source database. Read a
+    # disposable copy instead, so --dry-run never changes 1.x files.
+    with tempfile.TemporaryDirectory(prefix="lld-migration-read-") as temporary:
+        copied_db = Path(temporary) / db_path.name
+        shutil.copyfile(db_path, copied_db)
+        for suffix in ("-wal", "-shm"):
+            sidecar = db_path.with_name(f"{db_path.name}{suffix}")
+            if sidecar.is_file():
+                shutil.copyfile(sidecar, copied_db.with_name(f"{copied_db.name}{suffix}"))
+        return _read_legacy_database_copy(copied_db, manifest)
+
+
+def _read_legacy_database_copy(
     db_path: Path, manifest: BaselineManifest
 ) -> tuple[Project, Baseline, list[SourceRecord]]:
     uri = f"file:{db_path.resolve()}?mode=ro"

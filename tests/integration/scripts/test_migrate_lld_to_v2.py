@@ -16,6 +16,7 @@ from src.infrastructure.db.repositories import (
     SqliteSourceRepository,
 )
 from src.infrastructure.files.manifest_store import ManifestStore
+from src.infrastructure.files.project_library import JsonIncubatorSettingsStore
 
 
 def _migration_module():
@@ -145,9 +146,10 @@ def test_lld_dry_run_writes_nothing(tmp_path: Path) -> None:
     source_root = tmp_path / "legacy"
     _create_legacy_fixture(source_root)
     library_root = tmp_path / "library"
+    module = _migration_module()
     before = _snapshot_tree(tmp_path)
 
-    result = _migration_module().migrate_lld(source_root, library_root, dry_run=True)
+    result = module.migrate_lld(source_root, library_root, dry_run=True)
 
     assert result.status == "DRY_RUN_OK"
     assert _snapshot_tree(tmp_path) == before
@@ -165,6 +167,7 @@ def test_lld_migration_is_idempotent_and_preserves_raw_hashes(tmp_path: Path) ->
 
     assert migrated.status == "MIGRATED"
     assert repeated.status == "ALREADY_MIGRATED"
+    assert JsonIncubatorSettingsStore(library_root).load() is not None
     assert copied.is_file()
     assert (
         hashlib.sha256(copied.read_bytes()).hexdigest()
