@@ -226,7 +226,7 @@ def _assert_schema_version_separates_cache_key(
         row = connection.execute(
             """
             SELECT task_type, source_sha256, baseline_version,
-                   prompt_version, model_label, schema_version
+                   prompt_version, model_label, schema_version, project_id
             FROM cache_entries WHERE task_type = ?
             """,
             (task_type,),

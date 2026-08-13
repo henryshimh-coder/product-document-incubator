@@ -165,7 +165,11 @@ class ImportSource:
             command.applicable_baseline_version,
         )
         inputs = self._workflow_inputs(command, source, extracted, effective_cards)
-        identity = self._cache_identity(digest, command.applicable_baseline_version)
+        identity = self._cache_identity(
+            command.project_id,
+            digest,
+            command.applicable_baseline_version,
+        )
         call_id = f"CALL-{uuid4().hex.upper()}"
         correlation_id = f"CORR-{uuid4().hex.upper()}"
         authorized = can_call_external_model(project, source)
@@ -738,8 +742,14 @@ class ImportSource:
         )
         return cards, relations, issues
 
-    def _cache_identity(self, digest: str, baseline_version: str) -> CacheIdentity:
+    def _cache_identity(
+        self,
+        project_id: str,
+        digest: str,
+        baseline_version: str,
+    ) -> CacheIdentity:
         return CacheIdentity(
+            project_id=project_id,
             task_type="ingest",
             source_sha256=digest,
             baseline_version=baseline_version,

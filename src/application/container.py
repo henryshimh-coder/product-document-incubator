@@ -20,6 +20,7 @@ from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
 from src.application.ports.incubator import ProjectManagement
+from src.application.project_context import ProjectContext
 from src.application.use_cases.build_trace import BuildTrace
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
@@ -81,6 +82,7 @@ from src.infrastructure.files.markdown_store import MarkdownStore
 from src.infrastructure.files.project_library import (
     JsonIncubatorSettingsStore,
     ProjectLibraryLocator,
+    ProjectPaths,
 )
 from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
@@ -186,6 +188,7 @@ class AppSettings(BaseModel):
 class AppContainer:
     settings: AppSettings
     manage_projects: ProjectManagement | None = None
+    active_project: ProjectContext | None = None
     state_lock_fd: int | None = None
     import_source: ImportSourceService | None = None
     dashboard: DashboardService | None = None
@@ -198,6 +201,15 @@ class AppContainer:
     release_guard: ReleaseGuard | None = None
     reconciliation: ReconciliationPort | None = None
     trace: TraceService | None = None
+
+    def require_project_id(self) -> str:
+        if self.active_project is None:
+            # 仅供尚未迁移的 1.x 嵌入式测试/调用方兼容；实际组合根始终
+            # 提供 manage_projects，因此不会绕过 Owner 的项目选择。
+            if self.manage_projects is None:
+                return self.settings.project_id
+            raise RuntimeError("active project is required")
+        return self.active_project.project_id
 
     def close(self) -> None:
         """释放应用运行期持有的状态共享锁（幂等；进程退出时 flock 也会自动释放）。"""
@@ -251,6 +263,37 @@ def build_container(
         project_root=project_root,
         environ=environ,
     )
+    incubator_settings = project_management.settings.load()
+    if incubator_settings is not None:
+        if incubator_settings.current_project_id is None:
+            return AppContainer(settings=settings, manage_projects=project_management)
+        active_project = _build_project_context(
+            project_management=project_management,
+            project_id=incubator_settings.current_project_id,
+        )
+        if not active_project.paths.manifest_path.is_file():
+            return AppContainer(
+                settings=settings,
+                manage_projects=project_management,
+                active_project=active_project,
+            )
+        lock_fd = acquire_shared(active_project.paths.project_root)
+        try:
+            return _build_stateful_container(
+                settings,
+                has_explicit_lint_contract,
+                active_project.paths.project_root,
+                active_project.db_path,
+                active_project.paths.manifest_path,
+                environ=environ,
+                http_factory=http_factory,
+                lock_fd=lock_fd,
+                project_management=project_management,
+                active_project=active_project,
+            )
+        except BaseException:
+            release(lock_fd)
+            raise
     db_path = project_root / "data/local_state/product_intelligence.db"
     manifest_path = project_root / "data/local_state/current_baseline.json"
     if not manifest_path.is_file():
@@ -286,6 +329,7 @@ def _build_stateful_container(
     http_factory,
     lock_fd: int,
     project_management: ProjectManagement,
+    active_project: ProjectContext | None = None,
 ) -> AppContainer:
     migrate(db_path)
     manifest_store = ManifestStore(manifest_path, project_root=project_root)
@@ -342,7 +386,7 @@ def _build_stateful_container(
         release_uow=SqliteReleaseUnitOfWork(db_path, event_logger=event_logger),
         reconciliation=reconciliation,
         guard=release_guard,
-        lock_path=(project_root / "data/local_state/locks" / f"{settings.project_id}.release.lock"),
+        lock_path=(project_root / ".incubator/locks" / "release.lock"),
         now=lambda: datetime.now(UTC),
     )
     if environ is None:
@@ -392,6 +436,7 @@ def _build_stateful_container(
         return AppContainer(
             settings=settings,
             state_lock_fd=lock_fd,
+            active_project=active_project,
             **local_services,
         )
     if not has_explicit_lint_contract:
@@ -491,6 +536,7 @@ def _build_stateful_container(
     return AppContainer(
         settings=settings,
         state_lock_fd=lock_fd,
+        active_project=active_project,
         import_source=import_service,
         query=query_service,
         lint=lint_service,
@@ -530,4 +576,18 @@ def _build_project_management(
         now=now,
         locator=locator,
         schema_source=schema_source,
+    )
+
+
+def _build_project_context(
+    *, project_management: ProjectManagement, project_id: str
+) -> ProjectContext:
+    paths = ProjectPaths.for_project(project_management.library_root, project_id)
+    project_management.projects.get(project_id)
+    if not paths.project_root.is_dir():
+        raise FileNotFoundError(f"project directory not found: {project_id}")
+    return ProjectContext(
+        project_id=project_id,
+        paths=paths,
+        db_path=paths.library_root / ".incubator/product_incubator.db",
     )

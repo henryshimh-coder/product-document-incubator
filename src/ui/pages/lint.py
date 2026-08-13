@@ -35,8 +35,9 @@ _VIEW_LABELS = {
 
 
 def render(container: AppContainer) -> None:
+    project_id = container.require_project_id()
     st.title("一键自检")
-    st.caption(f"检查项目 {container.settings.project_id} 的规则冲突和治理问题")
+    st.caption(f"检查项目 {project_id} 的规则冲突和治理问题")
     flash = st.session_state.get("lint_decision_flash")
     if flash is not None:
         st.success("会议结论已记录，问题状态已更新。")
@@ -95,7 +96,7 @@ def render(container: AppContainer) -> None:
         else:
             if run_clicked:
                 command = RunLintInput(
-                    project_id=container.settings.project_id,
+                    project_id=project_id,
                     scope=scope,
                     source_id=source_id,
                     preferred_mode=preferred_mode,
@@ -134,7 +135,7 @@ def render(container: AppContainer) -> None:
             try:
                 issues = container.lint.list_issues(
                     ListLintIssuesInput(
-                        project_id=container.settings.project_id,
+                        project_id=project_id,
                         view=view,
                         sort_by=sort_by,
                     )

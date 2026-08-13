@@ -49,13 +49,13 @@ _PANEL_OPEN = (
 
 
 def render(container: AppContainer) -> None:
+    project_id = container.require_project_id()
     st.title("追溯与价值")
-    st.caption(f"追溯项目 {container.settings.project_id} 的来源、决定和版本")
+    st.caption(f"追溯项目 {project_id} 的来源、决定和版本")
     service = container.trace
     if service is None:
         st.info("追溯服务尚未就绪，请先完成本地基线初始化。")
         return
-    project_id = container.settings.project_id
     tab_chain, tab_value, tab_audit = st.tabs(["完整追溯", "价值验证", "调用审计"])
     with tab_chain:
         _render_chain_tab(service, project_id)

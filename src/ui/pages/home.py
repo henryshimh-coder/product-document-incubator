@@ -13,6 +13,7 @@ from src.ui.components.page_header import render_page_header
 
 
 def render(container: AppContainer) -> None:
+    project_id = container.require_project_id()
     if container.dashboard is None:
         st.markdown(
             '<section class="pi-page-header" data-testid="project-header">'
@@ -27,7 +28,7 @@ def render(container: AppContainer) -> None:
 
     try:
         view = container.dashboard.execute(
-            GetDashboardInput(project_id=container.settings.project_id)
+            GetDashboardInput(project_id=project_id)
         )
     except (KeyError, OSError, ValueError):
         st.error("项目数据读取失败，请检查本地配置后重新读取。")

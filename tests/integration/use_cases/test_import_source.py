@@ -450,6 +450,7 @@ def test_timeout_keeps_archive_and_recovers_same_source_from_exact_cache(
     # Cache payload validation is strict; the use case must only key by the exact identity.
     use_case.cache.put(
         CacheIdentity(
+            project_id="LLD",
             task_type="ingest",
             source_sha256=digest,
             baseline_version="LLD-724_1",

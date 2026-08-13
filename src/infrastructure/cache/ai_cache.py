@@ -28,6 +28,7 @@ CURRENT_OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
 
 
 def build_cache_key(
+    project_id: str,
     task_type: str,
     source_sha256: str,
     baseline_version: str,
@@ -38,6 +39,7 @@ def build_cache_key(
 ) -> str:
     canonical = "\n".join(
         (
+            project_id,
             task_type,
             source_sha256,
             baseline_version,
@@ -52,6 +54,7 @@ def build_cache_key(
 
 @dataclass(frozen=True)
 class CacheIdentity:
+    project_id: str
     task_type: str
     source_sha256: str
     baseline_version: str
@@ -63,6 +66,7 @@ class CacheIdentity:
     @property
     def cache_key(self) -> str:
         return build_cache_key(
+            self.project_id,
             self.task_type,
             self.source_sha256,
             self.baseline_version,
@@ -118,11 +122,12 @@ class AiCache:
             connection.execute(
                 """
                 INSERT INTO cache_entries (
-                    cache_key, task_type, source_sha256, baseline_version,
+                    cache_key, project_id, task_type, source_sha256, baseline_version,
                     prompt_version, model_label, schema_version, response_json,
                     response_sha256, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cache_key) DO UPDATE SET
+                    project_id = excluded.project_id,
                     task_type = excluded.task_type,
                     source_sha256 = excluded.source_sha256,
                     baseline_version = excluded.baseline_version,
@@ -135,6 +140,7 @@ class AiCache:
                 """,
                 (
                     cache_key,
+                    identity.project_id,
                     identity.task_type,
                     identity.source_sha256,
                     identity.baseline_version,
@@ -159,6 +165,7 @@ class AiCache:
         if row is None:
             return None
         expected_metadata = (
+            identity.project_id,
             identity.task_type,
             identity.source_sha256,
             identity.baseline_version,
@@ -169,6 +176,7 @@ class AiCache:
         actual_metadata = tuple(
             row[field]
             for field in (
+                "project_id",
                 "task_type",
                 "source_sha256",
                 "baseline_version",

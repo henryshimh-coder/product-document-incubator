@@ -243,6 +243,7 @@ class RunLint:
         # 缓存身份完全由本次真实运行时输入重建：对比来源（或参与材料合成）内容
         # 哈希、baseline、prompt、model、schema，任一不同即 miss。
         identity = CacheIdentity(
+            project_id=command.project_id,
             task_type="lint",
             source_sha256=comparison.cache_source_sha256,
             baseline_version=comparison.inputs["baseline_version"],

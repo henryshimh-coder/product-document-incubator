@@ -16,6 +16,7 @@ def _cache_module():
 def _identity(baseline_version: str = "LLD-724_1"):
     module = _cache_module()
     return module.CacheIdentity(
+        project_id="LLD",
         task_type="query",
         source_sha256="a" * 64,
         baseline_version=baseline_version,
@@ -62,6 +63,7 @@ def test_build_cache_key_uses_exact_canonical_fields_and_normalized_question():
     module = _cache_module()
 
     key = module.build_cache_key(
+        project_id="LLD",
         task_type="query",
         source_sha256="source-digest",
         baseline_version="LLD-724_1",
@@ -71,7 +73,25 @@ def test_build_cache_key_uses_exact_canonical_fields_and_normalized_question():
         question=" 当前  目标客群\n是什么？ ",
     )
 
-    assert key == "f3a786e133bb6ac98ad45278c495bc95b7e09316bfbad46dd40d2862958c5e64"
+    assert key == "770d07db9e99c3059f279fe9bbc77221317dd0a47d4ce7de998b51153344d280"
+
+
+def test_cache_key_is_project_scoped():
+    """Catches cache reuse between two product projects with identical inputs."""
+    module = _cache_module()
+    common = dict(
+        task_type="query",
+        source_sha256="a" * 64,
+        baseline_version="V1",
+        prompt_version="P1",
+        model_label="M1",
+        schema_version="1.0",
+        question="当前规则？",
+    )
+
+    assert module.CacheIdentity(project_id="PROJECT_A", **common).cache_key != module.CacheIdentity(
+        project_id="PROJECT_B", **common
+    ).cache_key
 
 
 def test_cache_persists_canonical_utf8_file_and_sqlite_index(tmp_path: Path, monkeypatch):
@@ -88,13 +108,14 @@ def test_cache_persists_canonical_utf8_file_and_sqlite_index(tmp_path: Path, mon
     with sqlite3.connect(db_path) as connection:
         row = connection.execute(
             """
-            SELECT task_type, source_sha256, baseline_version, prompt_version,
+            SELECT project_id, task_type, source_sha256, baseline_version, prompt_version,
                    model_label, schema_version, response_json
             FROM cache_entries WHERE cache_key = ?
             """,
             (identity.cache_key,),
         ).fetchone()
     assert row == (
+        "LLD",
         "query",
         "a" * 64,
         "LLD-724_1",
@@ -171,6 +192,7 @@ def test_cache_rejects_unknown_task_type_without_schema_registry_entry(
     cache, _ = _cache(tmp_path, monkeypatch)
     module = _cache_module()
     identity = module.CacheIdentity(
+        project_id="LLD",
         task_type="unregistered",
         source_sha256="a" * 64,
         baseline_version="LLD-724_1",

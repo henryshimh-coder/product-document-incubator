@@ -32,8 +32,9 @@ _CONFIRM_TEXT = (
 
 
 def render(container: AppContainer) -> None:
+    project_id = container.require_project_id()
     st.title("变更发布")
-    st.caption(f"检查并发布项目 {container.settings.project_id} 的候选变更")
+    st.caption(f"检查并发布项目 {project_id} 的候选变更")
     _render_flash(container)
     guard = container.release_guard
     blocked = bool(guard is not None and guard.is_blocked)
@@ -55,7 +56,7 @@ def render(container: AppContainer) -> None:
         return
     try:
         candidates = container.release_candidates.list_release_candidates(
-            container.settings.project_id
+            project_id
         )
     except (KeyError, OSError, ValueError):
         candidates = []
@@ -180,6 +181,7 @@ def _render_actions(container: AppContainer, change: ChangeRequest) -> None:
             else (change.reviewed_by or "")
         )
         st.session_state["release_confirm"] = {
+            "project_id": container.require_project_id(),
             "change_id": change.id,
             "pending": pending,
             "reviewer": reviewer,
@@ -229,6 +231,7 @@ def _confirm_dialog(container: AppContainer) -> None:
 
 
 def _execute_publish(container: AppContainer, payload: dict) -> None:
+    project_id = str(payload["project_id"])
     change_id = payload["change_id"]
     try:
         if payload["pending"]:
@@ -243,7 +246,7 @@ def _execute_publish(container: AppContainer, payload: dict) -> None:
             )
         baseline = container.publish_baseline.execute(
             PublishBaselineInput(
-                project_id=container.settings.project_id,
+                project_id=project_id,
                 change_request_id=change_id,
                 approved_by=payload["reviewer"],
                 impact_reviewed=True,
@@ -257,7 +260,7 @@ def _execute_publish(container: AppContainer, payload: dict) -> None:
             try:
                 current = next(
                     item
-                    for item in detail.list_release_candidates(container.settings.project_id)
+                    for item in detail.list_release_candidates(project_id)
                     if item.id == change_id
                 )
                 if current.status == ChangeStatus.APPROVED:

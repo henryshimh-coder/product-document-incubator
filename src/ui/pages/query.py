@@ -45,8 +45,9 @@ def _heading(title: str, test_id: str) -> None:
 
 
 def render(container: AppContainer) -> None:
+    project_id = container.require_project_id()
     st.title("当前查询")
-    st.caption(f"查询项目 {container.settings.project_id} 的当前生效规则与可追溯引用")
+    st.caption(f"查询项目 {project_id} 的当前生效规则与可追溯引用")
 
     service_available = container.query is not None
     scope = st.radio(
@@ -63,7 +64,7 @@ def render(container: AppContainer) -> None:
             historical_versions = (
                 ()
                 if container.query is None
-                else container.query.list_historical_versions(container.settings.project_id)
+                else container.query.list_historical_versions(project_id)
             )
         except (KeyError, OSError, ValueError):
             historical_versions = ()
@@ -123,7 +124,7 @@ def render(container: AppContainer) -> None:
         st.warning("请输入问题后再查询。")
         return
     command = RunQueryInput(
-        project_id=container.settings.project_id,
+        project_id=project_id,
         question=question,
         scope=scope,
         historical_version=historical_version,

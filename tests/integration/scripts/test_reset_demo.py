@@ -442,6 +442,7 @@ def test_frozen_snapshot_cache_entries_carry_full_metadata(tmp_path: Path) -> No
         CURRENT_OUTPUT_SCHEMAS[task_type].model_validate(value)
         question = DEMO_QUESTION if task_type == "query" else ""
         rebuilt = build_cache_key(
+            row["project_id"],
             task_type,
             row["source_sha256"],
             row["baseline_version"],

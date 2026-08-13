@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS model_call_logs (
 
 CREATE TABLE IF NOT EXISTS cache_entries (
     cache_key TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL DEFAULT 'LLD',
     task_type TEXT NOT NULL,
     source_sha256 TEXT NOT NULL,
     baseline_version TEXT NOT NULL,
@@ -235,6 +236,12 @@ def migrate(db_path: Path) -> None:
     with connect(db_path) as connection:
         connection.executescript(INITIAL_SCHEMA_SQL)
         _add_column_if_missing(connection, "model_call_logs", "workflow_run_id", "TEXT")
+        _add_column_if_missing(
+            connection,
+            "cache_entries",
+            "project_id",
+            "TEXT NOT NULL DEFAULT 'LLD'",
+        )
         _add_column_if_missing(connection, "model_call_logs", "correlation_id", "TEXT")
         _add_column_if_missing(connection, "event_logs", "correlation_id", "TEXT")
         _add_column_if_missing(connection, "issue_cards", "validation_note", "TEXT")

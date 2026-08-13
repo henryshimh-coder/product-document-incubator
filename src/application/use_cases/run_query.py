@@ -199,6 +199,7 @@ class RunQuery:
         # 缓存身份完全由本次真实运行时输入重建：基线材料（历史范围为快照）内容
         # 哈希、baseline、prompt、model、schema 与规范化 question，任一不同即 miss。
         identity = CacheIdentity(
+            project_id=command.project_id,
             task_type="query",
             source_sha256=(
                 baseline_material.sha256 if baseline_material is not None else snapshot_sha256

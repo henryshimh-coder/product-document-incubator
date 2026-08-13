@@ -195,7 +195,7 @@ def _default_baseline_version(container: AppContainer) -> str:
         return ""
     try:
         view = container.dashboard.execute(
-            GetDashboardInput(project_id=container.settings.project_id)
+            GetDashboardInput(project_id=container.require_project_id())
         )
     except (KeyError, OSError, ValueError):
         return ""
@@ -203,8 +203,9 @@ def _default_baseline_version(container: AppContainer) -> str:
 
 
 def render(container: AppContainer) -> None:
+    project_id = container.require_project_id()
     st.title("资料导入")
-    st.caption(f"为项目 {container.settings.project_id} 导入并编译新资料")
+    st.caption(f"为项目 {project_id} 导入并编译新资料")
     st.markdown(
         """
         <div style="display:flex;gap:12px;margin:12px 0 20px">
@@ -360,7 +361,7 @@ def _to_command(
     preferred_mode: Literal["realtime", "cache", "local"],
 ) -> ImportSourceInput:
     return ImportSourceInput(
-        project_id=container.settings.project_id,
+        project_id=container.require_project_id(),
         uploaded_name=state.uploaded_name,
         uploaded_bytes=state.uploaded_bytes,
         source_type=state.source_type,
