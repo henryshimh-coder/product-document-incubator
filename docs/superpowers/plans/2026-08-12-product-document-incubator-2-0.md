@@ -353,7 +353,7 @@ git commit -m "feat: add atomic project creation and switching"
 - Consumes: `.incubator/settings.json` 的 `current_project_id` 与 `ProjectPaths`。
 - Produces: `AppContainer.active_project`, `AppContainer.require_project_id()` 和项目作用域服务。
 
-- [ ] **Step 1: 写缓存键和容器上下文失败测试**
+- [x] **Step 1: 写缓存键和容器上下文失败测试**
 
 ```python
 def test_cache_key_is_project_scoped():
@@ -379,13 +379,13 @@ def test_container_without_active_project_exposes_only_project_management(contai
         container.require_project_id()
 ```
 
-- [ ] **Step 2: 运行失败测试**
+- [x] **Step 2: 运行失败测试**
 
 Run: `.venv/bin/python -m pytest tests/unit/test_ai_cache.py tests/unit/test_container_project_context.py -q`
 
 Expected: FAIL because `CacheIdentity` has no `project_id` and container has no active context。
 
-- [ ] **Step 3: 实现 ProjectContext 和组合根**
+- [x] **Step 3: 实现 ProjectContext 和组合根**
 
 ```python
 @dataclass(frozen=True)
@@ -403,21 +403,21 @@ def require_project_id(self) -> str:
 
 中央 DB 固定为 `{library_root}/.incubator/product_incubator.db`。Manifest、Wiki 和发布锁从 `active_project.paths` 解析。无当前项目时不构建 Query、Lint、发布和追溯服务。
 
-- [ ] **Step 4: 将缓存彻底项目化**
+- [x] **Step 4: 将缓存彻底项目化**
 
 `CacheIdentity` 新增必填 `project_id`；`build_cache_key()` 将 `project_id` 作为第一项。`cache_entries` 新增 `project_id TEXT NOT NULL DEFAULT 'LLD'`，查询和写入同时校验。缓存文件仍以已经包含项目 ID 的哈希命名。
 
-- [ ] **Step 5: 将既有页面从配置项目改为活动项目**
+- [x] **Step 5: 将既有页面从配置项目改为活动项目**
 
 机械替换 `container.settings.project_id` 为 `container.require_project_id()`；每个写入命令使用同一个局部变量 `project_id`。页面不得从 URL 或表单接收一个可覆盖活动项目的项目 ID。
 
-- [ ] **Step 6: 运行隔离测试和现有 Query/Lint 测试**
+- [x] **Step 6: 运行隔离测试和现有 Query/Lint 测试**
 
 Run: `.venv/bin/python -m pytest tests/unit/test_ai_cache.py tests/unit/test_container_project_context.py tests/integration/use_cases/test_project_isolation.py tests/unit/application/test_run_query.py tests/integration/use_cases/test_run_lint.py -q`
 
 Expected: PASS；A、B 相同材料和问题产生不同缓存键。
 
-- [ ] **Step 7: 提交本任务**
+- [x] **Step 7: 提交本任务**
 
 ```bash
 git add src/application/project_context.py src/application/container.py src/infrastructure/cache/ai_cache.py src/infrastructure/db/migrations.py src/infrastructure/files/manifest_store.py src/infrastructure/files/query_material_reader.py src/infrastructure/files/baseline_card_reader.py src/ui/pages/home.py src/ui/pages/ingest.py src/ui/pages/query.py src/ui/pages/lint.py src/ui/pages/release.py src/ui/pages/trace.py tests/unit/test_ai_cache.py tests/unit/test_container_project_context.py tests/integration/use_cases/test_project_isolation.py
@@ -443,7 +443,7 @@ git commit -m "refactor: scope runtime state to active project"
 - Consumes: `ProjectPaths.raw_root`、`SqliteSourceRepository`。
 - Produces: `ArchiveRawSource.execute()` 和 `ArchivedSourceView`。
 
-- [ ] **Step 1: 写外部文件移走、重复归档和符号链接逃逸测试**
+- [x] **Step 1: 写外部文件移走、重复归档和符号链接逃逸测试**
 
 ```python
 def test_archived_copy_survives_original_move(archive_service, tmp_path):
@@ -465,13 +465,13 @@ def test_same_hash_in_same_project_returns_existing_source(archive_service, sour
     assert second.source_id == first.source_id
 ```
 
-- [ ] **Step 2: 运行失败测试**
+- [x] **Step 2: 运行失败测试**
 
 Run: `.venv/bin/python -m pytest tests/integration/files/test_project_source_archive.py tests/integration/use_cases/test_archive_raw_source.py -q`
 
 Expected: FAIL because project-scoped raw archive does not exist。
 
-- [ ] **Step 3: 新增 ProjectSourceArchive，不改动 1.x SourceArchive**
+- [x] **Step 3: 新增 ProjectSourceArchive，不改动 1.x SourceArchive**
 
 构造函数固定为：
 
@@ -482,21 +482,21 @@ class ProjectSourceArchive:
 
 写入目标固定为 `raw/{year}/{source_id}/{safe_filename}`。写入后重新读取字节并校验 SHA-256；哈希不一致时移动到 `.incubator/quarantine/` 并抛出 `ARCHIVE_HASH_MISMATCH`。现有 `src/infrastructure/files/archive.py::SourceArchive` 和 1.x 测试保持不变，仅供旧版兼容与迁移读取。
 
-- [ ] **Step 4: 实现 ArchiveRawSource 和原子来源索引**
+- [x] **Step 4: 实现 ArchiveRawSource 和原子来源索引**
 
 `ArchiveRawSourceInput` 包含：`project_id`、`local_path`、材料类型、权威级别、部门、文档日期、显示版本、安全等级、脱敏确认和外调授权。成功顺序：归档 → 哈希复核 → SQLite 来源记录 → `source-index.json` 原子替换。索引失败时将来源状态设为 `index_failed`，不得显示为 Ingest 就绪。
 
-- [ ] **Step 5: 实现原始材料页面**
+- [x] **Step 5: 实现原始材料页面**
 
 页面展示文件名、来源 ID、SHA-256 前 12 位、完整归档路径、材料类型和 Ingest 状态；只提供“选择文件并归档”主动作。操作系统打开目录不可靠时只提供可复制路径，不在本任务调用 GUI。
 
-- [ ] **Step 6: 运行文件、用例、页面和安全测试**
+- [x] **Step 6: 运行文件、用例、页面和安全测试**
 
 Run: `.venv/bin/python -m pytest tests/integration/files/test_project_source_archive.py tests/integration/use_cases/test_archive_raw_source.py tests/e2e/test_materials_page.py tests/security/test_project_path_isolation.py -q`
 
 Expected: PASS；外部原文件移动后仍可读取归档副本。
 
-- [ ] **Step 7: 提交并暂停确认 B2**
+- [x] **Step 7: 提交并暂停确认 B2**
 
 ```bash
 git add src/application/dto/documents.py src/application/use_cases/archive_raw_source.py src/infrastructure/files/source_index_store.py src/infrastructure/files/project_source_archive.py src/application/container.py src/application/ports/incubator.py src/ui/pages/materials.py tests/integration/files/test_project_source_archive.py tests/integration/use_cases/test_archive_raw_source.py tests/e2e/test_materials_page.py tests/security/test_project_path_isolation.py

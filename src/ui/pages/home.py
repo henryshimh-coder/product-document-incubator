@@ -27,9 +27,7 @@ def render(container: AppContainer) -> None:
         return
 
     try:
-        view = container.dashboard.execute(
-            GetDashboardInput(project_id=project_id)
-        )
+        view = container.dashboard.execute(GetDashboardInput(project_id=project_id))
     except (KeyError, OSError, ValueError):
         st.error("项目数据读取失败，请检查本地配置后重新读取。")
         st.button("重新读取", type="secondary", key="home_retry")

@@ -4,6 +4,7 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any, Protocol
 
+from src.application.dto.documents import ArchivedSourceView, ArchiveRawSourceInput
 from src.application.dto.projects import CreateProjectInput, ProjectSelection
 from src.domain.incubator import IncubatorSettings, ProjectSummary
 from src.domain.models import Project
@@ -36,6 +37,10 @@ class ProjectManagement(Protocol):
     def list(self) -> list[ProjectSummary]: ...
 
     def switch(self, project_id: str) -> ProjectSelection: ...
+
+
+class RawSourceArchiving(Protocol):
+    def execute(self, command: ArchiveRawSourceInput) -> ArchivedSourceView: ...
 
 
 class SessionStateCleaner(Protocol):

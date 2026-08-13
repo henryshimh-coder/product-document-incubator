@@ -52,6 +52,30 @@ def build_cache_key(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def build_legacy_cache_key(
+    task_type: str,
+    source_sha256: str,
+    baseline_version: str,
+    prompt_version: str,
+    model_label: str,
+    schema_version: str,
+    question: str = "",
+) -> str:
+    """Read-only compatibility for pre-2.0 LLD frozen demo cache entries."""
+    canonical = "\n".join(
+        (
+            task_type,
+            source_sha256,
+            baseline_version,
+            prompt_version,
+            model_label,
+            schema_version,
+            " ".join(question.split()),
+        )
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class CacheIdentity:
     project_id: str
@@ -162,6 +186,22 @@ class AiCache:
                 "SELECT * FROM cache_entries WHERE cache_key = ?",
                 (identity.cache_key,),
             ).fetchone()
+            cache_key = identity.cache_key
+            if row is None and identity.project_id == "LLD":
+                legacy_key = build_legacy_cache_key(
+                    identity.task_type,
+                    identity.source_sha256,
+                    identity.baseline_version,
+                    identity.prompt_version,
+                    identity.model_label,
+                    identity.schema_version,
+                    identity.question,
+                )
+                row = connection.execute(
+                    "SELECT * FROM cache_entries WHERE cache_key = ? AND project_id = 'LLD'",
+                    (legacy_key,),
+                ).fetchone()
+                cache_key = legacy_key
         if row is None:
             return None
         expected_metadata = (
@@ -187,7 +227,7 @@ class AiCache:
         )
         if actual_metadata != expected_metadata:
             return None
-        cache_file = self.cache_dir / f"{identity.cache_key}.json"
+        cache_file = self.cache_dir / f"{cache_key}.json"
         try:
             response_bytes = cache_file.read_bytes()
             if hashlib.sha256(response_bytes).hexdigest() != row["response_sha256"]:
@@ -215,8 +255,39 @@ class AiCache:
         with connect(self.db_path) as connection:
             row = connection.execute(
                 "SELECT created_at FROM cache_entries WHERE cache_key = ?",
-                (identity.cache_key,),
+                (self._resolved_key(identity),),
             ).fetchone()
         if row is None:
             return None
         return result, datetime.fromisoformat(row["created_at"])
+
+    def _resolved_key(self, identity: CacheIdentity) -> str:
+        """Locate the key used by get(), including the narrowly scoped LLD legacy entry."""
+        with connect(self.db_path) as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM cache_entries WHERE cache_key = ?",
+                    (identity.cache_key,),
+                ).fetchone()
+                is not None
+            ):
+                return identity.cache_key
+            if identity.project_id == "LLD":
+                legacy_key = build_legacy_cache_key(
+                    identity.task_type,
+                    identity.source_sha256,
+                    identity.baseline_version,
+                    identity.prompt_version,
+                    identity.model_label,
+                    identity.schema_version,
+                    identity.question,
+                )
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM cache_entries WHERE cache_key = ? AND project_id = 'LLD'",
+                        (legacy_key,),
+                    ).fetchone()
+                    is not None
+                ):
+                    return legacy_key
+        return identity.cache_key

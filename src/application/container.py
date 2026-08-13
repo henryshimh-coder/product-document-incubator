@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.application.dto.dashboard import DashboardView, GetDashboardInput
 from src.application.dto.decision import RecordDecisionInput
+from src.application.dto.documents import ArchivedSourceView, ArchiveRawSourceInput
 from src.application.dto.ingest import ImportSourceInput
 from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
@@ -21,6 +22,7 @@ from src.application.dto.release import PublishBaselineInput, ReviewChangeReques
 from src.application.dto.trace import BuildTraceInput
 from src.application.ports.incubator import ProjectManagement
 from src.application.project_context import ProjectContext
+from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.build_trace import BuildTrace
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
@@ -85,7 +87,9 @@ from src.infrastructure.files.project_library import (
     ProjectPaths,
 )
 from src.infrastructure.files.project_scaffolder import ProjectScaffolder
+from src.infrastructure.files.project_source_archive import ProjectSourceArchive
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
+from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.gateways.composition import (
     DifyGatewaySettings,
     WorkflowTimeouts,
@@ -104,6 +108,10 @@ class ImportSourceService(Protocol):
 
 class DashboardService(Protocol):
     def execute(self, command: GetDashboardInput) -> DashboardView: ...
+
+
+class RawSourceArchiveService(Protocol):
+    def execute(self, command: ArchiveRawSourceInput) -> ArchivedSourceView: ...
 
 
 class QueryService(Protocol):
@@ -189,6 +197,7 @@ class AppContainer:
     settings: AppSettings
     manage_projects: ProjectManagement | None = None
     active_project: ProjectContext | None = None
+    archive_raw_source: RawSourceArchiveService | None = None
     state_lock_fd: int | None = None
     import_source: ImportSourceService | None = None
     dashboard: DashboardService | None = None
@@ -276,6 +285,7 @@ def build_container(
                 settings=settings,
                 manage_projects=project_management,
                 active_project=active_project,
+                archive_raw_source=_build_raw_source_archive(active_project),
             )
         lock_fd = acquire_shared(active_project.paths.project_root)
         try:
@@ -400,6 +410,9 @@ def _build_stateful_container(
 
     local_services = {
         "manage_projects": project_management,
+        "archive_raw_source": (
+            None if active_project is None else _build_raw_source_archive(active_project)
+        ),
         "dashboard": dashboard,
         "record_decision": decision_service,
         "review_change_request": review_service,
@@ -590,4 +603,17 @@ def _build_project_context(
         project_id=project_id,
         paths=paths,
         db_path=paths.library_root / ".incubator/product_incubator.db",
+    )
+
+
+def _build_raw_source_archive(active_project: ProjectContext) -> ArchiveRawSource:
+    return ArchiveRawSource(
+        paths=active_project.paths,
+        sources=SqliteSourceRepository(active_project.db_path),
+        archive_factory=lambda source_id, year: ProjectSourceArchive(
+            paths=active_project.paths,
+            source_id=source_id,
+            year=year,
+        ),
+        index=SourceIndexStore(active_project.paths),
     )

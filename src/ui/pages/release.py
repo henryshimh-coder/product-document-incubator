@@ -55,9 +55,7 @@ def render(container: AppContainer) -> None:
         st.info("发布服务尚未就绪，请先完成本地基线初始化。")
         return
     try:
-        candidates = container.release_candidates.list_release_candidates(
-            project_id
-        )
+        candidates = container.release_candidates.list_release_candidates(project_id)
     except (KeyError, OSError, ValueError):
         candidates = []
         st.warning("候选变更列表暂时不可读取。")

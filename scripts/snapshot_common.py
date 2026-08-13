@@ -75,7 +75,7 @@ from src.infrastructure.cache.ai_cache import (  # noqa: E402
     CURRENT_OUTPUT_SCHEMAS,
     AiCache,
     CacheIdentity,
-    build_cache_key,
+    build_legacy_cache_key,
 )
 from src.infrastructure.db.connection import connect  # noqa: E402
 from src.infrastructure.db.state_lock import STATE_LOCK_REL  # noqa: E402
@@ -260,9 +260,13 @@ def _validate_cache(project_root: Path, db_path: Path) -> str | None:
     """逐条核对缓存：文件 SHA、规范化 JSON 与输出 schema，键可按身份重算。"""
     cache_dir = project_root / CACHE_DIR_REL
     with _closed_connection(db_path) as connection:
+        cache_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(cache_entries)")
+        }
+        project_id_column = "project_id" if "project_id" in cache_columns else "'LLD' AS project_id"
         rows = connection.execute(
-            """
-            SELECT cache_key, task_type, source_sha256, baseline_version,
+            f"""
+            SELECT cache_key, {project_id_column}, task_type, source_sha256, baseline_version,
                    prompt_version, model_label, schema_version,
                    response_json, response_sha256
             FROM cache_entries ORDER BY cache_key
@@ -293,7 +297,7 @@ def _validate_cache(project_root: Path, db_path: Path) -> str | None:
             return f"CACHE_SCHEMA_MISMATCH:{row['cache_key']}"
         # question 不落库；无问题的任务类型可按身份字段完整重算键。
         if row["task_type"] in {"ingest", "lint"}:
-            rebuilt = build_cache_key(
+            rebuilt = build_legacy_cache_key(
                 row["task_type"],
                 row["source_sha256"],
                 row["baseline_version"],
@@ -818,6 +822,7 @@ def freeze_demo_caches(
         for row in harvested:
             question = DEMO_QUESTION if row["task_type"] == "query" else ""
             identity = CacheIdentity(
+                project_id=row["project_id"],
                 task_type=row["task_type"],
                 source_sha256=row["source_sha256"],
                 baseline_version=row["baseline_version"],
@@ -842,7 +847,7 @@ def _read_cache_entries(db_path: Path) -> list[sqlite3.Row]:
         connection.row_factory = sqlite3.Row
         return connection.execute(
             """
-            SELECT cache_key, task_type, source_sha256, baseline_version,
+            SELECT cache_key, project_id, task_type, source_sha256, baseline_version,
                    prompt_version, model_label, schema_version, response_json
             FROM cache_entries ORDER BY task_type
             """

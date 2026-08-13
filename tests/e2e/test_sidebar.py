@@ -28,8 +28,8 @@ def _build_test_container() -> Any:
     )
 
 
-def test_sidebar_chrome_renders_wordmark_safety_statement_and_keeps_six_routes() -> None:
-    """Catches removing required sidebar chrome or changing the six-workspace flow."""
+def test_sidebar_chrome_renders_wordmark_safety_statement_and_keeps_owner_routes() -> None:
+    """Catches removing the project or raw-material entrypoints from Owner navigation."""
     from src.ui.navigation import get_page_definitions
 
     page = AppTest.from_function(_render_sidebar_chrome).run()
@@ -39,7 +39,9 @@ def test_sidebar_chrome_renders_wordmark_safety_statement_and_keeps_six_routes()
     assert "产品智策" in visible_sidebar
     assert "本地知识资产 · 脱敏最小化调用" in visible_sidebar
     assert [(item.title, item.url_path) for item in get_page_definitions()] == [
+        ("项目中心", "projects"),
         ("项目首页", "home"),
+        ("原始材料", "materials"),
         ("资料导入", "ingest"),
         ("当前查询", "query"),
         ("一键自检", "lint"),
@@ -94,7 +96,11 @@ def test_every_real_page_callable_renders_chrome_inside_page_run_boundary(
         "get_script_run_ctx",
         lambda: page_context,
     )
-    monkeypatch.setattr(navigation_module, "get_page_definitions", lambda: definitions)
+    monkeypatch.setattr(
+        navigation_module,
+        "get_page_definitions",
+        lambda _container=None: definitions,
+    )
     monkeypatch.setattr(navigation_module.st, "navigation", capture_navigation)
     session_state: dict[str, Any] = {}
     monkeypatch.setattr(navigation_module.st, "session_state", session_state)

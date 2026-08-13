@@ -89,9 +89,10 @@ def test_cache_key_is_project_scoped():
         question="当前规则？",
     )
 
-    assert module.CacheIdentity(project_id="PROJECT_A", **common).cache_key != module.CacheIdentity(
-        project_id="PROJECT_B", **common
-    ).cache_key
+    assert (
+        module.CacheIdentity(project_id="PROJECT_A", **common).cache_key
+        != module.CacheIdentity(project_id="PROJECT_B", **common).cache_key
+    )
 
 
 def test_cache_persists_canonical_utf8_file_and_sqlite_index(tmp_path: Path, monkeypatch):
