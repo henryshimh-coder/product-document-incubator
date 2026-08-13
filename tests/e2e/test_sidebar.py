@@ -36,20 +36,14 @@ def test_sidebar_chrome_renders_wordmark_safety_statement_and_keeps_owner_routes
 
     assert not page.exception
     visible_sidebar = "\n".join(item.value for item in page.sidebar.markdown)
-    assert "产品智策" in visible_sidebar
+    assert "产品文档孵化器" in visible_sidebar
     assert "本地知识资产 · 脱敏最小化调用" in visible_sidebar
     assert [(item.title, item.url_path) for item in get_page_definitions()] == [
         ("项目中心", "projects"),
-        ("项目首页", "home"),
         ("原始材料", "materials"),
         ("文档孵化", "incubate"),
         ("当前产品", "current-product"),
         ("检查与建议", "checks"),
-        ("资料导入", "ingest"),
-        ("当前查询", "query"),
-        ("一键自检", "lint"),
-        ("变更发布", "release"),
-        ("追溯与价值", "trace"),
     ]
 
 
@@ -79,12 +73,11 @@ def test_every_real_page_callable_renders_chrome_inside_page_run_boundary(
             render=lambda current, route=route: page_renderer(current, route=route),
         )
         for title, route in [
-            ("项目首页", "home"),
-            ("资料导入", "ingest"),
-            ("当前查询", "query"),
-            ("一键自检", "lint"),
-            ("变更发布", "release"),
-            ("追溯与价值", "trace"),
+            ("项目中心", "projects"),
+            ("原始材料", "materials"),
+            ("文档孵化", "incubate"),
+            ("当前产品", "current-product"),
+            ("检查与建议", "checks"),
         ]
     ]
 
@@ -116,10 +109,10 @@ def test_every_real_page_callable_renders_chrome_inside_page_run_boundary(
     navigation_module.build_navigation(container)
     calls.clear()
 
-    assert len(captured_pages) == 6
-    assert session_state["_pi_release_page"] is captured_pages[4]
+    assert len(captured_pages) == 5
+    assert not session_state
     for route, page in zip(
-        ["home", "ingest", "query", "lint", "release", "trace"],
+        ["projects", "materials", "incubate", "current-product", "checks"],
         captured_pages,
         strict=True,
     ):

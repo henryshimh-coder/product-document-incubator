@@ -1,8 +1,8 @@
-# 产品智策（轻量交付版）
+# 产品文档孵化器 2.0
 
-面向产品团队的轻量知识治理演示系统：以 Streamlit 单页应用承载「基线 → 导入 → 查询 → 自检 → 决定 → 变更单 → 审批 → 发布 → 追溯」全链路，外部模型侧为三个独立治理的 Dify Workflow（导入 / 查询 / 自检），本地侧为 SQLite + Markdown Vault + 来源归档的可审计状态。
+面向 Owner 产品经理的本地优先产品文档工作台：一个项目一套 Wiki-LLM 目录，支持原始材料不可变归档、候选方案孵化、Owner 发布、当前 Markdown 下载和跨项目标题结构建议。1.x 的“产品智策”比赛材料及演示快照作为历史资产保留。
 
-- 版本：`v0.1.1-lightweight`（2026-08-24 轻量交付；含 T14 整改增补，基线 `v0.1.0-lightweight` 不变）
+- 版本：`v2.0`（多项目产品文档孵化首期）
 - Python：`>=3.11, <3.13`
 - 依赖管理：`uv`（锁文件 `uv.lock`）
 
@@ -11,12 +11,12 @@
 ```bash
 uv sync --frozen
 cp .env.example .env            # 按需填入三个 Dify Workflow Key，见下「外部模型配置」
-uv run python scripts/bootstrap_demo.py   # 初始化演示数据，输出 BOOTSTRAP_OK
-uv run python scripts/validate_data.py    # 校验演示环境，输出 VALIDATION_OK
+uv run python scripts/bootstrap_demo.py   # 可选：初始化 1.x 演示数据
+uv run python scripts/migrate_lld_to_v2.py --source-root . --library-root "$HOME/Documents/产品文档孵化器项目库" --dry-run
 uv run streamlit run streamlit_app.py --server.headless true
 ```
 
-浏览器打开 `http://localhost:8501`。以上流程已在一台干净目录（仅含仓库跟踪文件）实测通过，无需任何手工代码改动。该实测是**启动证据**（安装 → 初始化 → 校验 → HTTP 200）；接入真实 Dify 后的**完整业务流程证据**见 [docs/runbook/dify-import.md](docs/runbook/dify-import.md) 第七节，交付清单对两类证据分别记录。
+浏览器打开 `http://localhost:8501`。首次进入“项目中心”完成 Owner 与项目库设置，随后新建项目即可自动建立本地 Wiki-LLM 文件结构。
 
 首次执行 `uv sync --frozen` 需要网络或预热好的 uv 缓存；本交付不是离线安装包。
 
@@ -27,19 +27,15 @@ uv run streamlit run streamlit_app.py --server.headless true
 | 变量 | 用途 |
 | --- | --- |
 | `DIFY_BASE_URL` | Dify API 地址，默认 `https://api.dify.ai/v1` |
-| `DIFY_INGEST_API_KEY` | 导入 Workflow Key |
-| `DIFY_QUERY_API_KEY` | 查询 Workflow Key |
-| `DIFY_LINT_API_KEY` | 自检 Workflow Key |
+| `DIFY_DOCUMENT_API_KEY` | 产品方案孵化与结构建议 Workflow Key |
 
-三个 Key 必须互不相同（启动时校验，Key 不进入异常文本或日志）。**未配置 Key 时应用仍可启动**，但仅提供本地治理功能（首页 / 决定 / 审批 / 发布 / 追溯）；导入、查询、自检的实时与缓存能力需要 Key。三个 Workflow 的输入输出契约与导入步骤见 [docs/runbook/dify-import.md](docs/runbook/dify-import.md)。
+**未配置 Key 时应用仍可启动**，Owner 仍可建项目、归档材料和查看已发布文档；孵化与结构建议需要该 Key。历史 1.x 三个 Workflow 的配置说明仍见 [docs/runbook/dify-import.md](docs/runbook/dify-import.md)。
 
 ## 常用操作
 
 ```bash
-uv run python scripts/reset_demo.py --snapshot initial   # 重置到初始基线 LLD-724_1
-uv run python scripts/reset_demo.py --snapshot frozen    # 重置到冻结演示态（含冻结缓存）
-uv run python scripts/validate_data.py                   # 校验 Manifest / SQLite / 缓存 / 归档
-uv run pytest                                            # 全量自动测试（752 项）
+.venv/bin/python scripts/migrate_lld_to_v2.py --source-root . --library-root "$HOME/Documents/产品文档孵化器项目库" --dry-run
+.venv/bin/python -m pytest -q
 ```
 
 详细操作手册见 [docs/runbook/](docs/runbook/)：
@@ -56,7 +52,7 @@ streamlit_app.py      应用入口
 config/               应用、自检规则与 schema 配置
 src/                  domain / application / infrastructure / ui 分层代码
 scripts/              演示数据初始化、校验、快照与重置脚本
-data/demo_snapshots/  已跟踪的 initial / frozen 演示快照（可再生的运行态不入库）
+data/demo_snapshots/  1.x 已跟踪演示快照（历史资产）
 tests/                unit / integration / golden / e2e / security 测试
 docs/runbook/         操作手册
 docs/delivery/        交付清单
@@ -69,8 +65,6 @@ docs/qa/              测试报告与 UI 验收证据
 - 测试报告（730 项全过、黄金指标、E2E / 安全 / 三次重置演练）：[docs/qa/test-report-2026-08-24.md](docs/qa/test-report-2026-08-24.md)
 - 1440×1024 UI 逐页验收（真实浏览器截图）：[docs/qa/ui-acceptance-1440x1024.md](docs/qa/ui-acceptance-1440x1024.md)
 
-## 已知限制
+## 首期限制
 
-1. T13 验收的外部模型侧为本地 mock 网关；真实 Dify 联通性按 [dify-import.md](docs/runbook/dify-import.md) 演练验证。
-2. 发布后可比对材料只剩小基线时，全量自检会按 25% 出站覆盖率预算 fail-closed（`OUTBOUND_COVERAGE_EXCEEDED`），属治理设计行为；先导入新材料再自检。
-3. 首页眉题上半部被 Streamlit 框架工具栏裁切、右上角 Deploy 按钮为框架原生元素，均非产品 UI 缺陷。
+只支持单 Owner、UTF-8 Markdown 下载和手动触发结构建议；不提供项目删除、多人协作、DOCX/PDF 导出或自动文件监听。

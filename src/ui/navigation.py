@@ -9,19 +9,7 @@ import streamlit as st
 
 from src.application.container import AppContainer
 from src.ui.components.sidebar import render_sidebar_chrome
-from src.ui.pages import (
-    checks,
-    current_product,
-    home,
-    incubate,
-    ingest,
-    lint,
-    materials,
-    projects,
-    query,
-    release,
-    trace,
-)
+from src.ui.pages import checks, current_product, incubate, materials, projects
 
 PageRenderer = Callable[[AppContainer], None]
 
@@ -36,16 +24,10 @@ class PageDefinition:
 def get_page_definitions(container: AppContainer | None = None) -> list[PageDefinition]:
     definitions = [
         PageDefinition("项目中心", "projects", projects.render),
-        PageDefinition("项目首页", "home", home.render),
         PageDefinition("原始材料", "materials", materials.render),
         PageDefinition("文档孵化", "incubate", incubate.render),
         PageDefinition("当前产品", "current-product", current_product.render),
         PageDefinition("检查与建议", "checks", checks.render),
-        PageDefinition("资料导入", "ingest", ingest.render),
-        PageDefinition("当前查询", "query", query.render),
-        PageDefinition("一键自检", "lint", lint.render),
-        PageDefinition("变更发布", "release", release.render),
-        PageDefinition("追溯与价值", "trace", trace.render),
     ]
     if (
         container is not None
@@ -70,9 +52,4 @@ def build_navigation(container: AppContainer) -> Any:
         )
         for definition in get_page_definitions(container)
     ]
-    st.session_state["_pi_release_page"] = next(
-        page for page in pages if page.url_path == "release"
-    )
-    st.session_state["_pi_home_page"] = next(page for page in pages if page.url_path == "home")
-    st.session_state["_pi_trace_page"] = next(page for page in pages if page.url_path == "trace")
     return st.navigation(pages, position="sidebar")

@@ -7,7 +7,7 @@ from src.ui.navigation import build_navigation
 from src.ui.theme.loader import load_theme
 
 st.set_page_config(
-    page_title="产品智策",
+    page_title="产品文档孵化器",
     page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded",

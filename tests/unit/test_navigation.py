@@ -13,16 +13,10 @@ def test_navigation_defines_owner_routes_in_product_flow_order():
 
     assert [(item.title, item.url_path) for item in routes] == [
         ("项目中心", "projects"),
-        ("项目首页", "home"),
         ("原始材料", "materials"),
         ("文档孵化", "incubate"),
         ("当前产品", "current-product"),
         ("检查与建议", "checks"),
-        ("资料导入", "ingest"),
-        ("当前查询", "query"),
-        ("一键自检", "lint"),
-        ("变更发布", "release"),
-        ("追溯与价值", "trace"),
     ]
 
 

@@ -35,11 +35,8 @@ def render(container: AppContainer) -> None:
     )
     st.subheader("当前内容")
     st.markdown(exported.content.decode("utf-8"))
+    _render_embedded_query(container)
     _render_history(container)
-    if container.query is None:
-        st.caption("实时查询工作流尚未配置；当前方案可正常阅读与下载。")
-    else:
-        st.caption("实时查询可继续在“当前查询”中使用。")
 
 
 def _render_metadata(container: AppContainer) -> None:
@@ -79,3 +76,14 @@ def _render_history(container: AppContainer) -> None:
         st.caption("暂无历史版本。")
         return
     st.markdown("\n".join(f"- `{version}`" for version in history))
+
+
+def _render_embedded_query(container: AppContainer) -> None:
+    st.subheader("当前方案查询")
+    if container.query is None:
+        st.caption("实时查询工作流尚未配置；当前方案可正常阅读与下载。")
+        return
+    with st.expander("打开实时查询", expanded=False):
+        from src.ui.pages import query
+
+        query.render(container)

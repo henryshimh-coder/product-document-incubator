@@ -47,7 +47,10 @@ def _render_lint_state(container: AppContainer) -> None:
     if container.lint is None:
         st.caption("实时自检工作流尚未配置。")
     else:
-        st.caption("实时自检可继续在“一键自检”中使用。")
+        with st.expander("打开实时自检", expanded=False):
+            from src.ui.pages import lint
+
+            lint.render(container)
 
 
 def _render_suggestions(service, project_id: str) -> None:
