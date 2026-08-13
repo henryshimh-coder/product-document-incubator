@@ -20,12 +20,13 @@ from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
-from src.application.ports.incubator import ProjectManagement
+from src.application.ports.incubator import DocumentIncubation, ProjectManagement
 from src.application.project_context import ProjectContext
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.build_trace import BuildTrace
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
+from src.application.use_cases.incubate_document import IncubateDocument
 from src.application.use_cases.manage_projects import ManageProjects
 from src.application.use_cases.publish_baseline import PublishBaseline
 from src.application.use_cases.record_decision import RecordDecision
@@ -62,6 +63,7 @@ from src.infrastructure.db.repositories import (
     SqliteChangeRepository,
     SqliteDecisionRepository,
     SqliteDecisionUnitOfWork,
+    SqliteDocumentDraftRepository,
     SqliteEventRepository,
     SqliteIngestUnitOfWork,
     SqliteIssueRepository,
@@ -77,6 +79,7 @@ from src.infrastructure.db.repositories import (
 from src.infrastructure.db.state_lock import acquire_shared, release
 from src.infrastructure.files.archive import SourceArchive
 from src.infrastructure.files.baseline_card_reader import LocalBaselineCardReader
+from src.infrastructure.files.document_store import DocumentStore
 from src.infrastructure.files.extractor import extract_document
 from src.infrastructure.files.manifest_integrity import ManifestIntegrityChecker
 from src.infrastructure.files.manifest_store import ManifestStore
@@ -91,8 +94,10 @@ from src.infrastructure.files.project_source_archive import ProjectSourceArchive
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.gateways.composition import (
+    DifyDocumentGatewaySettings,
     DifyGatewaySettings,
     WorkflowTimeouts,
+    build_document_gateway,
     build_workflow_gateways,
     default_workflow_timeouts,
 )
@@ -198,6 +203,7 @@ class AppContainer:
     manage_projects: ProjectManagement | None = None
     active_project: ProjectContext | None = None
     archive_raw_source: RawSourceArchiveService | None = None
+    incubate_document: DocumentIncubation | None = None
     state_lock_fd: int | None = None
     import_source: ImportSourceService | None = None
     dashboard: DashboardService | None = None
@@ -286,6 +292,12 @@ def build_container(
                 manage_projects=project_management,
                 active_project=active_project,
                 archive_raw_source=_build_raw_source_archive(active_project),
+                incubate_document=_build_document_incubation(
+                    settings=settings,
+                    active_project=active_project,
+                    environ=environ,
+                    http_factory=http_factory,
+                ),
             )
         lock_fd = acquire_shared(active_project.paths.project_root)
         try:
@@ -412,6 +424,16 @@ def _build_stateful_container(
         "manage_projects": project_management,
         "archive_raw_source": (
             None if active_project is None else _build_raw_source_archive(active_project)
+        ),
+        "incubate_document": (
+            None
+            if active_project is None
+            else _build_document_incubation(
+                settings=settings,
+                active_project=active_project,
+                environ=environ,
+                http_factory=http_factory,
+            )
         ),
         "dashboard": dashboard,
         "record_decision": decision_service,
@@ -616,4 +638,53 @@ def _build_raw_source_archive(active_project: ProjectContext) -> ArchiveRawSourc
             year=year,
         ),
         index=SourceIndexStore(active_project.paths),
+    )
+
+
+def _build_document_incubation(
+    *,
+    settings: AppSettings,
+    active_project: ProjectContext,
+    environ: Mapping[str, str] | None,
+    http_factory,
+) -> IncubateDocument | None:
+    """Compose the optional 2.0 drafting path without enabling legacy workflows."""
+    if environ is None:
+        load_dotenv(active_project.paths.project_root / ".env")
+    runtime = os.environ if environ is None else environ
+    base_url = runtime.get("DIFY_BASE_URL", "").strip()
+    document_key = runtime.get("DIFY_DOCUMENT_API_KEY", "").strip()
+    if not base_url or not document_key:
+        return None
+    try:
+        document_settings = DifyDocumentGatewaySettings(
+            base_url=base_url,
+            document_api_key=document_key,
+        )
+    except ValidationError as error:
+        message = "; ".join(entry["msg"] for entry in error.errors())
+        raise ConfigurationError(
+            f"Invalid Dify document gateway configuration: {message}"
+        ) from None
+
+    def dictionary(name: str) -> tuple[str, ...]:
+        return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
+
+    return IncubateDocument(
+        paths=active_project.paths,
+        projects=SqliteProjectRepository(active_project.db_path),
+        sources=SqliteSourceRepository(active_project.db_path),
+        drafts=SqliteDocumentDraftRepository(active_project.db_path),
+        store=DocumentStore(active_project.paths),
+        gateway=build_document_gateway(
+            document_settings,
+            timeouts=settings.timeouts,
+            http_factory=http_factory or httpx.Client,
+        ),
+        model_call_logger=ModelCallLogger(active_project.db_path),
+        customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
+        strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
+        financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
+        leader_names=dictionary("REDACTION_LEADER_NAMES"),
+        unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
     )

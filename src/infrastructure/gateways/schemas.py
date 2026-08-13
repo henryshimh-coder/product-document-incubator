@@ -15,6 +15,9 @@ MAX_QUESTION_CHARS = 500
 MAX_SMALL_COLLECTION_ITEMS = 20
 MAX_CITATION_COLLECTION_ITEMS = 50
 MAX_ALLOWED_ISSUE_TYPES = 5
+MAX_DOCUMENT_MARKDOWN_CHARS = 200_000
+MAX_DOCUMENT_SUMMARY_CHARS = 2_000
+MAX_DOCUMENT_SECTIONS = 200
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 IdentifierStr = Annotated[
@@ -267,3 +270,89 @@ class LintIssueOutput(WorkflowOutput):
 class LintWorkflowOutput(WorkflowOutput):
     schema_version: Literal["1.0"]
     issues: list[LintIssueOutput]
+
+
+class DocumentSourceFragmentInput(WorkflowOutput):
+    source_id: IdentifierStr
+    chunk_id: IdentifierStr
+    locator: ScopeStr
+    excerpt: MaterialFragment
+
+
+class DocumentDraftWorkflowInput(WorkflowOutput):
+    schema_version: Literal["2.0"]
+    task_type: Literal["document_draft"]
+    project_id: IdentifierStr
+    project_name: MetadataStr
+    project_description: ScopeStr
+    schema_headings: list[MetadataStr] = Field(min_length=1, max_length=MAX_DOCUMENT_SECTIONS)
+    current_document_markdown: Annotated[
+        str | None,
+        StringConstraints(max_length=MAX_DOCUMENT_MARKDOWN_CHARS),
+    ] = None
+    source_fragments: list[DocumentSourceFragmentInput] = Field(
+        min_length=1,
+        max_length=MAX_DOCUMENT_SECTIONS,
+    )
+
+
+class SectionCitationOutput(WorkflowOutput):
+    heading: MetadataStr
+    source_id: IdentifierStr
+    chunk_id: IdentifierStr
+    locator: ScopeStr
+    excerpt: MaterialFragment
+
+
+class DocumentDraftWorkflowOutput(WorkflowOutput):
+    schema_version: Literal["2.0"]
+    task_type: Literal["document_draft"]
+    document_markdown: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=20,
+            max_length=MAX_DOCUMENT_MARKDOWN_CHARS,
+        ),
+    ]
+    summary: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=1,
+            max_length=MAX_DOCUMENT_SUMMARY_CHARS,
+        ),
+    ]
+    missing_sections: list[MetadataStr] = Field(max_length=50)
+    evidence_gaps: list[MetadataStr] = Field(max_length=50)
+    source_ids: list[IdentifierStr] = Field(min_length=1, max_length=100)
+    section_citations: list[SectionCitationOutput] = Field(
+        min_length=1,
+        max_length=MAX_DOCUMENT_SECTIONS,
+    )
+
+
+class StructureReferenceProjectInput(WorkflowOutput):
+    project_id: IdentifierStr
+    headings: list[MetadataStr] = Field(min_length=1, max_length=MAX_DOCUMENT_SECTIONS)
+
+
+class StructureSuggestionWorkflowInput(WorkflowOutput):
+    schema_version: Literal["2.0"]
+    task_type: Literal["structure_suggestion"]
+    project_id: IdentifierStr
+    current_headings: list[MetadataStr] = Field(max_length=MAX_DOCUMENT_SECTIONS)
+    reference_projects: list[StructureReferenceProjectInput] = Field(max_length=20)
+
+
+class StructureSuggestionOutput(WorkflowOutput):
+    title: MetadataStr
+    reason: MaterialFragment
+    reference_project_ids: list[IdentifierStr] = Field(max_length=20)
+    confidence: float = Field(ge=0, le=1)
+
+
+class StructureSuggestionWorkflowOutput(WorkflowOutput):
+    schema_version: Literal["2.0"]
+    task_type: Literal["structure_suggestion"]
+    suggestions: list[StructureSuggestionOutput] = Field(max_length=20)

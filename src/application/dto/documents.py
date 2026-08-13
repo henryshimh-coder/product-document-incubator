@@ -6,6 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.domain.enums import AuthorityLevel, SecurityLevel
+from src.domain.incubator import DocumentDraft
 
 
 class ArchiveRawSourceInput(BaseModel):
@@ -36,3 +37,18 @@ class ArchivedSourceView(BaseModel):
     ingest_status: str
     duplicate: bool
     created_at: datetime
+
+
+class IncubateDocumentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    project_id: str = Field(min_length=1)
+    source_ids: list[str] = Field(min_length=1, max_length=200)
+    requested_by: str = Field(min_length=1, max_length=100)
+
+
+class IncubationView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    draft: DocumentDraft
+    markdown: str

@@ -4,9 +4,14 @@ from collections.abc import MutableMapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from src.application.dto.documents import ArchivedSourceView, ArchiveRawSourceInput
+from src.application.dto.documents import (
+    ArchivedSourceView,
+    ArchiveRawSourceInput,
+    IncubateDocumentInput,
+    IncubationView,
+)
 from src.application.dto.projects import CreateProjectInput, ProjectSelection
-from src.domain.incubator import IncubatorSettings, ProjectSummary
+from src.domain.incubator import DocumentDraft, IncubatorSettings, ProjectSummary
 from src.domain.models import Project
 
 
@@ -41,6 +46,26 @@ class ProjectManagement(Protocol):
 
 class RawSourceArchiving(Protocol):
     def execute(self, command: ArchiveRawSourceInput) -> ArchivedSourceView: ...
+
+
+class DocumentDraftRepository(Protocol):
+    def add(self, draft: DocumentDraft) -> None: ...
+
+    def update(self, draft: DocumentDraft) -> None: ...
+
+    def get(self, draft_id: str) -> DocumentDraft: ...
+
+    def list_for_project(self, project_id: str) -> list[DocumentDraft]: ...
+
+
+class DocumentIncubation(Protocol):
+    def execute(self, command: IncubateDocumentInput) -> IncubationView: ...
+
+    def list_sources(self, project_id: str) -> list[dict[str, str]]: ...
+
+    def list_drafts(self, project_id: str) -> list[DocumentDraft]: ...
+
+    def save_draft(self, project_id: str, draft_id: str, markdown: str) -> DocumentDraft: ...
 
 
 class SessionStateCleaner(Protocol):

@@ -200,6 +200,7 @@ timeouts:
             "ingest_seconds": 60,
             "query_seconds": 30,
             "lint_seconds": 60,
+            "document_seconds": 90,
         },
     }
     assert result.import_source is None

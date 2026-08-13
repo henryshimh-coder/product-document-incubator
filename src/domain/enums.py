@@ -81,3 +81,9 @@ class CallResultMode(StrEnum):
     REALTIME = "realtime"
     CACHE = "cache"
     LOCAL_ONLY = "local_only"
+
+
+class DocumentDraftStatus(StrEnum):
+    CANDIDATE_DRAFT = "candidate_draft"
+    PENDING_OWNER = "pending_owner"
+    PUBLISHED = "published"

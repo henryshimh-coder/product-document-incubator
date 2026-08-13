@@ -192,6 +192,25 @@ CREATE TABLE IF NOT EXISTS cache_entries (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS document_drafts (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    version_id TEXT NOT NULL,
+    display_version TEXT,
+    parent_version_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('candidate_draft','pending_owner','published')),
+    markdown_path TEXT NOT NULL,
+    markdown_sha256 TEXT NOT NULL,
+    source_ids_json TEXT NOT NULL,
+    section_citations_json TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    missing_sections_json TEXT NOT NULL,
+    evidence_gaps_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(project_id, version_id)
+);
+
 CREATE TABLE IF NOT EXISTS event_logs (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
@@ -216,6 +235,8 @@ CREATE INDEX IF NOT EXISTS idx_change_project_status
     ON change_requests(project_id, status);
 CREATE INDEX IF NOT EXISTS idx_event_entity
     ON event_logs(project_id, entity_type, entity_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_document_drafts_project_created
+    ON document_drafts(project_id, created_at DESC);
 """
 
 

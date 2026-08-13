@@ -15,6 +15,7 @@ def test_navigation_defines_owner_routes_in_product_flow_order():
         ("项目中心", "projects"),
         ("项目首页", "home"),
         ("原始材料", "materials"),
+        ("文档孵化", "incubate"),
         ("资料导入", "ingest"),
         ("当前查询", "query"),
         ("一键自检", "lint"),

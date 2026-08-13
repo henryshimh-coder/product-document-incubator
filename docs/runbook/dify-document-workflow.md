@@ -1,0 +1,35 @@
+# Dify 产品文档工作流运行手册
+
+## 配置
+
+在运行环境中设置 `DIFY_BASE_URL` 与 `DIFY_DOCUMENT_API_KEY`。文档工作流使用
+独立 Key，不依赖既有 Ingest、Query、Lint 的三把 Key；未配置时，1.x 功能照常可用，
+“文档孵化”入口应提示 Owner 配置该 Key 后再启用。
+
+`config/app.yaml` 的 `timeouts.document_seconds` 固定配置为 90 秒。服务端、页面和
+日志中不得输出 API Key 或其派生值。
+
+## 工作流 A：产品方案草稿
+
+输入为 JSON 对象，必须含：项目 ID、项目名称/说明、目标章节、当前产品文档（首版可为
+`null`）以及经本地归档和安全筛选后的来源片段。每个来源片段只包含 `source_id`、
+`chunk_id`、定位信息和摘录。
+
+输出 JSON 必须符合 `DocumentDraftWorkflowOutput`：
+
+- `document_markdown` 必须以唯一 H1 开头；
+- 每个引用必须逐字匹配输入中的来源、chunk、定位和摘录；
+- `source_ids` 只能引用本次输入中的来源；
+- 返回摘要、缺失章节和证据缺口。
+
+应用保存本次请求与响应的脱敏 JSON、工作流运行 ID、耗时和模型调用日志；候选草稿仅写入
+`wiki/drafts/`，绝不直接改写 `wiki/current/当前产品方案.md`。
+
+## 工作流 B：结构完善建议
+
+输入只允许当前文档的章节标题和其他项目的章节标题摘要，不得传入任何产品 Markdown、
+原文材料或全文。输出最多 20 条结构建议，每条包含标题、原因、参考项目 ID 和置信度；
+输出中不得携带产品 Markdown。
+
+工作流返回的参考项目 ID 必须属于本次输入。契约校验失败、超时或 Dify 返回不合法数据时，
+应用以失败处理，不保存候选草稿，也不覆盖当前生效版本。

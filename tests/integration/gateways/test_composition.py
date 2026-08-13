@@ -5,8 +5,10 @@ from typing import Any
 import httpx
 
 from src.infrastructure.gateways.composition import (
+    DifyDocumentGatewaySettings,
     DifyGatewaySettings,
     WorkflowTimeouts,
+    build_document_gateway,
     build_workflow_gateways,
 )
 
@@ -61,3 +63,21 @@ def test_composition_builds_three_isolated_clients_with_task_specific_keys():
         client.run(inputs={}, user="test-user", timeout_seconds=1)
     assert recorded_headers == [[f"Bearer {key}"] for key in keys]
     assert all(key not in repr(settings) and key not in repr(gateways) for key in keys)
+
+
+def test_document_composition_is_available_without_legacy_workflow_keys():
+    """Catches 2.0 drafting being needlessly coupled to three 1.x API keys."""
+    headers: list[str] = []
+    gateway = build_document_gateway(
+        DifyDocumentGatewaySettings(
+            base_url="https://dify.example.test/v1",
+            document_api_key="app-document-secret",
+        ),
+        timeouts=WorkflowTimeouts(ingest_seconds=60, query_seconds=30, lint_seconds=60),
+        http_factory=lambda: _recording_http_client(headers),
+    )
+
+    gateway.client.run(inputs={}, user="test-user", timeout_seconds=1)
+
+    assert headers == ["Bearer app-document-secret"]
+    assert "app-document-secret" not in repr(gateway)

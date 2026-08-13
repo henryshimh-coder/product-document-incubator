@@ -19,6 +19,7 @@ from src.domain.enums import (
     KnowledgeStatus,
 )
 from src.domain.errors import DomainError, ErrorCode
+from src.domain.incubator import DocumentDraft
 from src.domain.models import (
     Baseline,
     ChangeRequest,
@@ -246,6 +247,95 @@ class SqliteSourceRepository:
         for field in ("is_redacted", "allow_external_model", "is_sandbox"):
             data[field] = bool(data[field])
         return SourceRecord.model_validate(data)
+
+
+class SqliteDocumentDraftRepository:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def add(self, draft: DocumentDraft) -> None:
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO document_drafts (
+                    id, project_id, version_id, display_version, parent_version_id, status,
+                    markdown_path, markdown_sha256, source_ids_json, section_citations_json,
+                    summary, missing_sections_json, evidence_gaps_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    draft.id,
+                    draft.project_id,
+                    draft.version_id,
+                    draft.display_version,
+                    draft.parent_version_id,
+                    draft.status.value,
+                    draft.markdown_path,
+                    draft.markdown_sha256,
+                    _json_dumps(draft.source_ids),
+                    _json_dumps([item.model_dump(mode="json") for item in draft.section_citations]),
+                    draft.summary,
+                    _json_dumps(draft.missing_sections),
+                    _json_dumps(draft.evidence_gaps),
+                    draft.created_at.isoformat(),
+                    draft.updated_at.isoformat(),
+                ),
+            )
+
+    def get(self, draft_id: str) -> DocumentDraft:
+        with connect(self.db_path) as connection:
+            row = _require(
+                connection.execute(
+                    "SELECT * FROM document_drafts WHERE id = ?", (draft_id,)
+                ).fetchone(),
+                "document draft",
+                draft_id,
+            )
+        return self._to_model(row)
+
+    def update(self, draft: DocumentDraft) -> None:
+        with connect(self.db_path) as connection:
+            result = connection.execute(
+                """
+                UPDATE document_drafts
+                SET status = ?, markdown_sha256 = ?, summary = ?, missing_sections_json = ?,
+                    evidence_gaps_json = ?, updated_at = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (
+                    draft.status.value,
+                    draft.markdown_sha256,
+                    draft.summary,
+                    _json_dumps(draft.missing_sections),
+                    _json_dumps(draft.evidence_gaps),
+                    draft.updated_at.isoformat(),
+                    draft.id,
+                    draft.project_id,
+                ),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"document draft not found: {draft.id}")
+
+    def list_for_project(self, project_id: str) -> list[DocumentDraft]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM document_drafts
+                WHERE project_id = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> DocumentDraft:
+        data = _row_data(row)
+        data["source_ids"] = _json_loads(data.pop("source_ids_json"))
+        data["section_citations"] = _json_loads(data.pop("section_citations_json"))
+        data["missing_sections"] = _json_loads(data.pop("missing_sections_json"))
+        data["evidence_gaps"] = _json_loads(data.pop("evidence_gaps_json"))
+        return DocumentDraft.model_validate(data)
 
 
 class SqliteBaselineRepository:
