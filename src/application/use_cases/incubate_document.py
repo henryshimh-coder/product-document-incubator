@@ -28,6 +28,10 @@ class DocumentWorkflow(Protocol):
     def generate_draft(self, inputs: Mapping[str, Any]) -> dict[str, Any]: ...
 
 
+class AcceptedSuggestionReader(Protocol):
+    def accepted_titles(self, project_id: str) -> list[str]: ...
+
+
 class VersionIdFactory:
     @staticmethod
     def next(project_id: str, now: datetime, existing_ids: Iterable[str]) -> str:
@@ -53,6 +57,7 @@ class IncubateDocument:
         store: DocumentStore,
         gateway: DocumentWorkflow,
         model_call_logger: ModelCallLogger,
+        accepted_suggestions: AcceptedSuggestionReader | None = None,
         customer_names: Iterable[str] = (),
         strategy_terms: Iterable[str] = (),
         financial_terms: Iterable[str] = (),
@@ -67,6 +72,7 @@ class IncubateDocument:
         self.store = store
         self.gateway = gateway
         self.model_call_logger = model_call_logger
+        self.accepted_suggestions = accepted_suggestions
         self.customer_names = tuple(customer_names)
         self.strategy_terms = tuple(strategy_terms)
         self.financial_terms = tuple(financial_terms)
@@ -126,7 +132,7 @@ class IncubateDocument:
             "project_id": command.project_id,
             "project_name": project.name,
             "project_description": project.product_line,
-            "schema_headings": self._schema_headings(),
+            "schema_headings": self._schema_headings(command.project_id),
             "current_document_markdown": self._safe_current(baseline),
             "source_fragments": self._source_fragments(sources),
         }
@@ -248,11 +254,15 @@ class IncubateDocument:
             raise DomainError(ErrorCode.EXTRACTION_FAILED, "DOCUMENT_SOURCE_EMPTY")
         return fragments
 
-    def _schema_headings(self) -> list[str]:
+    def _schema_headings(self, project_id: str) -> list[str]:
         template = self.paths.schema_root / "product-document-template.md"
         headings = extract_headings(template.read_text(encoding="utf-8"))
         if not headings:
             raise ValueError("DOCUMENT_SCHEMA_HEADINGS_EMPTY")
+        if self.accepted_suggestions is not None:
+            for title in self.accepted_suggestions.accepted_titles(project_id):
+                if title not in headings:
+                    headings.append(title)
         return headings
 
     def _safe_current(self, baseline: str | None) -> str | None:

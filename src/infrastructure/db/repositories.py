@@ -17,9 +17,10 @@ from src.domain.enums import (
     ChangeStatus,
     IssueStatus,
     KnowledgeStatus,
+    StructureSuggestionStatus,
 )
 from src.domain.errors import DomainError, ErrorCode
-from src.domain.incubator import DocumentDraft
+from src.domain.incubator import DocumentDraft, StructureSuggestion
 from src.domain.models import (
     Baseline,
     ChangeRequest,
@@ -336,6 +337,91 @@ class SqliteDocumentDraftRepository:
         data["missing_sections"] = _json_loads(data.pop("missing_sections_json"))
         data["evidence_gaps"] = _json_loads(data.pop("evidence_gaps_json"))
         return DocumentDraft.model_validate(data)
+
+
+class SqliteStructureSuggestionRepository:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def add(self, suggestion: StructureSuggestion) -> None:
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO structure_suggestions (
+                    id, project_id, title, reason, reference_project_ids_json,
+                    confidence, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    suggestion.id,
+                    suggestion.project_id,
+                    suggestion.title,
+                    suggestion.reason,
+                    _json_dumps(suggestion.reference_project_ids),
+                    suggestion.confidence,
+                    suggestion.status.value,
+                    suggestion.created_at.isoformat(),
+                    suggestion.updated_at.isoformat(),
+                ),
+            )
+
+    def get(self, suggestion_id: str) -> StructureSuggestion:
+        with connect(self.db_path) as connection:
+            row = _require(
+                connection.execute(
+                    "SELECT * FROM structure_suggestions WHERE id = ?", (suggestion_id,)
+                ).fetchone(),
+                "structure suggestion",
+                suggestion_id,
+            )
+        return self._to_model(row)
+
+    def list_for_project(self, project_id: str) -> list[StructureSuggestion]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM structure_suggestions
+                WHERE project_id = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
+    def update(self, suggestion: StructureSuggestion) -> None:
+        with connect(self.db_path) as connection:
+            result = connection.execute(
+                """
+                UPDATE structure_suggestions SET status = ?, updated_at = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (
+                    suggestion.status.value,
+                    suggestion.updated_at.isoformat(),
+                    suggestion.id,
+                    suggestion.project_id,
+                ),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"structure suggestion not found: {suggestion.id}")
+
+    def accepted_titles(self, project_id: str) -> list[str]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT title FROM structure_suggestions
+                WHERE project_id = ? AND status = ?
+                ORDER BY created_at, id
+                """,
+                (project_id, StructureSuggestionStatus.ACCEPTED.value),
+            ).fetchall()
+        return [str(row["title"]) for row in rows]
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> StructureSuggestion:
+        data = _row_data(row)
+        data["reference_project_ids"] = _json_loads(data.pop("reference_project_ids_json"))
+        return StructureSuggestion.model_validate(data)
 
 
 class SqliteBaselineRepository:

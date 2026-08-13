@@ -121,6 +121,15 @@ class DocumentStore:
         if target_dir.is_dir():
             shutil.rmtree(target_dir)
 
+    def write_export(self, filename: str, payload: bytes) -> Path:
+        target = (self.paths.exports_root / filename).resolve()
+        exports_root = self.paths.exports_root.resolve()
+        if not target.is_relative_to(exports_root) or target.suffix != ".md":
+            raise ValueError("EXPORT_PATH_INVALID")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_replace(target, payload)
+        return target
+
     @staticmethod
     def _write_synced(path: Path, payload: bytes) -> None:
         with path.open("xb") as output:

@@ -43,6 +43,8 @@ def test_sidebar_chrome_renders_wordmark_safety_statement_and_keeps_owner_routes
         ("项目首页", "home"),
         ("原始材料", "materials"),
         ("文档孵化", "incubate"),
+        ("当前产品", "current-product"),
+        ("检查与建议", "checks"),
         ("资料导入", "ingest"),
         ("当前查询", "query"),
         ("一键自检", "lint"),

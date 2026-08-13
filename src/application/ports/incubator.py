@@ -7,12 +7,20 @@ from typing import Any, Protocol
 from src.application.dto.documents import (
     ArchivedSourceView,
     ArchiveRawSourceInput,
+    ExportCurrentDocumentInput,
+    ExportedDocument,
     IncubateDocumentInput,
     IncubationView,
     PublishDocumentDraftInput,
+    SuggestStructureInput,
 )
 from src.application.dto.projects import CreateProjectInput, ProjectSelection
-from src.domain.incubator import DocumentDraft, IncubatorSettings, ProjectSummary
+from src.domain.incubator import (
+    DocumentDraft,
+    IncubatorSettings,
+    ProjectSummary,
+    StructureSuggestion,
+)
 from src.domain.models import Baseline, Project
 
 
@@ -71,6 +79,20 @@ class DocumentIncubation(Protocol):
 
 class DocumentDraftPublisher(Protocol):
     def execute(self, command: PublishDocumentDraftInput) -> Baseline: ...
+
+
+class CurrentDocumentExporter(Protocol):
+    def execute(self, command: ExportCurrentDocumentInput) -> ExportedDocument: ...
+
+
+class DocumentStructureSuggester(Protocol):
+    def execute(self, command: SuggestStructureInput) -> list[StructureSuggestion]: ...
+
+    def list(self, project_id: str) -> list[StructureSuggestion]: ...
+
+    def accept(self, *, project_id: str, suggestion_id: str) -> StructureSuggestion: ...
+
+    def ignore(self, *, project_id: str, suggestion_id: str) -> StructureSuggestion: ...
 
 
 class SessionStateCleaner(Protocol):

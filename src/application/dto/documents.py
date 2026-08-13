@@ -61,3 +61,26 @@ class PublishDocumentDraftInput(BaseModel):
     draft_id: str = Field(min_length=1)
     owner_name: str = Field(min_length=1, max_length=100)
     display_version: str = Field(min_length=1, max_length=50)
+
+
+class ExportCurrentDocumentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    project_id: str = Field(min_length=1)
+
+
+class ExportedDocument(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    filename: str
+    content: bytes
+    sha256: str
+    export_path: Path
+
+
+class SuggestStructureInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    project_id: str = Field(min_length=1)
+    reference_project_ids: list[str] = Field(min_length=1, max_length=20)
+    requested_by: str = Field(min_length=1, max_length=100)

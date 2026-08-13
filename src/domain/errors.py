@@ -54,6 +54,7 @@ class ErrorCode(StrEnum):
     PUBLISH_SOURCE_INTEGRITY_FAILED = "PUBLISH_SOURCE_INTEGRITY_FAILED"
     PUBLISH_CITATION_UNVERIFIABLE = "PUBLISH_CITATION_UNVERIFIABLE"
     RELATION_CONFLICT = "RELATION_CONFLICT"
+    BASELINE_NOT_FOUND = "BASELINE_NOT_FOUND"
     NOT_FOUND = "NOT_FOUND"
 
 
@@ -136,6 +137,7 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
         "正式依据缺少可验证的引用定位，无法发布"
     ),
     ErrorCode.RELATION_CONFLICT: ErrorDefinition("追溯关系数据冲突，已阻断写入"),
+    ErrorCode.BASELINE_NOT_FOUND: ErrorDefinition("当前没有已生效产品方案"),
     ErrorCode.NOT_FOUND: ErrorDefinition("未找到目标记录"),
 }
 

@@ -159,3 +159,18 @@ def test_incremental_incubation_reads_current_and_never_overwrites_it(tmp_path: 
     assert current.read_bytes() == before
     assert gateway.inputs is not None
     assert gateway.inputs["current_document_markdown"] == before.decode("utf-8")
+
+
+def test_incubation_includes_accepted_structure_suggestions_in_schema(tmp_path: Path) -> None:
+    paths, service, gateway = _environment(tmp_path)
+
+    class AcceptedSuggestions:
+        def accepted_titles(self, project_id: str) -> list[str]:
+            assert project_id == "NEW"
+            return ["风险边界"]
+
+    service.accepted_suggestions = AcceptedSuggestions()
+    service.execute(_command())
+
+    assert gateway.inputs is not None
+    assert gateway.inputs["schema_headings"] == ["新产品方案", "产品概述", "验收标准", "风险边界"]

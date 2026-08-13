@@ -87,3 +87,9 @@ class DocumentDraftStatus(StrEnum):
     CANDIDATE_DRAFT = "candidate_draft"
     PENDING_OWNER = "pending_owner"
     PUBLISHED = "published"
+
+
+class StructureSuggestionStatus(StrEnum):
+    OPEN = "open"
+    ACCEPTED = "accepted"
+    IGNORED = "ignored"

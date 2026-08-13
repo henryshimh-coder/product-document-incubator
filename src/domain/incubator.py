@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import Field
 
-from src.domain.enums import DocumentDraftStatus
+from src.domain.enums import DocumentDraftStatus, StructureSuggestionStatus
 from src.domain.models import DomainModel, NonEmptyStr, Sha256Str
 
 
@@ -46,5 +46,17 @@ class DocumentDraft(DomainModel):
     summary: NonEmptyStr
     missing_sections: list[NonEmptyStr]
     evidence_gaps: list[NonEmptyStr]
+    created_at: datetime
+    updated_at: datetime
+
+
+class StructureSuggestion(DomainModel):
+    id: NonEmptyStr
+    project_id: NonEmptyStr
+    title: NonEmptyStr
+    reason: NonEmptyStr
+    reference_project_ids: list[NonEmptyStr]
+    confidence: float = Field(ge=0, le=1)
+    status: StructureSuggestionStatus
     created_at: datetime
     updated_at: datetime

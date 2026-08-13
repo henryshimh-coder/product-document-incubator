@@ -211,6 +211,18 @@ CREATE TABLE IF NOT EXISTS document_drafts (
     UNIQUE(project_id, version_id)
 );
 
+CREATE TABLE IF NOT EXISTS structure_suggestions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    title TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    reference_project_ids_json TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    status TEXT NOT NULL CHECK (status IN ('open','accepted','ignored')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS event_logs (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
@@ -237,6 +249,8 @@ CREATE INDEX IF NOT EXISTS idx_event_entity
     ON event_logs(project_id, entity_type, entity_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_document_drafts_project_created
     ON document_drafts(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_structure_suggestions_project_status
+    ON structure_suggestions(project_id, status, created_at DESC);
 """
 
 

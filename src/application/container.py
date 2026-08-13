@@ -21,13 +21,16 @@ from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
 from src.application.ports.incubator import (
+    CurrentDocumentExporter,
     DocumentDraftPublisher,
     DocumentIncubation,
+    DocumentStructureSuggester,
     ProjectManagement,
 )
 from src.application.project_context import ProjectContext
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.build_trace import BuildTrace
+from src.application.use_cases.export_current_document import ExportCurrentDocument
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
 from src.application.use_cases.incubate_document import IncubateDocument
@@ -42,6 +45,7 @@ from src.application.use_cases.run_lint import (
     SafeLintComparisonBuilder,
 )
 from src.application.use_cases.run_query import RunQuery
+from src.application.use_cases.suggest_document_structure import SuggestDocumentStructure
 from src.domain.models import (
     Baseline,
     ChangeRequest,
@@ -80,6 +84,7 @@ from src.infrastructure.db.repositories import (
     SqliteReleaseUnitOfWork,
     SqliteReviewUnitOfWork,
     SqliteSourceRepository,
+    SqliteStructureSuggestionRepository,
 )
 from src.infrastructure.db.state_lock import acquire_shared, release
 from src.infrastructure.files.archive import SourceArchive
@@ -210,6 +215,8 @@ class AppContainer:
     archive_raw_source: RawSourceArchiveService | None = None
     incubate_document: DocumentIncubation | None = None
     publish_document_draft: DocumentDraftPublisher | None = None
+    export_current_document: CurrentDocumentExporter | None = None
+    suggest_document_structure: DocumentStructureSuggester | None = None
     state_lock_fd: int | None = None
     import_source: ImportSourceService | None = None
     dashboard: DashboardService | None = None
@@ -305,6 +312,13 @@ def build_container(
                     http_factory=http_factory,
                 ),
                 publish_document_draft=_build_document_draft_publisher(active_project),
+                export_current_document=_build_current_document_exporter(active_project),
+                suggest_document_structure=_build_structure_suggestions(
+                    settings=settings,
+                    active_project=active_project,
+                    environ=environ,
+                    http_factory=http_factory,
+                ),
             )
         lock_fd = acquire_shared(active_project.paths.project_root)
         try:
@@ -444,6 +458,19 @@ def _build_stateful_container(
         ),
         "publish_document_draft": (
             None if active_project is None else _build_document_draft_publisher(active_project)
+        ),
+        "export_current_document": (
+            None if active_project is None else _build_current_document_exporter(active_project)
+        ),
+        "suggest_document_structure": (
+            None
+            if active_project is None
+            else _build_structure_suggestions(
+                settings=settings,
+                active_project=active_project,
+                environ=environ,
+                http_factory=http_factory,
+            )
         ),
         "dashboard": dashboard,
         "record_decision": decision_service,
@@ -692,6 +719,7 @@ def _build_document_incubation(
             http_factory=http_factory or httpx.Client,
         ),
         model_call_logger=ModelCallLogger(active_project.db_path),
+        accepted_suggestions=SqliteStructureSuggestionRepository(active_project.db_path),
         customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
         strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
         financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
@@ -716,5 +744,52 @@ def _build_document_draft_publisher(active_project: ProjectContext) -> PublishDo
             manifest_store=manifest,
             db_path=active_project.db_path,
             project_root=active_project.paths.project_root,
+        ),
+    )
+
+
+def _build_current_document_exporter(active_project: ProjectContext) -> ExportCurrentDocument:
+    return ExportCurrentDocument(
+        paths=active_project.paths,
+        projects=SqliteProjectRepository(active_project.db_path),
+        manifest=ManifestStore(
+            active_project.paths.manifest_path,
+            project_root=active_project.paths.project_root,
+        ),
+    )
+
+
+def _build_structure_suggestions(
+    *,
+    settings: AppSettings,
+    active_project: ProjectContext,
+    environ: Mapping[str, str] | None,
+    http_factory,
+) -> SuggestDocumentStructure | None:
+    if environ is None:
+        load_dotenv(active_project.paths.project_root / ".env")
+    runtime = os.environ if environ is None else environ
+    base_url = runtime.get("DIFY_BASE_URL", "").strip()
+    document_key = runtime.get("DIFY_DOCUMENT_API_KEY", "").strip()
+    if not base_url or not document_key:
+        return None
+    try:
+        document_settings = DifyDocumentGatewaySettings(
+            base_url=base_url,
+            document_api_key=document_key,
+        )
+    except ValidationError as error:
+        message = "; ".join(entry["msg"] for entry in error.errors())
+        raise ConfigurationError(
+            f"Invalid Dify document gateway configuration: {message}"
+        ) from None
+    return SuggestDocumentStructure(
+        paths=active_project.paths,
+        projects=SqliteProjectRepository(active_project.db_path),
+        suggestions=SqliteStructureSuggestionRepository(active_project.db_path),
+        gateway=build_document_gateway(
+            document_settings,
+            timeouts=settings.timeouts,
+            http_factory=http_factory or httpx.Client,
         ),
     )
