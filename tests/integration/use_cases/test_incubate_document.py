@@ -28,6 +28,8 @@ class FakeDocumentGateway:
     def generate_draft(self, inputs: dict) -> dict:
         self.inputs = inputs
         fragment = inputs["source_fragments"][0]
+        assert fragment["source_type"] == "product_requirement"
+        assert fragment["authority_level"] == "formal_decision"
         return {
             "workflow_run_id": "WF-DOCUMENT-001",
             "result": {

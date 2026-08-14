@@ -246,6 +246,8 @@ class IncubateDocument:
                         "chunk_id": chunk.chunk_id,
                         "locator": chunk.locator,
                         "excerpt": redaction.redacted_text,
+                        "source_type": source.source_type,
+                        "authority_level": source.authority_level.value,
                     }
                 )
                 if len(fragments) == 200:

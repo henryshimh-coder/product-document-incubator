@@ -33,6 +33,8 @@ def _draft_input() -> dict[str, Any]:
                 "chunk_id": "SRC-001-0001",
                 "locator": "heading:产品目标; line:1",
                 "excerpt": "产品应支持 Owner 建立并维护独立项目。",
+                "source_type": "product_requirement",
+                "authority_level": "formal_effective",
             }
         ],
     }

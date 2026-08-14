@@ -277,6 +277,8 @@ class DocumentSourceFragmentInput(WorkflowOutput):
     chunk_id: IdentifierStr
     locator: ScopeStr
     excerpt: MaterialFragment
+    source_type: MetadataStr
+    authority_level: AuthorityLevel
 
 
 class DocumentDraftWorkflowInput(WorkflowOutput):
