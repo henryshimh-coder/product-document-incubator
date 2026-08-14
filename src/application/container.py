@@ -668,6 +668,7 @@ def _build_project_context(
 def _build_raw_source_archive(active_project: ProjectContext) -> ArchiveRawSource:
     return ArchiveRawSource(
         paths=active_project.paths,
+        projects=SqliteProjectRepository(active_project.db_path),
         sources=SqliteSourceRepository(active_project.db_path),
         archive_factory=lambda source_id, year: ProjectSourceArchive(
             paths=active_project.paths,

@@ -33,8 +33,10 @@ class ProjectSourceArchive:
         source = local_path.expanduser().resolve()
         if not source.is_file():
             raise FileNotFoundError(f"source file not found: {local_path}")
-        payload = source.read_bytes()
-        filename = validate_upload(source.name, payload)
+        return self.save(source.name, source.read_bytes())
+
+    def save(self, filename: str, payload: bytes) -> ProjectArchiveResult:
+        filename = validate_upload(filename, payload)
         digest = hashlib.sha256(payload).hexdigest()
         raw_root = self.paths.raw_root.resolve()
         project_root = self.paths.project_root.resolve()
@@ -82,6 +84,12 @@ class ProjectSourceArchive:
             finally:
                 if temporary_path is not None:
                     temporary_path.unlink(missing_ok=True)
+
+    def discard_uncommitted(self, archived: ProjectArchiveResult) -> None:
+        raw_root = self.paths.raw_root.resolve()
+        path = archived.path.resolve()
+        if not archived.duplicate and path.is_relative_to(raw_root):
+            path.unlink(missing_ok=True)
 
     def _existing_or_conflict(
         self,

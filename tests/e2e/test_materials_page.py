@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 
@@ -67,19 +68,24 @@ def _render_materials_page(library_root: str, source_path: str) -> None:
     )
 
 
-def test_materials_page_archives_a_local_file_and_shows_project_path(tmp_path) -> None:
-    """Catches the materials UI accepting a file without persisting a visible local archive."""
-    source = tmp_path / "需求.md"
-    source.write_text("# 需求\n", encoding="utf-8")
+def test_materials_page_renders_a_nonwriting_confirmation_form(tmp_path) -> None:
+    """Catches a page visit creating a material archive before Owner confirmation."""
     page = AppTest.from_function(
         _render_materials_page,
-        args=(str(tmp_path / "library"), str(source)),
+        args=(str(tmp_path / "library"), str(tmp_path / "unused.md")),
     ).run()
 
-    page.text_input(key="materials_local_path").input(str(source))
-    page.button(key="materials_archive").click().run()
-
     assert not page.exception
-    rendered = "\n".join(item.value for item in page.markdown)
-    assert "SRC-PROJECT_A" in rendered
-    assert "PROJECT_A" in "\n".join(item.value for item in page.code)
+    assert page.button(key="materials_archive")
+
+
+def test_materials_page_uses_confirmed_browser_upload_instead_of_local_path(tmp_path) -> None:
+    """Catches the 2.1 material workflow asking an Owner to type a device-specific path."""
+    page = AppTest.from_function(
+        _render_materials_page,
+        args=(str(tmp_path / "library"), str(tmp_path / "unused.md")),
+    ).run()
+
+    with pytest.raises(KeyError):
+        page.text_input(key="materials_local_path")
+    assert page.file_uploader(key="materials_upload")

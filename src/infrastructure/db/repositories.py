@@ -171,6 +171,15 @@ class SqliteSourceRepository:
                 ),
             )
 
+    def delete(self, source_id: str, project_id: str) -> None:
+        with connect(self.db_path) as connection:
+            result = connection.execute(
+                "DELETE FROM source_records WHERE id = ? AND project_id = ?",
+                (source_id, project_id),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"source not found: {source_id}")
+
     def get(self, source_id: str) -> SourceRecord:
         with connect(self.db_path) as connection:
             row = _require(

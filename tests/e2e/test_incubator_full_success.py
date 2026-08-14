@@ -81,7 +81,7 @@ class IncubatorHarness:
                 project_id=paths.project_id,
                 local_path=local_path,
                 source_type="product_requirement",
-                authority_level=AuthorityLevel.FORMAL_DECISION,
+                authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
                 source_department="产品部",
                 document_date=date(2026, 8, 12),
                 document_version="1.0",

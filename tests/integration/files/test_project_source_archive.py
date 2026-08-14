@@ -21,3 +21,17 @@ def test_archived_copy_survives_original_move(tmp_path) -> None:
 
     assert result.path.read_text(encoding="utf-8").startswith("# 产品需求")
     assert result.sha256 == sha256(result.path.read_bytes()).hexdigest()
+
+
+def test_archived_browser_bytes_are_saved_without_a_local_source_path(tmp_path) -> None:
+    """Catches browser uploads requiring the Owner's absolute local filesystem path."""
+    from src.infrastructure.files.project_source_archive import ProjectSourceArchive
+
+    paths = ProjectPaths.for_project(tmp_path / "library", "PROJECT_A")
+    paths.raw_root.mkdir(parents=True)
+    archive = ProjectSourceArchive(paths=paths, source_id="SRC-002", year=2026)
+
+    result = archive.save("需求说明.md", b"# requirements\n")
+
+    assert result.path.is_relative_to(paths.raw_root)
+    assert result.path.read_bytes() == b"# requirements\n"

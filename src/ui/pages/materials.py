@@ -1,37 +1,65 @@
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 import streamlit as st
 
 from src.application.container import AppContainer
-from src.application.dto.documents import ArchiveRawSourceInput
+from src.application.dto.materials import ArchiveRawSourceInput
 from src.domain.enums import AuthorityLevel, SecurityLevel
+from src.domain.material_catalog import MATERIAL_TYPES, NEW_AUTHORITY_LEVELS
 
 
 def render(container: AppContainer) -> None:
     project_id = container.require_project_id()
     service = container.archive_raw_source
     st.title("原始材料")
-    st.caption(f"项目 {project_id} 的不可变本地归档；系统保留完整路径和 SHA-256。")
+    st.caption(f"项目 {project_id} 的不可变本地归档；确认前不会写入项目文件库。")
     if service is None or container.active_project is None:
         st.info("材料归档服务尚未就绪，请先进入一个产品项目。")
         return
     with st.form("materials_archive_form"):
-        local_path = st.text_input(
-            "本地文件路径",
-            placeholder="例如 /Users/name/Documents/需求文档.md",
-            key="materials_local_path",
+        uploaded = st.file_uploader(
+            "选择单份原始材料",
+            type=["md", "txt", "pdf", "docx"],
+            key="materials_upload",
         )
-        source_type = st.text_input("材料类型", value="product_requirement", key="materials_type")
+        material_name = st.text_input("材料名称", key="materials_name")
+        archive_mode = st.selectbox(
+            "归档方式",
+            options=(None, "new_material", "new_version"),
+            format_func=lambda item: {
+                None: "请选择",
+                "new_material": "新材料",
+                "new_version": "新版本",
+            }[item],
+            key="materials_archive_mode",
+        )
+        target_series_id = None
+        if archive_mode == "new_version":
+            target_series_id = st.selectbox(
+                "要关联的材料系列",
+                options=(None, *_series_options(container)),
+                format_func=lambda item: "请选择" if item is None else item,
+                key="materials_target_series",
+            )
+        source_type = st.selectbox(
+            "材料类型",
+            options=(None, *MATERIAL_TYPES),
+            format_func=lambda item: "请选择" if item is None else item.label,
+            key="materials_type",
+        )
         source_department = st.text_input("来源部门", value="产品部", key="materials_department")
-        document_version = st.text_input("显示版本", value="v1.0", key="materials_version")
+        document_version = st.text_input("显示版本", key="materials_version")
         document_date = st.date_input("文档日期", value=date.today(), key="materials_date")
         authority = st.selectbox(
             "权威级别",
-            options=tuple(AuthorityLevel),
-            format_func=lambda item: item.value,
+            options=(None, *NEW_AUTHORITY_LEVELS),
+            format_func=lambda item: (
+                "请选择"
+                if item is None
+                else ("正式基线依据" if item == AuthorityLevel.FORMAL_EFFECTIVE else "参考材料")
+            ),
             key="materials_authority",
         )
         security = st.selectbox(
@@ -41,19 +69,30 @@ def render(container: AppContainer) -> None:
             key="materials_security",
         )
         redacted = st.checkbox("已确认脱敏", value=True, key="materials_redacted")
-        external = st.checkbox("允许外部模型调用", value=False, key="materials_external")
-        submitted = st.form_submit_button("归档到当前项目", type="primary", key="materials_archive")
+        external = st.checkbox(
+            "允许外部模型调用",
+            value=False,
+            disabled=security in (SecurityLevel.L3_CONFIDENTIAL, SecurityLevel.L4_RESTRICTED),
+            key="materials_external",
+        )
+        submitted = st.form_submit_button("确认归档", type="primary", key="materials_archive")
     if submitted:
         try:
+            if uploaded is None or source_type is None or authority is None or archive_mode is None:
+                raise ValueError("请完成文件、归档方式、材料类型和权威级别的选择")
             result = service.execute(
                 ArchiveRawSourceInput(
                     project_id=project_id,
-                    local_path=Path(local_path),
-                    source_type=source_type,
+                    uploaded_name=uploaded.name,
+                    uploaded_bytes=uploaded.getvalue(),
+                    material_name=material_name or uploaded.name.rsplit(".", 1)[0],
+                    archive_mode=archive_mode,
+                    target_series_id=target_series_id,
+                    source_type=source_type.code,
                     authority_level=authority,
                     source_department=source_department,
                     document_date=document_date,
-                    document_version=document_version,
+                    material_version=document_version,
                     security_level=security,
                     is_redacted_confirmed=redacted,
                     allow_external_model=external,
@@ -89,8 +128,29 @@ def _render_index(container: AppContainer) -> None:
         if not isinstance(item, dict):
             continue
         st.markdown(
-            f"**{item.get('filename', '未知文件')}** · {item.get('source_id', '--')}  \\n+"
+            f"**{item.get('material_name') or item.get('filename', '未知文件')}** · "
+            f"{item.get('material_version', '--')} · {item.get('source_id', '--')}  \\n+"
             f"`{str(item.get('sha256', ''))[:12]}` · {item.get('source_type', '--')} · "
             f"{item.get('ingest_status', '--')}"
         )
         st.code(str(item.get("archive_path", "")), language=None)
+
+
+def _series_options(container: AppContainer) -> tuple[str, ...]:
+    assert container.active_project is not None
+    index_path = container.active_project.paths.system_root / "source-index.json"
+    if not index_path.is_file():
+        return ()
+    import json
+
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    sources = payload.get("sources", []) if isinstance(payload, dict) else []
+    return tuple(
+        sorted(
+            {
+                str(item["material_series_id"])
+                for item in sources
+                if isinstance(item, dict) and item.get("material_series_id")
+            }
+        )
+    )

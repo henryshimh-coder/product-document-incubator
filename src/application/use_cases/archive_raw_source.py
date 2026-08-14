@@ -4,8 +4,9 @@ import hashlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from src.application.dto.documents import ArchivedSourceView, ArchiveRawSourceInput
-from src.application.ports.repositories import SourceRepository
+from src.application.dto.materials import ArchivedSourceView, ArchiveRawSourceInput
+from src.application.ports.repositories import ProjectRepository, SourceRepository
+from src.domain.enums import SecurityLevel
 from src.domain.models import SourceRecord
 from src.domain.services.file_safety import detect_mime_type
 from src.infrastructure.files.project_library import ProjectPaths
@@ -16,12 +17,14 @@ class ArchiveRawSource:
         self,
         *,
         paths: ProjectPaths,
+        projects: ProjectRepository | None = None,
         sources: SourceRepository,
         archive_factory,
         index,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.paths = paths
+        self.projects = projects
         self.sources = sources
         self.archive_factory = archive_factory
         self.index = index
@@ -30,21 +33,67 @@ class ArchiveRawSource:
     def execute(self, command: ArchiveRawSourceInput) -> ArchivedSourceView:
         if command.project_id != self.paths.project_id:
             raise ValueError("archive command project_id does not match active project")
-        local_path = command.local_path.expanduser().resolve()
-        payload = local_path.read_bytes()
+        if command.allow_external_model:
+            if (
+                command.security_level
+                in (
+                    SecurityLevel.L3_CONFIDENTIAL,
+                    SecurityLevel.L4_RESTRICTED,
+                )
+                or not command.is_redacted_confirmed
+            ):
+                raise ValueError("EXTERNAL_CALL_DENIED")
+            if (
+                self.projects is not None
+                and not self.projects.get(command.project_id).allow_external_model
+            ):
+                raise ValueError("EXTERNAL_CALL_DENIED")
+        if command.uploaded_bytes is not None:
+            payload = command.uploaded_bytes
+            filename = command.uploaded_name
+        else:
+            if command.local_path is None:
+                raise ValueError("MATERIAL_UPLOAD_REQUIRED")
+            local_path = command.local_path.expanduser().resolve()
+            payload = local_path.read_bytes()
+            filename = local_path.name
+        if filename is None:
+            raise ValueError("MATERIAL_UPLOAD_REQUIRED")
         digest = hashlib.sha256(payload).hexdigest()
         existing = self.sources.find_by_sha256(command.project_id, digest)
         if existing is not None:
             return self._view(existing, duplicate=True)
+        series_id = f"MAT-{command.project_id}-{digest[:12].upper()}"
+        previous_source_id: str | None = None
+        material_name = command.material_name
+        if command.archive_mode.value == "new_version":
+            if not command.target_series_id:
+                raise ValueError("MATERIAL_SERIES_REQUIRED")
+            latest = self.sources.find_latest_for_series(
+                command.project_id, command.target_series_id
+            )
+            if latest is None:
+                raise ValueError("MATERIAL_SERIES_NOT_FOUND")
+            if (
+                self.sources.find_by_series_version(
+                    command.project_id, command.target_series_id, command.material_version or ""
+                )
+                is not None
+            ):
+                raise ValueError("MATERIAL_VERSION_DUPLICATE")
+            series_id = latest.material_series_id or command.target_series_id
+            previous_source_id = latest.id
+            material_name = latest.material_name or latest.original_filename.rsplit(".", 1)[0]
         source_id = f"SRC-{command.project_id}-{digest[:16].upper()}"
-        archived = self.archive_factory(source_id, command.document_date.year).copy_from(local_path)
+        archive = self.archive_factory(source_id, command.document_date.year)
+        archived = archive.save(filename, payload)
         mime_type = detect_mime_type(payload)
         if mime_type is None:
             raise ValueError("archive MIME type is invalid")
         source = SourceRecord(
             id=source_id,
             project_id=command.project_id,
-            original_filename=local_path.name,
+            original_filename=filename,
             archive_path=str(archived.path),
             sha256=archived.sha256,
             mime_type=mime_type,
@@ -54,7 +103,7 @@ class ArchiveRawSource:
             source_department=command.source_department,
             provider=None,
             document_date=command.document_date,
-            document_version=command.document_version,
+            document_version=command.material_version or command.document_version or "",
             applicable_baseline_version="未关联基线",
             security_level=command.security_level,
             is_redacted=command.is_redacted_confirmed,
@@ -62,13 +111,17 @@ class ArchiveRawSource:
             is_sandbox=False,
             ingest_status="archived",
             created_at=self.now(),
+            material_name=material_name,
+            material_series_id=series_id,
+            previous_source_id=previous_source_id,
         )
-        self.sources.add(source)
         try:
+            self.sources.add(source)
             self.index.upsert(source)
         except (OSError, ValueError):
-            self.sources.update_ingest_status(source.id, "index_failed")
-            raise RuntimeError("SOURCE_INDEX_WRITE_FAILED") from None
+            self.sources.delete(source.id, source.project_id)
+            archive.discard_uncommitted(archived)
+            raise RuntimeError("SOURCE_ARCHIVE_COMMIT_FAILED") from None
         return self._view(source, duplicate=archived.duplicate)
 
     @staticmethod
@@ -84,4 +137,7 @@ class ArchiveRawSource:
             ingest_status=source.ingest_status,
             duplicate=duplicate,
             created_at=source.created_at,
+            material_name=source.material_name,
+            material_series_id=source.material_series_id,
+            previous_source_id=source.previous_source_id,
         )
