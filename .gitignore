@@ -4,6 +4,7 @@
 .tools/
 .pytest_cache/
 .ruff_cache/
+.worktrees/
 .coverage
 coverage.xml
 htmlcov/
