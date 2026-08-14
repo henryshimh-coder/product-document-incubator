@@ -5,7 +5,12 @@ from datetime import date
 import streamlit as st
 
 from src.application.container import AppContainer
-from src.application.dto.materials import ArchiveRawSourceInput, ReclassifySourceInput
+from src.application.dto.materials import (
+    ArchiveRawSourceInput,
+    CreateLocalDraftInput,
+    ReclassifySourceInput,
+    SensitiveComparisonInput,
+)
 from src.domain.enums import AuthorityLevel, SecurityLevel
 from src.domain.material_catalog import MATERIAL_TYPES, NEW_AUTHORITY_LEVELS
 
@@ -134,6 +139,37 @@ def _render_index(container: AppContainer) -> None:
             f"{item.get('ingest_status', '--')}"
         )
         st.code(str(item.get("archive_path", "")), language=None)
+        if item.get("security_level") in {"L3", "L4"} and container.compare_sensitive_source:
+            if st.button("与当前方案对照", key=f"compare-{item.get('source_id')}"):
+                try:
+                    comparison = container.compare_sensitive_source.execute(
+                        SensitiveComparisonInput(
+                            project_id=container.active_project.project_id,
+                            source_id=str(item["source_id"]),
+                        )
+                    )
+                except ValueError as error:
+                    st.error(f"本地对照失败：{error}")
+                else:
+                    st.info("仅本地处理，未调用外部模型。")
+                    left, right = st.columns(2)
+                    left.text_area(comparison.left_label, comparison.left_markdown, height=320)
+                    right.text_area("敏感材料", comparison.sensitive_text, height=320)
+            if st.button("创建本地候选", key=f"local-draft-{item.get('source_id')}"):
+                try:
+                    if container.create_local_document_draft is None:
+                        raise ValueError("本地候选服务尚未就绪")
+                    draft = container.create_local_document_draft.execute(
+                        CreateLocalDraftInput(
+                            project_id=container.active_project.project_id,
+                            source_id=str(item["source_id"]),
+                            requested_by="Owner",
+                        )
+                    )
+                except (OSError, ValueError, RuntimeError) as error:
+                    st.error(f"创建本地候选失败：{error}")
+                else:
+                    st.success(f"已创建本地候选：{draft.draft.version_id}")
         if item.get("source_type") not in {definition.code for definition in MATERIAL_TYPES}:
             with st.expander("调整历史材料分类"):
                 target = st.selectbox(

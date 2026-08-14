@@ -113,3 +113,18 @@ class ReclassifySourceInput(BaseModel):
             raise ValueError("MATERIAL_TYPE_INVALID")
         require_new_material_type(value)
         return value
+
+
+class SensitiveComparisonInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    project_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+
+
+class CreateLocalDraftInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    project_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    requested_by: str = Field(min_length=1, max_length=100)

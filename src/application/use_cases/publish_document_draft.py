@@ -3,11 +3,17 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 from src.application.dto.documents import PublishDocumentDraftInput
 from src.application.ports.incubator import DocumentDraftRepository
 from src.application.ports.repositories import ProjectRepository, SourceRepository
-from src.domain.enums import BaselineStatus, DocumentDraftStatus, KnowledgeStatus
+from src.domain.enums import (
+    BaselineStatus,
+    DocumentDraftStatus,
+    DocumentGenerationMode,
+    KnowledgeStatus,
+)
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.models import Baseline, KnowledgeCard
 from src.infrastructure.files.document_store import DocumentStore
@@ -167,6 +173,8 @@ class PublishDocumentDraft:
                     ErrorCode.PUBLISH_CITATION_UNVERIFIABLE,
                     "DOCUMENT_CITATION_SOURCE_PROJECT_MISMATCH",
                 )
+            if draft.generation_mode == DocumentGenerationMode.LOCAL_MANUAL:
+                self._ensure_local_source_integrity(source)
             cards.append(
                 KnowledgeCard(
                     id=f"{project_id}-SECTION-{hashlib.sha256(heading.encode()).hexdigest()[:12]}",
@@ -185,6 +193,20 @@ class PublishDocumentDraft:
                 )
             )
         return cards
+
+    def _ensure_local_source_integrity(self, source) -> None:
+        archive = Path(source.archive_path).resolve()
+        raw_root = self.paths.raw_root.resolve()
+        try:
+            if not archive.is_relative_to(raw_root) or not archive.is_file():
+                raise ValueError
+            payload = archive.read_bytes()
+            if len(payload) != source.size_bytes:
+                raise ValueError
+            if hashlib.sha256(payload).hexdigest() != source.sha256:
+                raise ValueError
+        except (OSError, ValueError):
+            raise DomainError(ErrorCode.PUBLISH_SOURCE_INTEGRITY_FAILED) from None
 
 
 def _section_body(markdown: str, heading: str) -> str:

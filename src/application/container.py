@@ -30,6 +30,8 @@ from src.application.ports.incubator import (
 from src.application.project_context import ProjectContext
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.build_trace import BuildTrace
+from src.application.use_cases.compare_sensitive_source import CompareSensitiveSource
+from src.application.use_cases.create_local_document_draft import CreateLocalDocumentDraft
 from src.application.use_cases.export_current_document import ExportCurrentDocument
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
@@ -134,6 +136,14 @@ class SourceReclassificationService(Protocol):
     def execute(self, command): ...
 
 
+class SensitiveComparisonService(Protocol):
+    def execute(self, command): ...
+
+
+class LocalDraftService(Protocol):
+    def execute(self, command): ...
+
+
 class QueryService(Protocol):
     def list_historical_versions(self, project_id: str) -> tuple[str, ...]: ...
 
@@ -219,6 +229,8 @@ class AppContainer:
     active_project: ProjectContext | None = None
     archive_raw_source: RawSourceArchiveService | None = None
     reclassify_source: SourceReclassificationService | None = None
+    compare_sensitive_source: SensitiveComparisonService | None = None
+    create_local_document_draft: LocalDraftService | None = None
     incubate_document: DocumentIncubation | None = None
     publish_document_draft: DocumentDraftPublisher | None = None
     export_current_document: CurrentDocumentExporter | None = None
@@ -312,6 +324,8 @@ def build_container(
                 active_project=active_project,
                 archive_raw_source=_build_raw_source_archive(active_project),
                 reclassify_source=_build_reclassify_source(active_project),
+                compare_sensitive_source=_build_sensitive_comparison(active_project),
+                create_local_document_draft=_build_local_document_draft(active_project),
                 incubate_document=_build_document_incubation(
                     settings=settings,
                     active_project=active_project,
@@ -455,6 +469,12 @@ def _build_stateful_container(
         ),
         "reclassify_source": (
             None if active_project is None else _build_reclassify_source(active_project)
+        ),
+        "compare_sensitive_source": (
+            None if active_project is None else _build_sensitive_comparison(active_project)
+        ),
+        "create_local_document_draft": (
+            None if active_project is None else _build_local_document_draft(active_project)
         ),
         "incubate_document": (
             None
@@ -694,6 +714,24 @@ def _build_reclassify_source(active_project: ProjectContext) -> ReclassifySource
         paths=active_project.paths,
         sources=SqliteSourceRepository(active_project.db_path),
         index=SourceIndexStore(active_project.paths),
+    )
+
+
+def _build_sensitive_comparison(active_project: ProjectContext) -> CompareSensitiveSource:
+    return CompareSensitiveSource(
+        paths=active_project.paths,
+        sources=SqliteSourceRepository(active_project.db_path),
+        store=DocumentStore(active_project.paths),
+    )
+
+
+def _build_local_document_draft(active_project: ProjectContext) -> CreateLocalDocumentDraft:
+    return CreateLocalDocumentDraft(
+        paths=active_project.paths,
+        projects=SqliteProjectRepository(active_project.db_path),
+        sources=SqliteSourceRepository(active_project.db_path),
+        drafts=SqliteDocumentDraftRepository(active_project.db_path),
+        store=DocumentStore(active_project.paths),
     )
 
 
