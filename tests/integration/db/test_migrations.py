@@ -50,7 +50,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-    assert versions == [("1.0",), ("1.1",), ("1.2",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
 
 
 def test_migrate_creates_event_level_with_safe_info_default(tmp_path: Path) -> None:
@@ -208,7 +208,7 @@ def test_migrate_repairs_null_and_blank_event_correlations_despite_1_2_marker(
         ("EVENT-NULL", "LEGACY-EVENT-NULL"),
         ("EVENT-VALID", "CORR-VALID"),
     ]
-    assert versions == [("1.0",), ("1.1",), ("1.2",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
 
 
 def test_migrate_upgrades_legacy_issue_table_before_creating_fingerprint_index(
@@ -276,3 +276,66 @@ def test_migrate_upgrades_legacy_issue_table_before_creating_fingerprint_index(
     assert row == ("ISSUE-LEGACY", "历史冲突", "保留的历史问题")
     assert index_columns == ["project_id", "fingerprint"]
     assert legacy_index is None
+
+
+def test_migrate_adds_2_1_material_columns_and_default_draft_generation_mode(
+    tmp_path: Path,
+) -> None:
+    """Catches a repeatable upgrade leaving legacy records unreadable by 2.1 services."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        source_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_records)")}
+        draft_columns = {row[1] for row in connection.execute("PRAGMA table_info(document_drafts)")}
+        versions = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+
+    assert {"material_name", "material_series_id", "previous_source_id"} <= source_columns
+    assert "generation_mode" in draft_columns
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
+
+
+def test_migrate_upgrades_pre_2_1_source_table_before_creating_series_indexes(
+    tmp_path: Path,
+) -> None:
+    """Catches migration creating a 2.1 index before its legacy table has the needed columns."""
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE source_records (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                archive_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                source_type TEXT NOT NULL,
+                authority_level TEXT NOT NULL,
+                source_department TEXT NOT NULL,
+                provider TEXT,
+                document_date TEXT NOT NULL,
+                document_version TEXT NOT NULL,
+                applicable_baseline_version TEXT NOT NULL,
+                security_level TEXT NOT NULL,
+                is_redacted INTEGER NOT NULL,
+                allow_external_model INTEGER NOT NULL,
+                is_sandbox INTEGER NOT NULL,
+                ingest_status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        index = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_source_series_version",),
+        ).fetchone()
+    assert index == ("idx_source_series_version",)

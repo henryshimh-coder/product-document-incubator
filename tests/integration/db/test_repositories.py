@@ -131,6 +131,78 @@ def test_source_repository_round_trip_and_hash_lookup(tmp_path: Path) -> None:
     assert repository.list_for_project(source.project_id) == [source]
 
 
+def test_source_repository_reads_material_series_and_rejects_duplicate_series_version(
+    tmp_path: Path,
+) -> None:
+    """Catches a version chain accepting two records with the same series version."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    project = Project(
+        id="LLD",
+        name="产品智策",
+        product_line="轻量交付",
+        stage="demo",
+        current_baseline_id=None,
+        allow_external_model=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    SqliteProjectRepository(db_path).add(project)
+    repository = SqliteSourceRepository(db_path)
+    first = SourceRecord(
+        id="SRC-CHAIN-1",
+        project_id="LLD",
+        original_filename="需求说明.md",
+        archive_path="data/source_archive/LLD/SRC-CHAIN-1/需求说明.md",
+        sha256="b" * 64,
+        mime_type="text/markdown",
+        size_bytes=42,
+        source_type="product_requirement",
+        authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+        source_department="产品部",
+        provider=None,
+        document_date=date(2026, 7, 29),
+        document_version="v1.0",
+        applicable_baseline_version="LLD-724_1",
+        security_level=SecurityLevel.L1_PUBLIC_SIMULATED,
+        is_redacted=True,
+        allow_external_model=True,
+        is_sandbox=True,
+        ingest_status="completed",
+        created_at=NOW,
+        material_name="蓝领贷需求说明",
+        material_series_id="MAT-LLD-000000000001",
+        previous_source_id=None,
+    )
+    second = first.model_copy(
+        update={
+            "id": "SRC-CHAIN-2",
+            "original_filename": "产品需求终稿.md",
+            "archive_path": "data/source_archive/LLD/SRC-CHAIN-2/产品需求终稿.md",
+            "sha256": "c" * 64,
+            "document_version": "v2.0",
+            "previous_source_id": first.id,
+            "created_at": NOW + timedelta(minutes=1),
+        }
+    )
+    duplicate_version = second.model_copy(
+        update={
+            "id": "SRC-CHAIN-DUPLICATE",
+            "sha256": "d" * 64,
+            "previous_source_id": None,
+        }
+    )
+
+    repository.add(first)
+    repository.add(second)
+
+    assert repository.list_for_series("LLD", first.material_series_id) == [first, second]
+    assert repository.find_latest_for_series("LLD", first.material_series_id) == second
+    assert repository.find_by_series_version("LLD", first.material_series_id, "v2.0") == second
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.add(duplicate_version)
+
+
 def test_baseline_repository_round_trip_and_supersede(tmp_path: Path) -> None:
     """Protects baseline history from losing its immutable release metadata."""
     db_path = tmp_path / "product_intelligence.db"

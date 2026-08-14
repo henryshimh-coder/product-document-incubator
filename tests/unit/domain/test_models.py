@@ -132,6 +132,70 @@ def test_source_record_allows_zero_size_consistently_with_storage_schema():
     assert record.size_bytes == 0
 
 
+def test_source_record_keeps_new_material_governance_fields_optional_for_legacy_rows():
+    """Catches requiring historical material rows to be backfilled before they can be read."""
+    models = _models()
+
+    record = models.SourceRecord(
+        id="SRC-LEGACY",
+        project_id="LLD",
+        original_filename="历史需求.md",
+        archive_path="data/source_archive/" + "a" * 64 + ".md",
+        sha256="a" * 64,
+        mime_type="text/markdown",
+        size_bytes=1,
+        source_type="product_document",
+        authority_level=AuthorityLevel.FORMAL_DECISION,
+        source_department="产品",
+        provider=None,
+        document_date=date(2026, 7, 29),
+        document_version="v1.0",
+        applicable_baseline_version="LLD-724_1",
+        security_level=SecurityLevel.L1_PUBLIC_SIMULATED,
+        is_redacted=True,
+        allow_external_model=False,
+        is_sandbox=True,
+        ingest_status="completed",
+        created_at=NOW,
+    )
+
+    assert record.material_name is None
+    assert record.material_series_id is None
+    assert record.previous_source_id is None
+
+
+def test_document_draft_defaults_to_external_ai_generation_mode():
+    """Catches legacy draft creation being interpreted as a local-manual candidate."""
+    from src.domain.enums import DocumentGenerationMode
+    from src.domain.incubator import DocumentDraft
+
+    draft = DocumentDraft(
+        id="DRAFT-001",
+        project_id="LLD",
+        version_id="LLD-724_2",
+        status="candidate_draft",
+        markdown_path="wiki/drafts/DRAFT-001/方案.md",
+        markdown_sha256="a" * 64,
+        source_ids=["SRC-001"],
+        section_citations=[
+            {
+                "heading": "范围",
+                "source_id": "SRC-001",
+                "chunk_id": "CHUNK-001",
+                "locator": "段落 1",
+                "excerpt": "范围说明",
+            }
+        ],
+        summary="候选版本",
+        missing_sections=[],
+        evidence_gaps=[],
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    assert draft.generation_mode == DocumentGenerationMode.EXTERNAL_AI
+
+
 def test_effective_knowledge_card_requires_source_reference():
     """Catches publishing an effective rule that cannot be traced to any source."""
     models = _models()

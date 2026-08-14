@@ -89,6 +89,11 @@ class DocumentDraftStatus(StrEnum):
     PUBLISHED = "published"
 
 
+class DocumentGenerationMode(StrEnum):
+    EXTERNAL_AI = "external_ai"
+    LOCAL_MANUAL = "local_manual"
+
+
 class StructureSuggestionStatus(StrEnum):
     OPEN = "open"
     ACCEPTED = "accepted"

@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS source_records (
     is_sandbox INTEGER NOT NULL CHECK (is_sandbox IN (0, 1)),
     ingest_status TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    material_name TEXT,
+    material_series_id TEXT,
+    previous_source_id TEXT,
     UNIQUE(project_id, sha256)
 );
 
@@ -208,6 +211,7 @@ CREATE TABLE IF NOT EXISTS document_drafts (
     evidence_gaps_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    generation_mode TEXT NOT NULL DEFAULT 'external_ai',
     UNIQUE(project_id, version_id)
 );
 
@@ -287,6 +291,15 @@ def migrate(db_path: Path) -> None:
         _add_column_if_missing(connection, "baselines", "full_document_sha256", "TEXT")
         _add_column_if_missing(connection, "baselines", "card_snapshot_sha256", "TEXT")
         _add_column_if_missing(connection, "baselines", "display_version", "TEXT")
+        _add_column_if_missing(connection, "source_records", "material_name", "TEXT")
+        _add_column_if_missing(connection, "source_records", "material_series_id", "TEXT")
+        _add_column_if_missing(connection, "source_records", "previous_source_id", "TEXT")
+        _add_column_if_missing(
+            connection,
+            "document_drafts",
+            "generation_mode",
+            "TEXT NOT NULL DEFAULT 'external_ai'",
+        )
         _add_column_if_missing(
             connection,
             "decisions",
@@ -316,6 +329,16 @@ def migrate(db_path: Path) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_project_fingerprint "
             "ON issue_cards(project_id, fingerprint) WHERE fingerprint IS NOT NULL"
         )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_source_project_series "
+            "ON source_records(project_id, material_series_id, created_at)"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_source_series_version "
+            "ON source_records(project_id, material_series_id, document_version) "
+            "WHERE material_series_id IS NOT NULL"
+        )
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.0",))
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.1",))
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.2",))
+        connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("2.1",))

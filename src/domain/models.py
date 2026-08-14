@@ -76,6 +76,9 @@ class SourceRecord(DomainModel):
     is_sandbox: bool
     ingest_status: NonEmptyStr
     created_at: datetime
+    material_name: NonEmptyStr | None = None
+    material_series_id: NonEmptyStr | None = None
+    previous_source_id: NonEmptyStr | None = None
 
 
 class KnowledgeCard(DomainModel):

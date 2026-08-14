@@ -140,8 +140,9 @@ class SqliteSourceRepository:
                     size_bytes, source_type, authority_level, source_department, provider,
                     document_date, document_version, applicable_baseline_version,
                     security_level, is_redacted, allow_external_model, is_sandbox,
-                    ingest_status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ingest_status, created_at, material_name, material_series_id,
+                    previous_source_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source.id,
@@ -164,6 +165,9 @@ class SqliteSourceRepository:
                     int(source.is_sandbox),
                     source.ingest_status,
                     source.created_at.isoformat(),
+                    source.material_name,
+                    source.material_series_id,
+                    source.previous_source_id,
                 ),
             )
 
@@ -194,6 +198,52 @@ class SqliteSourceRepository:
             ).fetchall()
         return [self._to_model(row) for row in rows]
 
+    def list_for_series(self, project_id: str, series_id: str) -> list[SourceRecord]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM source_records
+                WHERE project_id = ? AND material_series_id = ?
+                ORDER BY created_at, id
+                """,
+                (project_id, series_id),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
+    def find_latest_for_series(self, project_id: str, series_id: str) -> SourceRecord | None:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT current.* FROM source_records AS current
+                WHERE current.project_id = ? AND current.material_series_id = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM source_records AS successor
+                      WHERE successor.project_id = current.project_id
+                        AND successor.previous_source_id = current.id
+                  )
+                ORDER BY current.created_at, current.id
+                """,
+                (project_id, series_id),
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ValueError("MATERIAL_SERIES_FORKED")
+        return self._to_model(rows[0])
+
+    def find_by_series_version(
+        self, project_id: str, series_id: str, document_version: str
+    ) -> SourceRecord | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM source_records
+                WHERE project_id = ? AND material_series_id = ? AND document_version = ?
+                """,
+                (project_id, series_id, document_version),
+            ).fetchone()
+        return None if row is None else self._to_model(row)
+
     def update(self, source: SourceRecord) -> None:
         with connect(self.db_path) as connection:
             result = connection.execute(
@@ -203,7 +253,8 @@ class SqliteSourceRepository:
                     source_type = ?, authority_level = ?, source_department = ?, provider = ?,
                     document_date = ?, document_version = ?, applicable_baseline_version = ?,
                     security_level = ?, is_redacted = ?, allow_external_model = ?,
-                    is_sandbox = ?, ingest_status = ?
+                    is_sandbox = ?, ingest_status = ?, material_name = ?,
+                    material_series_id = ?, previous_source_id = ?
                 WHERE id = ? AND project_id = ? AND sha256 = ?
                 """,
                 (
@@ -223,6 +274,9 @@ class SqliteSourceRepository:
                     int(source.allow_external_model),
                     int(source.is_sandbox),
                     source.ingest_status,
+                    source.material_name,
+                    source.material_series_id,
+                    source.previous_source_id,
                     source.id,
                     source.project_id,
                     source.sha256,
@@ -261,8 +315,9 @@ class SqliteDocumentDraftRepository:
                 INSERT INTO document_drafts (
                     id, project_id, version_id, display_version, parent_version_id, status,
                     markdown_path, markdown_sha256, source_ids_json, section_citations_json,
-                    summary, missing_sections_json, evidence_gaps_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    summary, missing_sections_json, evidence_gaps_json, created_at, updated_at,
+                    generation_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     draft.id,
@@ -280,6 +335,7 @@ class SqliteDocumentDraftRepository:
                     _json_dumps(draft.evidence_gaps),
                     draft.created_at.isoformat(),
                     draft.updated_at.isoformat(),
+                    draft.generation_mode.value,
                 ),
             )
 

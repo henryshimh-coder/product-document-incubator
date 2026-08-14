@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import Field
 
-from src.domain.enums import DocumentDraftStatus, StructureSuggestionStatus
+from src.domain.enums import DocumentDraftStatus, DocumentGenerationMode, StructureSuggestionStatus
 from src.domain.models import DomainModel, NonEmptyStr, Sha256Str
 
 
@@ -48,6 +48,7 @@ class DocumentDraft(DomainModel):
     evidence_gaps: list[NonEmptyStr]
     created_at: datetime
     updated_at: datetime
+    generation_mode: DocumentGenerationMode = DocumentGenerationMode.EXTERNAL_AI
 
 
 class StructureSuggestion(DomainModel):
