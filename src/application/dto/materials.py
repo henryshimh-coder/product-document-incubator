@@ -96,3 +96,20 @@ class ArchivedSourceView(BaseModel):
     material_name: str | None = None
     material_series_id: str | None = None
     previous_source_id: str | None = None
+
+
+class ReclassifySourceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    project_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    new_source_type: str = Field(min_length=1)
+    owner_name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("new_source_type", mode="before")
+    @classmethod
+    def validate_target_type(cls, value: object) -> object:
+        if not isinstance(value, str):
+            raise ValueError("MATERIAL_TYPE_INVALID")
+        require_new_material_type(value)
+        return value

@@ -5,7 +5,7 @@ from datetime import date
 import streamlit as st
 
 from src.application.container import AppContainer
-from src.application.dto.materials import ArchiveRawSourceInput
+from src.application.dto.materials import ArchiveRawSourceInput, ReclassifySourceInput
 from src.domain.enums import AuthorityLevel, SecurityLevel
 from src.domain.material_catalog import MATERIAL_TYPES, NEW_AUTHORITY_LEVELS
 
@@ -134,6 +134,30 @@ def _render_index(container: AppContainer) -> None:
             f"{item.get('ingest_status', '--')}"
         )
         st.code(str(item.get("archive_path", "")), language=None)
+        if item.get("source_type") not in {definition.code for definition in MATERIAL_TYPES}:
+            with st.expander("调整历史材料分类"):
+                target = st.selectbox(
+                    "调整为",
+                    options=(None, *MATERIAL_TYPES),
+                    format_func=lambda value: "请选择" if value is None else value.label,
+                    key=f"reclassify-type-{item.get('source_id')}",
+                )
+                if st.button("保存分类", key=f"reclassify-save-{item.get('source_id')}"):
+                    try:
+                        if target is None or container.reclassify_source is None:
+                            raise ValueError("请选择目标分类")
+                        container.reclassify_source.execute(
+                            ReclassifySourceInput(
+                                project_id=container.active_project.project_id,
+                                source_id=str(item["source_id"]),
+                                new_source_type=target.code,
+                                owner_name="Owner",
+                            )
+                        )
+                    except (OSError, ValueError, RuntimeError) as error:
+                        st.error(f"材料分类调整失败，原分类保持不变。{error}")
+                    else:
+                        st.success(f"材料分类已调整为“{target.label}”。")
 
 
 def _series_options(container: AppContainer) -> tuple[str, ...]:

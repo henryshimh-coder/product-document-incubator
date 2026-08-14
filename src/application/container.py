@@ -37,6 +37,7 @@ from src.application.use_cases.incubate_document import IncubateDocument
 from src.application.use_cases.manage_projects import ManageProjects
 from src.application.use_cases.publish_baseline import PublishBaseline
 from src.application.use_cases.publish_document_draft import PublishDocumentDraft
+from src.application.use_cases.reclassify_source import ReclassifySource
 from src.application.use_cases.record_decision import RecordDecision
 from src.application.use_cases.review_change_request import ReviewChangeRequest
 from src.application.use_cases.run_lint import (
@@ -129,6 +130,10 @@ class RawSourceArchiveService(Protocol):
     def execute(self, command: ArchiveRawSourceInput) -> ArchivedSourceView: ...
 
 
+class SourceReclassificationService(Protocol):
+    def execute(self, command): ...
+
+
 class QueryService(Protocol):
     def list_historical_versions(self, project_id: str) -> tuple[str, ...]: ...
 
@@ -213,6 +218,7 @@ class AppContainer:
     manage_projects: ProjectManagement | None = None
     active_project: ProjectContext | None = None
     archive_raw_source: RawSourceArchiveService | None = None
+    reclassify_source: SourceReclassificationService | None = None
     incubate_document: DocumentIncubation | None = None
     publish_document_draft: DocumentDraftPublisher | None = None
     export_current_document: CurrentDocumentExporter | None = None
@@ -305,6 +311,7 @@ def build_container(
                 manage_projects=project_management,
                 active_project=active_project,
                 archive_raw_source=_build_raw_source_archive(active_project),
+                reclassify_source=_build_reclassify_source(active_project),
                 incubate_document=_build_document_incubation(
                     settings=settings,
                     active_project=active_project,
@@ -445,6 +452,9 @@ def _build_stateful_container(
         "manage_projects": project_management,
         "archive_raw_source": (
             None if active_project is None else _build_raw_source_archive(active_project)
+        ),
+        "reclassify_source": (
+            None if active_project is None else _build_reclassify_source(active_project)
         ),
         "incubate_document": (
             None
@@ -675,6 +685,14 @@ def _build_raw_source_archive(active_project: ProjectContext) -> ArchiveRawSourc
             source_id=source_id,
             year=year,
         ),
+        index=SourceIndexStore(active_project.paths),
+    )
+
+
+def _build_reclassify_source(active_project: ProjectContext) -> ReclassifySource:
+    return ReclassifySource(
+        paths=active_project.paths,
+        sources=SqliteSourceRepository(active_project.db_path),
         index=SourceIndexStore(active_project.paths),
     )
 
