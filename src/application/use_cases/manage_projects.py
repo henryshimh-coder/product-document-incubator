@@ -98,7 +98,7 @@ class ManageProjects:
         else:
             raise ValueError(f"project already exists: {command.project_id}")
 
-        prepared = self.scaffolder.prepare(command)
+        prepared = self.scaffolder.prepare(command, parent_root=self.library_root)
         committed = False
         try:
             self.scaffolder.validate(prepared)
@@ -148,9 +148,17 @@ class ManageProjects:
             if isinstance(sources, list):
                 source_count = len(sources)
         draft_root = paths.wiki_root / "drafts"
-        draft_count = (
-            sum(1 for item in draft_root.iterdir() if item.is_dir()) if draft_root.is_dir() else 0
-        )
+        if draft_root.is_dir():
+            local_ingest_root = draft_root / "local-ingest"
+            draft_count = sum(
+                1
+                for item in draft_root.iterdir()
+                if item.is_dir() and item.name != "local-ingest"
+            )
+            if local_ingest_root.is_dir():
+                draft_count += sum(1 for item in local_ingest_root.iterdir() if item.is_dir())
+        else:
+            draft_count = 0
         current_version = None
         if paths.manifest_path.is_file():
             manifest = json.loads(paths.manifest_path.read_text(encoding="utf-8"))

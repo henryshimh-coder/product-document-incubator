@@ -104,6 +104,20 @@ def test_scaffolder_builds_complete_2_2_wiki_llm_tree(
     scaffolder.abort(prepared)
 
 
+def test_scaffolder_requires_an_explicit_parent_root(
+    tmp_path: Path, schema_assets: Path, now: datetime
+) -> None:
+    """Catches a scaffold silently falling back to the control-plane directory."""
+    from src.infrastructure.files.project_scaffolder import ProjectScaffolder
+
+    scaffolder = ProjectScaffolder(
+        library_root=tmp_path / "control", schema_source=schema_assets, now=lambda: now
+    )
+
+    with pytest.raises(TypeError, match="parent_root"):
+        scaffolder.prepare(new_project_command("PROJECT_A"))
+
+
 def test_create_project_scaffolds_complete_wiki_atomically(project_environment) -> None:
     """Catches a registered project missing required local Wiki-LLM structure."""
     manager, library_root, _, _ = project_environment
@@ -239,7 +253,9 @@ def test_scaffolder_commit_never_replaces_directory_created_during_race(
     from src.infrastructure.files import project_scaffolder as scaffolder_module
 
     manager, library_root, _, _ = project_environment
-    prepared = manager.scaffolder.prepare(new_project_command("RACE"))
+    prepared = manager.scaffolder.prepare(
+        new_project_command("RACE"), parent_root=library_root
+    )
     manager.scaffolder.validate(prepared)
     native_rename = scaffolder_module._rename_directory_without_replace
     marker = library_root / "RACE/owner-file.txt"
@@ -292,6 +308,7 @@ def test_project_list_summarizes_local_counts(project_environment) -> None:
     """Catches project cards showing counts from another project or stale placeholders."""
     manager, library_root, _, _ = project_environment
     manager.create(new_project_command("PROJECT_A"))
+    assert manager.list()[0].draft_count == 0
     source_index = library_root / "PROJECT_A/.incubator/source-index.json"
     source_index.write_text(
         json.dumps({"sources": [{"source_id": "SRC-1"}, {"source_id": "SRC-2"}]}),
@@ -304,7 +321,7 @@ def test_project_list_summarizes_local_counts(project_environment) -> None:
     assert len(summaries) == 1
     assert summaries[0].project_id == "PROJECT_A"
     assert summaries[0].source_count == 2
-    assert summaries[0].draft_count == 2
+    assert summaries[0].draft_count == 1
     assert summaries[0].current_version is None
 
 

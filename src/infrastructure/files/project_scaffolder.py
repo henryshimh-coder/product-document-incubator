@@ -91,10 +91,8 @@ class ProjectScaffolder:
         self.schema_source = schema_source.expanduser().resolve()
         self.now = now
 
-    def prepare(
-        self, command: CreateProjectInput, *, parent_root: Path | None = None
-    ) -> PreparedProject:
-        parent = (parent_root or self.library_root).expanduser().resolve()
+    def prepare(self, command: CreateProjectInput, *, parent_root: Path) -> PreparedProject:
+        parent = parent_root.expanduser().resolve()
         target = parent / command.project_id
         paths = ProjectPaths.for_registered_root(self.library_root, command.project_id, target)
         if paths.project_root.exists():
