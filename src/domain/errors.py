@@ -5,6 +5,10 @@ from enum import StrEnum
 
 
 class ErrorCode(StrEnum):
+    PROJECT_ROOT_UNAVAILABLE = "PROJECT_ROOT_UNAVAILABLE"
+    PROJECT_ROOT_ID_MISMATCH = "PROJECT_ROOT_ID_MISMATCH"
+    PROJECT_ROOT_NOT_WRITABLE = "PROJECT_ROOT_NOT_WRITABLE"
+    PROJECT_ROOT_ALREADY_EXISTS = "PROJECT_ROOT_ALREADY_EXISTS"
     FILE_TYPE_NOT_ALLOWED = "FILE_TYPE_NOT_ALLOWED"
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
     DUPLICATE_SOURCE = "DUPLICATE_SOURCE"
@@ -65,6 +69,18 @@ class ErrorDefinition:
 
 
 ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
+    ErrorCode.PROJECT_ROOT_UNAVAILABLE: ErrorDefinition(
+        "登记的项目目录不可用，请重新定位项目"
+    ),
+    ErrorCode.PROJECT_ROOT_ID_MISMATCH: ErrorDefinition(
+        "所选目录不属于当前项目，请选择正确的项目目录"
+    ),
+    ErrorCode.PROJECT_ROOT_NOT_WRITABLE: ErrorDefinition(
+        "所选父目录不可写，请更换目录或权限"
+    ),
+    ErrorCode.PROJECT_ROOT_ALREADY_EXISTS: ErrorDefinition(
+        "目标项目目录已存在，请更换目录或项目 ID"
+    ),
     ErrorCode.FILE_TYPE_NOT_ALLOWED: ErrorDefinition("不支持该文件格式"),
     ErrorCode.FILE_TOO_LARGE: ErrorDefinition("文件超过 20MB"),
     ErrorCode.DUPLICATE_SOURCE: ErrorDefinition("该文件已导入"),

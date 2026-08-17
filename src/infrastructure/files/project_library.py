@@ -27,9 +27,7 @@ class ProjectPaths:
 
     @classmethod
     def for_project(cls, library_root: Path, project_id: str) -> ProjectPaths:
-        if PROJECT_ID_PATTERN.fullmatch(project_id) is None:
-            raise ValueError("project_id must match ^[A-Z0-9][A-Z0-9_-]{0,63}$")
-
+        cls._validate_project_id(project_id)
         resolved_library = library_root.expanduser().resolve()
         lexical_project = resolved_library / project_id
         if lexical_project.is_symlink():
@@ -39,21 +37,39 @@ class ProjectPaths:
             raise ValueError("project root must resolve to its declared project_id")
         if not resolved_project.is_relative_to(resolved_library):
             raise ValueError("project path resolves outside library_root")
+        return cls._build(resolved_library, project_id, resolved_project)
 
+    @classmethod
+    def for_registered_root(
+        cls, library_root: Path, project_id: str, project_root: Path
+    ) -> ProjectPaths:
+        cls._validate_project_id(project_id)
+        lexical_root = project_root.expanduser().absolute()
+        if lexical_root.is_symlink():
+            raise ValueError("project root must not be a symlink")
+        return cls._build(library_root.expanduser().resolve(), project_id, lexical_root.resolve())
+
+    @staticmethod
+    def _validate_project_id(project_id: str) -> None:
+        if PROJECT_ID_PATTERN.fullmatch(project_id) is None:
+            raise ValueError("project_id must match ^[A-Z0-9][A-Z0-9_-]{0,63}$")
+
+    @classmethod
+    def _build(cls, library_root: Path, project_id: str, project_root: Path) -> ProjectPaths:
         def inside_project(relative_path: str) -> Path:
-            candidate = (resolved_project / relative_path).resolve()
-            if not candidate.is_relative_to(resolved_project):
+            candidate = (project_root / relative_path).resolve()
+            if not candidate.is_relative_to(project_root):
                 raise ValueError("derived project path resolves outside library_root")
             return candidate
 
         system_root = inside_project(".incubator")
         manifest_path = (system_root / "current-baseline.json").resolve()
-        if not manifest_path.is_relative_to(resolved_project):
+        if not manifest_path.is_relative_to(project_root):
             raise ValueError("derived project path resolves outside library_root")
         return cls(
-            library_root=resolved_library,
+            library_root=library_root,
             project_id=project_id,
-            project_root=resolved_project,
+            project_root=project_root,
             raw_root=inside_project("raw"),
             wiki_root=inside_project("wiki"),
             schema_root=inside_project("schema"),

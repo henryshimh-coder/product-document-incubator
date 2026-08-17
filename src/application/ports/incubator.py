@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import MutableMapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from src.application.dto.documents import (
     ArchivedSourceView,
@@ -24,6 +24,9 @@ from src.domain.incubator import (
     StructureSuggestion,
 )
 from src.domain.models import Baseline, Project
+
+if TYPE_CHECKING:
+    from src.infrastructure.files.project_library import ProjectPaths
 
 
 class IncubatorSettingsStore(Protocol):
@@ -49,6 +52,14 @@ class IncubatorProjectRepository(Protocol):
         status: ProjectRootStatus,
         verified_at: datetime | None,
     ) -> None: ...
+
+
+class ProjectPathResolving(Protocol):
+    def resolve(self, project_id: str) -> ProjectPaths: ...
+
+    def validate_parent(self, parent_root: Path, project_id: str) -> Path: ...
+
+    def validate_relocation(self, project_id: str, project_root: Path) -> ProjectPaths: ...
 
 
 class ProjectManagement(Protocol):

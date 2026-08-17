@@ -41,6 +41,40 @@ def test_project_paths_stay_inside_library_root(tmp_path: Path) -> None:
     assert paths.manifest_path == paths.system_root / "current-baseline.json"
 
 
+def test_paths_accept_registered_root_outside_control_root(tmp_path: Path) -> None:
+    """Catches central control roots being mistaken for every project's content root."""
+    from src.infrastructure.files.project_library import ProjectPaths
+
+    control = tmp_path / "control"
+    project_root = tmp_path / "external/PROJECT_A"
+
+    paths = ProjectPaths.for_registered_root(control, "PROJECT_A", project_root)
+
+    assert paths.library_root == control.resolve()
+    assert paths.project_root == project_root.resolve()
+    assert paths.raw_root == project_root.resolve() / "raw"
+
+
+def test_registered_root_rejects_symlink_and_derived_escape(tmp_path: Path) -> None:
+    """Catches a registered root or child path escaping the project through a symlink."""
+    from src.infrastructure.files.project_library import ProjectPaths
+
+    target = tmp_path / "real/PROJECT_A"
+    target.mkdir(parents=True)
+    link = tmp_path / "linked-project"
+    link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="project root must not be a symlink"):
+        ProjectPaths.for_registered_root(tmp_path / "control", "PROJECT_A", link)
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (target / "raw").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="derived project path"):
+        ProjectPaths.for_registered_root(tmp_path / "control", "PROJECT_A", target)
+
+
 @pytest.mark.parametrize("project_id", ["../LLD", "a/b", "lld", "", "A B"])
 def test_project_paths_reject_unsafe_project_id(tmp_path: Path, project_id: str) -> None:
     """Catches traversal, separators, lowercase IDs, blanks, and spaces."""
