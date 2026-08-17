@@ -17,6 +17,16 @@ NOW = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
 
 
 @pytest.fixture
+def schema_assets() -> Path:
+    return Path("assets/incubator_schema")
+
+
+@pytest.fixture
+def now() -> datetime:
+    return NOW
+
+
+@pytest.fixture
 def project_environment(tmp_path: Path):
     from src.application.use_cases.manage_projects import ManageProjects
     from src.infrastructure.files.project_scaffolder import ProjectScaffolder
@@ -58,6 +68,40 @@ def new_project_command(project_id: str):
         initial_display_version=None,
         allow_external_model=False,
     )
+
+
+def test_scaffolder_builds_complete_2_2_wiki_llm_tree(
+    tmp_path: Path, schema_assets: Path, now: datetime
+) -> None:
+    """Catches a scaffold missing the 2.2 Wiki-LLM entry points or work areas."""
+    from src.infrastructure.files.project_scaffolder import ProjectScaffolder
+
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    scaffolder = ProjectScaffolder(
+        library_root=tmp_path / "control", schema_source=schema_assets, now=lambda: now
+    )
+
+    prepared = scaffolder.prepare(new_project_command("PROJECT_A"), parent_root=parent)
+
+    required = {
+        "README.md",
+        "AGENTS.md",
+        "wiki/sources",
+        "wiki/drafts/local-ingest",
+        "schema/ingest-contract.md",
+        "schema/source-page-template.md",
+        "schema/topic-page-template.md",
+        ".incubator/transactions",
+        ".incubator/locks",
+    }
+    assert all((prepared.temp_root / item).exists() for item in required)
+    assert (
+        json.loads((prepared.temp_root / ".incubator/project.json").read_text(encoding="utf-8"))
+        ["schema_version"]
+        == "2.2"
+    )
+    scaffolder.abort(prepared)
 
 
 def test_create_project_scaffolds_complete_wiki_atomically(project_environment) -> None:
@@ -260,7 +304,7 @@ def test_project_list_summarizes_local_counts(project_environment) -> None:
     assert len(summaries) == 1
     assert summaries[0].project_id == "PROJECT_A"
     assert summaries[0].source_count == 2
-    assert summaries[0].draft_count == 1
+    assert summaries[0].draft_count == 2
     assert summaries[0].current_version is None
 
 
