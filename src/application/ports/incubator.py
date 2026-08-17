@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -15,6 +16,7 @@ from src.application.dto.documents import (
     SuggestStructureInput,
 )
 from src.application.dto.projects import CreateProjectInput, ProjectSelection
+from src.domain.enums import ProjectRootStatus
 from src.domain.incubator import (
     DocumentDraft,
     IncubatorSettings,
@@ -39,6 +41,14 @@ class IncubatorProjectRepository(Protocol):
     def get(self, project_id: str) -> Project: ...
 
     def list_all(self) -> list[Project]: ...
+
+    def update_root_location(
+        self,
+        project_id: str,
+        project_root: Path,
+        status: ProjectRootStatus,
+        verified_at: datetime | None,
+    ) -> None: ...
 
 
 class ProjectManagement(Protocol):

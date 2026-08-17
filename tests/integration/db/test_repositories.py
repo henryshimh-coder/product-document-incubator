@@ -16,6 +16,7 @@ from src.domain.enums import (
     IssueSeverity,
     IssueStatus,
     KnowledgeStatus,
+    ProjectRootStatus,
     SecurityLevel,
 )
 from src.domain.models import (
@@ -40,6 +41,34 @@ from src.infrastructure.db.repositories import (
 )
 
 NOW = datetime(2026, 7, 29, 7, 0, tzinfo=UTC)
+
+
+def test_repository_updates_root_location_atomically(tmp_path: Path) -> None:
+    """Catches root move metadata being only partially persisted."""
+    db_path = tmp_path / "product_incubator.db"
+    migrate(db_path)
+    repository = SqliteProjectRepository(db_path)
+    repository.add(
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="说明 A",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+    repository.update_root_location(
+        "PROJECT_A", tmp_path / "moved/PROJECT_A", ProjectRootStatus.AVAILABLE, NOW
+    )
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path == str((tmp_path / "moved/PROJECT_A").resolve())
+    assert saved.root_status is ProjectRootStatus.AVAILABLE
+    assert saved.root_last_verified_at == NOW
 
 
 def test_project_repository_lists_projects_by_recent_activity_then_id(tmp_path: Path) -> None:

@@ -4,7 +4,12 @@ from datetime import datetime
 
 from pydantic import Field
 
-from src.domain.enums import DocumentDraftStatus, DocumentGenerationMode, StructureSuggestionStatus
+from src.domain.enums import (
+    DocumentDraftStatus,
+    DocumentGenerationMode,
+    ProjectRootStatus,
+    StructureSuggestionStatus,
+)
 from src.domain.models import DomainModel, NonEmptyStr, Sha256Str
 
 
@@ -22,6 +27,9 @@ class ProjectSummary(DomainModel):
     source_count: int = Field(ge=0)
     draft_count: int = Field(ge=0)
     updated_at: datetime
+    project_root_path: NonEmptyStr | None = None
+    root_status: ProjectRootStatus = ProjectRootStatus.UNAVAILABLE
+    root_last_verified_at: datetime | None = None
 
 
 class DocumentSectionCitation(DomainModel):

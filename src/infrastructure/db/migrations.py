@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -18,7 +19,10 @@ CREATE TABLE IF NOT EXISTS projects (
     current_baseline_id TEXT,
     allow_external_model INTEGER NOT NULL DEFAULT 0 CHECK (allow_external_model IN (0, 1)),
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    project_root_path TEXT,
+    root_status TEXT NOT NULL DEFAULT 'unavailable',
+    root_last_verified_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS source_records (
@@ -269,6 +273,17 @@ def _add_column_if_missing(
         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _root_is_available(project_root: Path, project_id: str) -> bool:
+    project_json = project_root / ".incubator" / "project.json"
+    if not project_root.is_dir() or not project_json.is_file():
+        return False
+    try:
+        payload = json.loads(project_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("project_id") == project_id
+
+
 def migrate(db_path: Path) -> None:
     """Create or update the local SQLite schema safely and repeatedly."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,6 +309,14 @@ def migrate(db_path: Path) -> None:
         _add_column_if_missing(connection, "source_records", "material_name", "TEXT")
         _add_column_if_missing(connection, "source_records", "material_series_id", "TEXT")
         _add_column_if_missing(connection, "source_records", "previous_source_id", "TEXT")
+        _add_column_if_missing(connection, "projects", "project_root_path", "TEXT")
+        _add_column_if_missing(
+            connection,
+            "projects",
+            "root_status",
+            "TEXT NOT NULL DEFAULT 'unavailable'",
+        )
+        _add_column_if_missing(connection, "projects", "root_last_verified_at", "TEXT")
         _add_column_if_missing(
             connection,
             "document_drafts",
@@ -338,7 +361,23 @@ def migrate(db_path: Path) -> None:
             "ON source_records(project_id, material_series_id, document_version) "
             "WHERE material_series_id IS NOT NULL"
         )
+        control_root = db_path.parent.parent
+        legacy_projects = connection.execute(
+            "SELECT id FROM projects WHERE project_root_path IS NULL"
+        ).fetchall()
+        for project in legacy_projects:
+            project_id = str(project["id"])
+            project_root = (control_root / project_id).resolve()
+            root_status = (
+                "available" if _root_is_available(project_root, project_id) else "unavailable"
+            )
+            connection.execute(
+                "UPDATE projects SET project_root_path = ?, root_status = ? "
+                "WHERE id = ? AND project_root_path IS NULL",
+                (str(project_root), root_status, project_id),
+            )
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.0",))
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.1",))
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("1.2",))
         connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("2.1",))
+        connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", ("2.2",))

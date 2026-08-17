@@ -1,11 +1,62 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+from src.domain.enums import ProjectRootStatus
 from src.infrastructure.db.migrations import migrate
+from src.infrastructure.db.repositories import SqliteProjectRepository
+
+
+def insert_legacy_project(db_path: Path, project_id: str) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO projects (
+                id, name, product_line, stage, current_baseline_id,
+                allow_external_model, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                "历史项目",
+                "历史产品线",
+                "待初始化",
+                None,
+                0,
+                "2026-07-29T00:00:00+00:00",
+                "2026-07-29T00:00:00+00:00",
+            ),
+        )
+
+
+def write_project_json(project_root: Path, *, project_id: str, schema_version: str) -> None:
+    (project_root / ".incubator" / "project.json").write_text(
+        json.dumps(
+            {"project_id": project_id, "schema_version": schema_version}, ensure_ascii=False
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_migrate_adds_2_2_project_location_and_backfills_existing_project(
+    tmp_path: Path,
+) -> None:
+    """Catches 2.2 migration omitting a discoverable legacy project root."""
+    db_path = tmp_path / ".incubator/product_incubator.db"
+    migrate(db_path)
+    insert_legacy_project(db_path, "PROJECT_A")
+    (tmp_path / "PROJECT_A/.incubator").mkdir(parents=True)
+    write_project_json(tmp_path / "PROJECT_A", project_id="PROJECT_A", schema_version="2.1")
+
+    migrate(db_path)
+
+    project = SqliteProjectRepository(db_path).get("PROJECT_A")
+    assert project.project_root_path == str((tmp_path / "PROJECT_A").resolve())
+    assert project.root_status is ProjectRootStatus.AVAILABLE
 
 
 def test_migrate_creates_documented_tables_and_enables_required_pragmas(
@@ -50,7 +101,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",), ("2.2",)]
 
 
 def test_migrate_creates_event_level_with_safe_info_default(tmp_path: Path) -> None:
@@ -208,7 +259,7 @@ def test_migrate_repairs_null_and_blank_event_correlations_despite_1_2_marker(
         ("EVENT-NULL", "LEGACY-EVENT-NULL"),
         ("EVENT-VALID", "CORR-VALID"),
     ]
-    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",), ("2.2",)]
 
 
 def test_migrate_upgrades_legacy_issue_table_before_creating_fingerprint_index(
@@ -295,7 +346,7 @@ def test_migrate_adds_2_1_material_columns_and_default_draft_generation_mode(
 
     assert {"material_name", "material_series_id", "previous_source_id"} <= source_columns
     assert "generation_mode" in draft_columns
-    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",), ("2.2",)]
 
 
 def test_migrate_upgrades_pre_2_1_source_table_before_creating_series_indexes(

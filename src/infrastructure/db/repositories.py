@@ -17,6 +17,7 @@ from src.domain.enums import (
     ChangeStatus,
     IssueStatus,
     KnowledgeStatus,
+    ProjectRootStatus,
     StructureSuggestionStatus,
 )
 from src.domain.errors import DomainError, ErrorCode
@@ -80,8 +81,9 @@ class SqliteProjectRepository:
                 """
                 INSERT INTO projects (
                     id, name, product_line, stage, current_baseline_id,
-                    allow_external_model, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    allow_external_model, created_at, updated_at, project_root_path,
+                    root_status, root_last_verified_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project.id,
@@ -92,6 +94,13 @@ class SqliteProjectRepository:
                     int(project.allow_external_model),
                     project.created_at.isoformat(),
                     project.updated_at.isoformat(),
+                    project.project_root_path,
+                    project.root_status.value,
+                    (
+                        project.root_last_verified_at.isoformat()
+                        if project.root_last_verified_at is not None
+                        else None
+                    ),
                 ),
             )
 
@@ -116,6 +125,31 @@ class SqliteProjectRepository:
             result = connection.execute(
                 "UPDATE projects SET current_baseline_id = ? WHERE id = ?",
                 (baseline_id, project_id),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"project not found: {project_id}")
+
+    def update_root_location(
+        self,
+        project_id: str,
+        project_root: Path,
+        status: ProjectRootStatus,
+        verified_at: datetime | None,
+    ) -> None:
+        resolved_root = project_root.expanduser().resolve()
+        with connect(self.db_path) as connection:
+            result = connection.execute(
+                """
+                UPDATE projects
+                SET project_root_path = ?, root_status = ?, root_last_verified_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(resolved_root),
+                    status.value,
+                    verified_at.isoformat() if verified_at is not None else None,
+                    project_id,
+                ),
             )
             if result.rowcount != 1:
                 raise KeyError(f"project not found: {project_id}")

@@ -16,6 +16,7 @@ from src.domain.enums import (
     IssueSeverity,
     IssueStatus,
     KnowledgeStatus,
+    ProjectRootStatus,
     SecurityLevel,
 )
 
@@ -26,6 +27,45 @@ SHA_B = "b" * 64
 
 def _models():
     return importlib.import_module("src.domain.models")
+
+
+@pytest.fixture
+def project_factory():
+    def factory(**overrides):
+        payload = {
+            "id": "PROJECT_A",
+            "name": "项目 A",
+            "product_line": "产品线 A",
+            "stage": "待初始化",
+            "current_baseline_id": None,
+            "allow_external_model": False,
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+        payload.update(overrides)
+        return _models().Project(**payload)
+
+    return factory
+
+
+def test_project_accepts_registered_root_location(project_factory, tmp_path: Path):
+    """Catches registered project roots being discarded by the domain boundary."""
+    project = project_factory(
+        project_root_path=str(tmp_path / "PROJECT_A"),
+        root_status=ProjectRootStatus.AVAILABLE,
+        root_last_verified_at=None,
+    )
+
+    assert project.project_root_path == str(tmp_path / "PROJECT_A")
+    assert project.root_status is ProjectRootStatus.AVAILABLE
+
+
+def test_legacy_project_defaults_to_unregistered_root(project_factory):
+    """Catches historical project rows being treated as available without a registered root."""
+    project = project_factory()
+
+    assert project.project_root_path is None
+    assert project.root_status is ProjectRootStatus.UNAVAILABLE
 
 
 def _pending_change_request(models):

@@ -24,6 +24,7 @@ from src.domain.enums import (
     IssueSeverity,
     IssueStatus,
     KnowledgeStatus,
+    ProjectRootStatus,
     SecurityLevel,
 )
 
@@ -53,6 +54,9 @@ class Project(DomainModel):
     allow_external_model: bool
     created_at: datetime
     updated_at: datetime
+    project_root_path: NonEmptyStr | None = None
+    root_status: ProjectRootStatus = ProjectRootStatus.UNAVAILABLE
+    root_last_verified_at: datetime | None = None
 
 
 class SourceRecord(DomainModel):
