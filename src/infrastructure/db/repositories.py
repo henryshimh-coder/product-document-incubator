@@ -76,6 +76,11 @@ class SqliteProjectRepository:
         self.db_path = db_path
 
     def add(self, project: Project) -> None:
+        project_root_path = (
+            str(Path(project.project_root_path).expanduser().resolve())
+            if project.project_root_path is not None
+            else None
+        )
         with connect(self.db_path) as connection:
             connection.execute(
                 """
@@ -94,7 +99,7 @@ class SqliteProjectRepository:
                     int(project.allow_external_model),
                     project.created_at.isoformat(),
                     project.updated_at.isoformat(),
-                    project.project_root_path,
+                    project_root_path,
                     project.root_status.value,
                     (
                         project.root_last_verified_at.isoformat()

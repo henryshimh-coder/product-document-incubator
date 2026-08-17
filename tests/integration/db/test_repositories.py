@@ -43,6 +43,33 @@ from src.infrastructure.db.repositories import (
 NOW = datetime(2026, 7, 29, 7, 0, tzinfo=UTC)
 
 
+def test_project_repository_normalizes_registered_root_on_add(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches persisted project roots retaining relative or lexical path components."""
+    db_path = tmp_path / "product_incubator.db"
+    migrate(db_path)
+    monkeypatch.chdir(tmp_path)
+    repository = SqliteProjectRepository(db_path)
+    repository.add(
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="说明 A",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+            project_root_path="registered/../PROJECT_A",
+            root_status=ProjectRootStatus.AVAILABLE,
+        )
+    )
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path == str((tmp_path / "PROJECT_A").resolve())
+
+
 def test_repository_updates_root_location_atomically(tmp_path: Path) -> None:
     """Catches root move metadata being only partially persisted."""
     db_path = tmp_path / "product_incubator.db"
