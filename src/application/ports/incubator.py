@@ -53,6 +53,13 @@ class IncubatorProjectRepository(Protocol):
         verified_at: datetime | None,
     ) -> None: ...
 
+    def update_root_status(
+        self,
+        project_id: str,
+        status: ProjectRootStatus,
+        verified_at: datetime | None,
+    ) -> None: ...
+
 
 class ProjectPathResolving(Protocol):
     def resolve(self, project_id: str) -> ProjectPaths: ...

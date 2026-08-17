@@ -98,6 +98,42 @@ def test_repository_updates_root_location_atomically(tmp_path: Path) -> None:
     assert saved.root_last_verified_at == NOW
 
 
+def test_repository_updates_root_status_without_resolving_registered_location(
+    tmp_path: Path,
+) -> None:
+    """Catches a status refresh rewriting a registered root through a later symlink."""
+    db_path = tmp_path / "product_incubator.db"
+    migrate(db_path)
+    repository = SqliteProjectRepository(db_path)
+    registered_root = tmp_path / "registered/PROJECT_A"
+    registered_root.mkdir(parents=True)
+    repository.add(
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="说明 A",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+            project_root_path=str(registered_root),
+            root_status=ProjectRootStatus.AVAILABLE,
+        )
+    )
+    registered_root.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    registered_root.symlink_to(outside, target_is_directory=True)
+
+    repository.update_root_status("PROJECT_A", ProjectRootStatus.UNAVAILABLE, NOW)
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path == str(registered_root)
+    assert saved.root_status is ProjectRootStatus.UNAVAILABLE
+    assert saved.root_last_verified_at == NOW
+
+
 def test_project_repository_lists_projects_by_recent_activity_then_id(tmp_path: Path) -> None:
     """Catches project cards appearing in stale or nondeterministic order."""
     db_path = tmp_path / "product_incubator.db"

@@ -159,6 +159,28 @@ class SqliteProjectRepository:
             if result.rowcount != 1:
                 raise KeyError(f"project not found: {project_id}")
 
+    def update_root_status(
+        self,
+        project_id: str,
+        status: ProjectRootStatus,
+        verified_at: datetime | None,
+    ) -> None:
+        with connect(self.db_path) as connection:
+            result = connection.execute(
+                """
+                UPDATE projects
+                SET root_status = ?, root_last_verified_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status.value,
+                    verified_at.isoformat() if verified_at is not None else None,
+                    project_id,
+                ),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"project not found: {project_id}")
+
     @staticmethod
     def _to_model(row: sqlite3.Row) -> Project:
         data = _row_data(row)

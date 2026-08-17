@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -86,6 +87,87 @@ def test_resolve_uses_registered_root_outside_control_and_marks_it_available(
     assert saved.root_last_verified_at == now
 
 
+def test_resolve_does_not_rewrite_registered_root_when_it_changes_after_validation(
+    repository: SqliteProjectRepository, tmp_path: Path, now: datetime
+) -> None:
+    """Catches a post-validation symlink swap rewriting central registration on status refresh."""
+    from src.infrastructure.files.project_path_resolver import ProjectPathResolver
+
+    project_root = create_project_tree(tmp_path / "registered/PROJECT_A", project_id="PROJECT_A")
+    seed_project(repository, "PROJECT_A", project_root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    class SwappingResolver(ProjectPathResolver):
+        def validate_relocation(self, project_id: str, project_root: Path):
+            paths = super().validate_relocation(project_id, project_root)
+            shutil.rmtree(project_root)
+            project_root.symlink_to(outside, target_is_directory=True)
+            return paths
+
+    resolver = SwappingResolver(tmp_path / "control", repository, now=lambda: now)
+
+    resolver.resolve("PROJECT_A")
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path == str(project_root)
+    assert saved.root_status is ProjectRootStatus.AVAILABLE
+    assert saved.root_last_verified_at == now
+
+
+def test_resolver_marks_null_registered_root_unavailable(
+    repository: SqliteProjectRepository, tmp_path: Path, now: datetime
+) -> None:
+    """Catches a legacy null root retaining an available status after resolution fails."""
+    from src.infrastructure.files.project_path_resolver import ProjectPathResolver
+
+    repository.add(
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="产品线 A",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=now,
+            updated_at=now,
+            root_status=ProjectRootStatus.AVAILABLE,
+        )
+    )
+
+    with pytest.raises(DomainError, match="PROJECT_ROOT_UNAVAILABLE"):
+        ProjectPathResolver(tmp_path / "control", repository, now=lambda: now).resolve("PROJECT_A")
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path is None
+    assert saved.root_status is ProjectRootStatus.UNAVAILABLE
+    assert saved.root_last_verified_at == now
+
+
+def test_resolver_marks_preexisting_root_symlink_unavailable_without_rewriting_it(
+    repository: SqliteProjectRepository, tmp_path: Path, now: datetime
+) -> None:
+    """Catches an already-swapped registered root preserving an available stale status."""
+    from src.infrastructure.files.project_path_resolver import ProjectPathResolver
+
+    registered_root = tmp_path / "registered/PROJECT_A"
+    registered_root.mkdir(parents=True)
+    seed_project(repository, "PROJECT_A", registered_root)
+    repository.update_root_status("PROJECT_A", ProjectRootStatus.AVAILABLE, now)
+    registered_root.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    registered_root.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(DomainError, match="PROJECT_ROOT_UNAVAILABLE"):
+        ProjectPathResolver(tmp_path / "control", repository, now=lambda: now).resolve("PROJECT_A")
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path == str(registered_root)
+    assert saved.root_status is ProjectRootStatus.UNAVAILABLE
+    assert saved.root_last_verified_at == now
+
+
 def test_validate_relocation_requires_matching_project_json(
     repository: SqliteProjectRepository, tmp_path: Path
 ) -> None:
@@ -97,6 +179,25 @@ def test_validate_relocation_requires_matching_project_json(
 
     with pytest.raises(DomainError, match="PROJECT_ROOT_ID_MISMATCH"):
         resolver.validate_relocation("PROJECT_A", wrong)
+
+
+def test_validate_relocation_rejects_project_json_symlink_to_external_file(
+    repository: SqliteProjectRepository, tmp_path: Path
+) -> None:
+    """Catches project identity metadata being read through a symlink outside its root."""
+    from src.infrastructure.files.project_path_resolver import ProjectPathResolver
+
+    project_root = create_project_tree(tmp_path / "PROJECT_A", project_id="PROJECT_A")
+    metadata = project_root / ".incubator/project.json"
+    metadata.unlink()
+    outside_metadata = tmp_path / "outside-project.json"
+    outside_metadata.write_text(json.dumps({"project_id": "PROJECT_A"}), encoding="utf-8")
+    metadata.symlink_to(outside_metadata)
+
+    with pytest.raises(DomainError, match="PROJECT_ROOT_UNAVAILABLE"):
+        ProjectPathResolver(tmp_path / "control", repository).validate_relocation(
+            "PROJECT_A", project_root
+        )
 
 
 def test_validate_parent_rejects_an_existing_target(

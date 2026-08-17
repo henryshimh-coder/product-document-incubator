@@ -31,25 +31,29 @@ class ProjectPathResolver:
     def resolve(self, project_id: str) -> ProjectPaths:
         project = self.projects.get(project_id)
         if project.project_root_path is None:
+            self.projects.update_root_status(
+                project_id, ProjectRootStatus.UNAVAILABLE, self.now()
+            )
             raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE)
 
         registered_root = Path(project.project_root_path)
         if registered_root.expanduser().absolute().is_symlink():
+            self.projects.update_root_status(
+                project_id, ProjectRootStatus.UNAVAILABLE, self.now()
+            )
             raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE)
         try:
             paths = self.validate_relocation(project_id, registered_root)
         except DomainError:
-            self.projects.update_root_location(
+            self.projects.update_root_status(
                 project_id,
-                registered_root,
                 ProjectRootStatus.UNAVAILABLE,
                 self.now(),
             )
             raise
 
-        self.projects.update_root_location(
+        self.projects.update_root_status(
             project_id,
-            paths.project_root,
             ProjectRootStatus.AVAILABLE,
             self.now(),
         )
@@ -82,8 +86,13 @@ class ProjectPathResolver:
         if not has_required_directories:
             raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE)
 
+        metadata_path = paths.system_root / "project.json"
+        if metadata_path.is_symlink() or not metadata_path.resolve().is_relative_to(
+            paths.project_root
+        ):
+            raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE)
         try:
-            payload = json.loads((paths.system_root / "project.json").read_text(encoding="utf-8"))
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE) from error
         if not isinstance(payload, dict) or payload.get("project_id") != project_id:
