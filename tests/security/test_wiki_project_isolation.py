@@ -72,6 +72,8 @@ def test_ingest_rejects_source_from_other_project(tmp_path) -> None:
     assert hashlib.sha256(raw_path.read_bytes()).hexdigest() == before
     assert "PROJECT-B-SECRET" not in fixture.page("wiki/index.md").read_text()
     assert fixture.gateway.calls == []
+    stored_source_b = SqliteSourceRepository(fixture.db_path).get(source_b.id)
+    assert stored_source_b.ingest_status == "pending_ingest"
 
 
 @pytest.mark.parametrize("security", [SecurityLevel.L3_CONFIDENTIAL, SecurityLevel.L4_RESTRICTED])
@@ -89,3 +91,5 @@ def test_sensitive_source_never_reaches_gateway(tmp_path, security) -> None:
     failed = repository.get(fixture.source_id)
     assert failed.ingest_status == "ingest_failed"
     assert failed.ingest_error_code == "WIKI_EXTERNAL_CALL_DENIED"
+    log = (fixture.paths.wiki_root / "log.md").read_text(encoding="utf-8")
+    assert "Approved redacted product principle" not in log

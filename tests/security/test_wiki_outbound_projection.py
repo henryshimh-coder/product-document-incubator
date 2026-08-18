@@ -23,6 +23,14 @@ def test_local_l3_l4_ingest_use_cases_have_no_gateway_dependency() -> None:
     assert "gateway" not in inspect.signature(ConfirmLocalWikiIngest).parameters
 
 
+def test_projection_has_no_api_or_raw_path_escape_hatch() -> None:
+    """Only page excerpts and local authority metadata may reach the outbound builder."""
+    parameters = inspect.signature(WikiOutboundContextBuilder.build).parameters
+
+    assert "raw_path" not in parameters
+    assert "gateway" not in parameters
+
+
 def _source(
     source_id: str,
     *,
@@ -254,9 +262,7 @@ def test_projection_includes_only_authorized_l1_l2_claims(
     project_wiki: _ProjectWiki,
     source_repository: _SourceRepository,
 ) -> None:
-    path = project_wiki.write_topic(
-        "channels", citations=["SRC-L1", "SRC-L2"], body="Safe channel"
-    )
+    path = project_wiki.write_topic("channels", citations=["SRC-L1", "SRC-L2"], body="Safe channel")
 
     projection = WikiOutboundContextBuilder(project_wiki.paths, source_repository).build(
         project_id="PROJECT_A", related_topic_paths=[path]
