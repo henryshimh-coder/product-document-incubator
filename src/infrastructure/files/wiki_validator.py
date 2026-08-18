@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from src.domain.errors import DomainError, ErrorCode
+from src.domain.models import SourceRecord
 from src.domain.wiki import WikiChangeSet, WikiTargetPlan
 from src.infrastructure.files.project_library import ProjectPaths
 
@@ -26,6 +28,71 @@ _FRONTMATTER_REQUIRED_FIELDS = {
 }
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _OBSIDIAN_LINK_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
+_SAFE_PATH_SEGMENT = re.compile(r"[^A-Za-z0-9\u4e00-\u9fff_-]+")
+_TARGET_PLAN_CAPABILITY = object()
+
+
+class WikiTargetPlanner:
+    """Derive authorized Wiki targets from trusted local source and topic inputs."""
+
+    def __init__(self, paths: ProjectPaths) -> None:
+        self.paths = paths
+
+    def build(
+        self,
+        source: SourceRecord,
+        *,
+        existing_topic_paths: Sequence[str],
+        new_topic_titles: Sequence[str],
+    ) -> WikiTargetPlan:
+        if source.project_id != self.paths.project_id:
+            raise ValueError("WIKI_TARGET_PLAN_SOURCE_PROJECT_MISMATCH")
+        source_name = source.material_name or Path(source.original_filename).stem
+        source_page_path = (
+            f"wiki/sources/{self._safe_segment(source.id)}-"
+            f"{self._safe_segment(source_name)}.md"
+        )
+        topic_paths = [self._existing_topic_path(path) for path in existing_topic_paths]
+        topic_paths.extend(self._new_topic_path(title) for title in new_topic_titles)
+        if len(topic_paths) != len(set(topic_paths)):
+            raise ValueError("WIKI_TARGET_PLAN_TOPIC_DUPLICATE")
+        return WikiTargetPlan._from_trusted(
+            capability=_TARGET_PLAN_CAPABILITY,
+            project_id=source.project_id,
+            source_id=source.id,
+            source_page_path=source_page_path,
+            topic_page_paths=tuple(topic_paths),
+        )
+
+    def _existing_topic_path(self, relative_path: str) -> str:
+        if not self._is_topic_path(relative_path):
+            raise ValueError("WIKI_TARGET_PLAN_TOPIC_UNAUTHORIZED")
+        target = (self.paths.project_root / relative_path).resolve()
+        if not target.is_relative_to(self.paths.wiki_root) or not target.is_file():
+            raise ValueError("WIKI_TARGET_PLAN_TOPIC_UNAUTHORIZED")
+        return relative_path
+
+    def _new_topic_path(self, title: str) -> str:
+        return f"wiki/topics/{self._safe_segment(title)}.md"
+
+    @staticmethod
+    def _safe_segment(value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("WIKI_TARGET_PLAN_SEGMENT_INVALID")
+        normalized = _SAFE_PATH_SEGMENT.sub("-", value.strip()).strip("-_")
+        if not normalized:
+            raise ValueError("WIKI_TARGET_PLAN_SEGMENT_INVALID")
+        return normalized
+
+    @staticmethod
+    def _is_topic_path(relative_path: str) -> bool:
+        return (
+            isinstance(relative_path, str)
+            and relative_path.startswith("wiki/topics/")
+            and relative_path.endswith(".md")
+            and Path(relative_path).as_posix() == relative_path
+            and all(part not in {"", ".", ".."} for part in Path(relative_path).parts)
+        )
 
 
 class WikiValidator:
@@ -60,6 +127,11 @@ class WikiValidator:
     def _validate_authorized_targets(
         self, change_set: WikiChangeSet, changed_paths: set[str]
     ) -> None:
+        is_trusted_plan = isinstance(self.target_plan, WikiTargetPlan) and (
+            self.target_plan._is_authorized_by(_TARGET_PLAN_CAPABILITY)
+        )
+        if not is_trusted_plan:
+            raise ValueError("WIKI_CHANGESET_TARGET_PLAN_UNTRUSTED")
         if self.target_plan.project_id != self.paths.project_id:
             raise ValueError("target plan project_id does not match resolved project root")
         if self.target_plan.source_id != change_set.source_id:
