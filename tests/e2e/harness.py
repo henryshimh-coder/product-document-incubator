@@ -21,6 +21,7 @@ from src.application.container import AppContainer
 from src.application.dto.decision import CreateChangeRequestInput, RecordDecisionInput
 from src.application.dto.documents import (
     ArchiveRawSourceInput,
+    ExportCurrentDocumentInput,
     IncubateDocumentInput,
     PublishDocumentDraftInput,
 )
@@ -36,6 +37,7 @@ from src.application.dto.wiki_ingest import (
 )
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.confirm_local_wiki_ingest import ConfirmLocalWikiIngest
+from src.application.use_cases.export_current_document import ExportCurrentDocument
 from src.application.use_cases.incubate_document import IncubateDocument
 from src.application.use_cases.ingest_archived_source import IngestArchivedSource
 from src.application.use_cases.manage_projects import ManageProjects
@@ -378,7 +380,15 @@ class _WikiIncubationGateway:
             source_page_markdown=(
                 f"# 来源摘要\n\n已核验归档材料并保留来源定位。 【{source_id}：section: summary】"
             ),
-            topic_changes=[],
+            topic_changes=[
+                {
+                    "topic_id": "product-principles",
+                    "title": "产品原则",
+                    "change_type": "create",
+                    "markdown": "已核验归档材料的产品原则。",
+                    "source_ids": [source_id],
+                }
+            ],
             conflicts=[],
             evidence_gaps=[],
         )
@@ -449,7 +459,6 @@ class WikiIncubatorHarness:
         return self.wiki_gateway.calls + self.document_gateway.calls
 
     def create_project(self, project_id: str, parent_root: Path) -> ProjectPaths:
-        parent_root.mkdir(parents=True, exist_ok=True)
         self.manager.create(
             CreateProjectInput(
                 project_id=project_id,
@@ -602,6 +611,28 @@ class WikiIncubatorHarness:
     def current_markdown(self, paths: ProjectPaths) -> str | None:
         path = paths.wiki_root / "current" / "当前产品方案.md"
         return path.read_text(encoding="utf-8") if path.is_file() else None
+
+    def export(self, paths: ProjectPaths):
+        return ExportCurrentDocument(
+            paths=paths,
+            projects=self.projects,
+            manifest=ManifestStore(paths.manifest_path, project_root=paths.project_root),
+        ).execute(ExportCurrentDocumentInput(project_id=paths.project_id))
+
+    def project_records(self, project_id: str) -> dict[str, object]:
+        return {
+            "project": self.projects.get(project_id).model_dump(mode="json"),
+            "sources": [
+                source.model_dump(mode="json")
+                for source in SqliteSourceRepository(self.db_path).list_for_project(project_id)
+            ],
+            "drafts": [
+                draft.model_dump(mode="json")
+                for draft in SqliteDocumentDraftRepository(self.db_path).list_for_project(
+                    project_id
+                )
+            ],
+        }
 
     def relocate(self, project_id: str, project_root: Path) -> ProjectPaths:
         selected = self.manager.relocate(
