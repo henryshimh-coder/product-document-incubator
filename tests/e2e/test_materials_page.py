@@ -68,7 +68,9 @@ def _render_materials_page(library_root: str, source_path: str) -> None:
     )
 
 
-def _render_materials_ingest_page(library_root: str, status: str) -> None:
+def _render_materials_ingest_page(
+    library_root: str, status: str, security_level: str | None = None
+) -> None:
     import json
     from pathlib import Path as path_type
 
@@ -115,6 +117,13 @@ def _render_materials_ingest_page(library_root: str, status: str) -> None:
     root = path_type(library_root)
     paths = ProjectPaths.for_project(root, "PROJECT_A")
     paths.system_root.mkdir(parents=True, exist_ok=True)
+    effective_security_level = security_level or (
+        "L4" if status == "local_review_required" else "L2"
+    )
+    if status == "ingest_failed" and effective_security_level in {"L3", "L4"}:
+        (paths.wiki_root / "drafts" / "local-ingest" / "SRC-PROJECT-A-001").mkdir(
+            parents=True
+        )
     (paths.system_root / "source-index.json").write_text(
         json.dumps(
             {
@@ -127,9 +136,7 @@ def _render_materials_ingest_page(library_root: str, status: str) -> None:
                         "material_version": "1.0",
                         "sha256": "a" * 64,
                         "source_type": "product_requirement",
-                        "security_level": (
-                            "L4" if status == "local_review_required" else "L2"
-                        ),
+                        "security_level": effective_security_level,
                         "archive_path": "raw/2026/SRC-PROJECT-A-001/material.md",
                         "ingest_status": status,
                         "ingest_error_code": (
@@ -255,6 +262,18 @@ def test_material_page_confirms_l4_local_draft_without_external_ingest(tmp_path)
         page.button(key="material_ingest_SRC-PROJECT-A-001")
     confirm.click().run()
     assert any("已确认并 Ingest" in item.value for item in page.success)
+
+
+def test_material_page_retries_failed_l4_draft_with_local_confirmation(tmp_path) -> None:
+    """A failed sensitive local transaction must not fall back to create/external actions."""
+    page = AppTest.from_function(
+        _render_materials_ingest_page,
+        args=(str(tmp_path / "library"), "ingest_failed", "L4"),
+    ).run()
+
+    assert page.button(key="material_confirm_local_ingest_SRC-PROJECT-A-001")
+    with pytest.raises(KeyError):
+        page.button(key="material_prepare_local_ingest_SRC-PROJECT-A-001")
 
 
 def test_material_page_reads_real_failed_lifecycle_without_writing_index(tmp_path) -> None:

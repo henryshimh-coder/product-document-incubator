@@ -28,9 +28,10 @@ from src.application.use_cases.prepare_local_wiki_ingest import (
 from src.domain.enums import DocumentGenerationMode
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.models import SourceRecord
-from src.domain.wiki import WikiChangeSet, WikiIngestStatus, WikiPageChange
+from src.domain.wiki import WikiChangeSet, WikiIngestRun, WikiIngestStatus, WikiPageChange
 from src.infrastructure.files.project_audit_log import ProjectAuditLog
 from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
 from src.infrastructure.files.wiki_validator import WikiValidator
 
@@ -42,6 +43,7 @@ _TOPIC_REQUIRED_HEADINGS = (
     "## 冲突来源",
     "## 待确认项",
 )
+CoordinatorFactory = Callable[[WikiValidator, datetime], WikiTransactionCoordinator]
 
 
 class ConfirmLocalWikiIngest:
@@ -55,12 +57,15 @@ class ConfirmLocalWikiIngest:
         sources: SourceRepository,
         runs: WikiIngestRunRepository,
         now: Callable[[], datetime] | None = None,
+        coordinator_factory: CoordinatorFactory | None = None,
     ) -> None:
         self.paths = paths
         self.db_path = db_path
         self.sources = sources
         self.runs = runs
         self.now = now or (lambda: datetime.now(UTC))
+        self.coordinator_factory = coordinator_factory
+        self.index = SourceIndexStore(paths)
 
     def execute(self, command: ConfirmLocalWikiIngestInput) -> WikiIngestResultView:
         _resolve_project(self.paths, command.project_id)
@@ -79,11 +84,15 @@ class ConfirmLocalWikiIngest:
                 evidence_gap_count=0,
                 duplicate=True,
             )
-        if source.ingest_status != WikiIngestStatus.LOCAL_REVIEW_REQUIRED:
+        if source.ingest_status not in {
+            WikiIngestStatus.LOCAL_REVIEW_REQUIRED,
+            WikiIngestStatus.FAILED,
+        }:
             raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "SOURCE_STATUS_INVALID")
         _verified_raw(self.paths, source)
         draft_root = _draft_root(self.paths, source.id)
         _require_existing_draft(draft_root)
+        source = self._restore_retryable_review_status(source)
         committed_at = self.now()
         validator, change_set = self._compile_change_set(
             source=source,
@@ -92,13 +101,15 @@ class ConfirmLocalWikiIngest:
             idempotency_key=idempotency_key,
         )
         validator.validate_change_set(change_set)
-        transaction = WikiTransactionCoordinator(
-            paths=self.paths,
-            db_path=self.db_path,
-            validator=validator,
-            clock=lambda: committed_at,
-        )
-        committed = transaction.commit(change_set)
+        self._reuse_failed_run(change_set, committed_at)
+        transaction = self._transaction(validator, committed_at)
+        try:
+            committed = transaction.commit(change_set)
+        except RuntimeError as error:
+            if "WIKI_TRANSACTION_FAILED" not in str(error):
+                raise
+            self._synchronize_failed_draft(source.id)
+            raise DomainError(ErrorCode.WIKI_TRANSACTION_FAILED) from None
         if committed.status != "committed":
             raise DomainError(ErrorCode.WIKI_TRANSACTION_FAILED)
         # Only a completed shared transaction can remove the Owner's draft.
@@ -111,6 +122,69 @@ class ConfirmLocalWikiIngest:
             conflict_count=0,
             evidence_gap_count=0,
         )
+
+    def _restore_retryable_review_status(self, source: SourceRecord) -> SourceRecord:
+        if source.ingest_status != WikiIngestStatus.FAILED:
+            return source
+        retrying = source.model_copy(
+            update={
+                "ingest_status": WikiIngestStatus.LOCAL_REVIEW_REQUIRED,
+                "ingest_error_code": None,
+                "generation_mode": DocumentGenerationMode.LOCAL_MANUAL,
+            }
+        )
+        self.sources.update(retrying)
+        self.index.upsert(retrying)
+        return retrying
+
+    def _reuse_failed_run(self, change_set: WikiChangeSet, started_at: datetime) -> None:
+        existing = self._run_by_idempotency(change_set.idempotency_key)
+        if existing is None:
+            return
+        if existing.status != WikiIngestStatus.FAILED:
+            raise DomainError(ErrorCode.WIKI_INGEST_ALREADY_RUNNING)
+        self.runs.update(
+            existing.model_copy(
+                update={
+                    "transaction_id": change_set.transaction_id,
+                    "status": WikiIngestStatus.PROCESSING,
+                    "source_page_path": None,
+                    "topic_page_paths": [],
+                    "result_digest": None,
+                    "error_code": None,
+                    "started_at": started_at,
+                    "finished_at": None,
+                }
+            )
+        )
+
+    def _run_by_idempotency(self, idempotency_key: str) -> WikiIngestRun | None:
+        from src.infrastructure.db.connection import connect
+
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT transaction_id FROM wiki_ingest_runs WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        return None if row is None else self.runs.get_by_transaction(str(row["transaction_id"]))
+
+    def _transaction(
+        self, validator: WikiValidator, committed_at: datetime
+    ) -> WikiTransactionCoordinator:
+        if self.coordinator_factory is not None:
+            return self.coordinator_factory(validator, committed_at)
+        return WikiTransactionCoordinator(
+            paths=self.paths,
+            db_path=self.db_path,
+            validator=validator,
+            clock=lambda: committed_at,
+        )
+
+    def _synchronize_failed_draft(self, source_id: str) -> None:
+        current = self.sources.get(source_id)
+        if current.ingest_status != WikiIngestStatus.FAILED:
+            raise RuntimeError("WIKI_RECOVERY_REQUIRED: LOCAL_SOURCE_FAILURE_STATE")
+        self.index.upsert(current)
 
     @staticmethod
     def _idempotency_key(source: SourceRecord) -> str:

@@ -270,15 +270,19 @@ def _render_local_wiki_ingest(
     if status == "ingested":
         st.markdown("查看 Wiki 结果")
         return
-    if status == "local_review_required":
-        draft_root = (
-            container.active_project.paths.wiki_root / "drafts" / "local-ingest" / source_id
-        )
+    draft_root = (
+        container.active_project.paths.wiki_root / "drafts" / "local-ingest" / source_id
+    )
+    if status == "local_review_required" or (
+        status == "ingest_failed" and draft_root.is_dir()
+    ):
+        if status == "ingest_failed":
+            st.caption("上次本地 Ingest 未提交，草稿已保留，可修正后重新校验。")
         st.code(str(draft_root), language=None)
         if st.button("复制草稿路径", key=f"material_copy_local_draft_{source_id}"):
             st.info("草稿路径已显示，可在本机文件管理器或 Obsidian 中粘贴打开。")
         if not st.button(
-            "校验并确认本地 Ingest",
+            "重新校验并确认本地 Ingest" if status == "ingest_failed" else "校验并确认本地 Ingest",
             key=f"material_confirm_local_ingest_{source_id}",
             type="primary",
         ):

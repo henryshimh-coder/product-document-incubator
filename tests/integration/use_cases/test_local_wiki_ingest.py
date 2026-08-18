@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from src.infrastructure.db.repositories import (
     SqliteSourceRepository,
     SqliteWikiIngestRunRepository,
 )
+from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
 from tests.integration.use_cases.test_wiki_ingest import IngestFixture, make_ingest_fixture
 
 
@@ -176,6 +178,72 @@ def test_invalid_local_draft_is_preserved_for_owner_correction(local_ingest_fixt
 
     assert draft_root.is_dir()
     assert local_ingest_fixture.gateway.calls == []
+
+
+def test_failed_local_confirmation_can_retry_with_the_same_draft_and_idempotency(
+    local_ingest_fixture,
+) -> None:
+    """A rolled-back local transaction must leave a visible, retryable Owner workflow."""
+    draft_root = local_ingest_fixture.fill_valid_draft()
+    failure_injected = False
+
+    def coordinator_factory(validator, committed_at):
+        def fail_once(stage: str) -> None:
+            nonlocal failure_injected
+            if stage == "after_prepare" and not failure_injected:
+                failure_injected = True
+                raise RuntimeError("test transaction failure")
+
+        return WikiTransactionCoordinator(
+            paths=local_ingest_fixture.paths,
+            db_path=local_ingest_fixture.base.db_path,
+            validator=validator,
+            clock=lambda: committed_at,
+            failure_injector=fail_once,
+        )
+
+    local_ingest_fixture.confirm = ConfirmLocalWikiIngest(
+        paths=local_ingest_fixture.paths,
+        db_path=local_ingest_fixture.base.db_path,
+        sources=SqliteSourceRepository(local_ingest_fixture.base.db_path),
+        runs=SqliteWikiIngestRunRepository(local_ingest_fixture.base.db_path),
+        coordinator_factory=coordinator_factory,
+    )
+    with pytest.raises(DomainError, match="WIKI_TRANSACTION_FAILED"):
+        local_ingest_fixture.confirm_source()
+
+    persisted = SqliteSourceRepository(local_ingest_fixture.base.db_path).get(
+        local_ingest_fixture.source_id
+    )
+    assert persisted.ingest_status == WikiIngestStatus.FAILED
+    source_index = json.loads(
+        local_ingest_fixture.base.page(".incubator/source-index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    mirrored = source_index["sources"][0]
+    assert mirrored["ingest_status"] == WikiIngestStatus.FAILED
+    assert draft_root.is_dir()
+    with connect(local_ingest_fixture.base.db_path) as connection:
+        failed_run = connection.execute(
+            "SELECT transaction_id, idempotency_key FROM wiki_ingest_runs WHERE source_id = ?",
+            (local_ingest_fixture.source_id,),
+        ).fetchone()
+
+    retried = local_ingest_fixture.confirm_source()
+
+    assert retried.status is WikiIngestStatus.INGESTED
+    assert not draft_root.exists()
+    assert local_ingest_fixture.gateway.calls == []
+    with connect(local_ingest_fixture.base.db_path) as connection:
+        runs = connection.execute(
+            "SELECT status, transaction_id, idempotency_key "
+            "FROM wiki_ingest_runs WHERE source_id = ?",
+            (local_ingest_fixture.source_id,),
+        ).fetchall()
+    assert [run["status"] for run in runs] == [WikiIngestStatus.INGESTED]
+    assert runs[0]["idempotency_key"] == failed_run["idempotency_key"]
+    assert runs[0]["transaction_id"] != failed_run["transaction_id"]
 
 
 def test_local_ingest_rejects_l1_l2_without_gateway(local_ingest_fixture) -> None:
