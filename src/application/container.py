@@ -20,7 +20,13 @@ from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
-from src.application.dto.wiki_ingest import IngestArchivedSourceInput, WikiIngestResultView
+from src.application.dto.wiki_ingest import (
+    ConfirmLocalWikiIngestInput,
+    IngestArchivedSourceInput,
+    LocalWikiIngestDraftView,
+    PrepareLocalWikiIngestInput,
+    WikiIngestResultView,
+)
 from src.application.ports.incubator import (
     CurrentDocumentExporter,
     DocumentDraftPublisher,
@@ -32,6 +38,7 @@ from src.application.project_context import ProjectContext
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.build_trace import BuildTrace
 from src.application.use_cases.compare_sensitive_source import CompareSensitiveSource
+from src.application.use_cases.confirm_local_wiki_ingest import ConfirmLocalWikiIngest
 from src.application.use_cases.create_local_document_draft import CreateLocalDocumentDraft
 from src.application.use_cases.export_current_document import ExportCurrentDocument
 from src.application.use_cases.get_dashboard import GetDashboard
@@ -39,6 +46,7 @@ from src.application.use_cases.import_source import ImportSource
 from src.application.use_cases.incubate_document import IncubateDocument
 from src.application.use_cases.ingest_archived_source import IngestArchivedSource
 from src.application.use_cases.manage_projects import ManageProjects
+from src.application.use_cases.prepare_local_wiki_ingest import PrepareLocalWikiIngest
 from src.application.use_cases.publish_baseline import PublishBaseline
 from src.application.use_cases.publish_document_draft import PublishDocumentDraft
 from src.application.use_cases.reclassify_source import ReclassifySource
@@ -156,6 +164,14 @@ class WikiIngestService(Protocol):
     def execute(self, command: IngestArchivedSourceInput) -> WikiIngestResultView: ...
 
 
+class PrepareLocalWikiIngestService(Protocol):
+    def execute(self, command: PrepareLocalWikiIngestInput) -> LocalWikiIngestDraftView: ...
+
+
+class ConfirmLocalWikiIngestService(Protocol):
+    def execute(self, command: ConfirmLocalWikiIngestInput) -> WikiIngestResultView: ...
+
+
 class QueryService(Protocol):
     def list_historical_versions(self, project_id: str) -> tuple[str, ...]: ...
 
@@ -244,6 +260,8 @@ class AppContainer:
     compare_sensitive_source: SensitiveComparisonService | None = None
     create_local_document_draft: LocalDraftService | None = None
     wiki_ingest: WikiIngestService | None = None
+    prepare_local_wiki_ingest: PrepareLocalWikiIngestService | None = None
+    confirm_local_wiki_ingest: ConfirmLocalWikiIngestService | None = None
     incubate_document: DocumentIncubation | None = None
     publish_document_draft: DocumentDraftPublisher | None = None
     export_current_document: CurrentDocumentExporter | None = None
@@ -348,6 +366,8 @@ def build_container(
                     environ=environ,
                     http_factory=http_factory,
                 ),
+                prepare_local_wiki_ingest=_build_prepare_local_wiki_ingest(active_project),
+                confirm_local_wiki_ingest=_build_confirm_local_wiki_ingest(active_project),
                 incubate_document=_build_document_incubation(
                     settings=settings,
                     active_project=active_project,
@@ -507,6 +527,16 @@ def _build_stateful_container(
                 environ=environ,
                 http_factory=http_factory,
             )
+        ),
+        "prepare_local_wiki_ingest": (
+            None
+            if active_project is None
+            else _build_prepare_local_wiki_ingest(active_project)
+        ),
+        "confirm_local_wiki_ingest": (
+            None
+            if active_project is None
+            else _build_confirm_local_wiki_ingest(active_project)
         ),
         "incubate_document": (
             None
@@ -824,6 +854,30 @@ def _build_wiki_ingest(
         financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
         leader_names=dictionary("REDACTION_LEADER_NAMES"),
         unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
+    )
+
+
+def _build_prepare_local_wiki_ingest(
+    active_project: ProjectContext,
+) -> PrepareLocalWikiIngest | None:
+    if active_project.wiki_schema_version != "2.2":
+        return None
+    return PrepareLocalWikiIngest(
+        paths=active_project.paths,
+        sources=SqliteSourceRepository(active_project.db_path),
+    )
+
+
+def _build_confirm_local_wiki_ingest(
+    active_project: ProjectContext,
+) -> ConfirmLocalWikiIngest | None:
+    if active_project.wiki_schema_version != "2.2":
+        return None
+    return ConfirmLocalWikiIngest(
+        paths=active_project.paths,
+        db_path=active_project.db_path,
+        sources=SqliteSourceRepository(active_project.db_path),
+        runs=SqliteWikiIngestRunRepository(active_project.db_path),
     )
 
 

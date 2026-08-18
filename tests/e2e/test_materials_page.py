@@ -73,13 +73,35 @@ def _render_materials_ingest_page(library_root: str, status: str) -> None:
     from pathlib import Path as path_type
 
     from src.application.container import AppContainer, AppSettings
-    from src.application.dto.wiki_ingest import WikiIngestResultView
+    from src.application.dto.wiki_ingest import (
+        LocalWikiIngestDraftView,
+        WikiIngestResultView,
+    )
     from src.application.project_context import ProjectContext
     from src.domain.wiki import WikiIngestStatus
     from src.infrastructure.files.project_library import ProjectPaths
     from src.ui.pages.materials import render
 
     class SuccessfulIngest:
+        def execute(self, command):
+            return WikiIngestResultView(
+                source_id=command.source_id,
+                status=WikiIngestStatus.INGESTED,
+                source_page_path=f"wiki/sources/{command.source_id}-material.md",
+                topic_page_paths=[f"wiki/topics/{command.source_id}-topic-1.md"],
+                conflict_count=0,
+                evidence_gap_count=0,
+            )
+
+    class LocalPrepare:
+        def execute(self, command):
+            return LocalWikiIngestDraftView(
+                source_id=command.source_id,
+                status=WikiIngestStatus.LOCAL_REVIEW_REQUIRED,
+                draft_root=paths.wiki_root / "drafts" / "local-ingest" / command.source_id,
+            )
+
+    class LocalConfirm:
         def execute(self, command):
             return WikiIngestResultView(
                 source_id=command.source_id,
@@ -105,7 +127,9 @@ def _render_materials_ingest_page(library_root: str, status: str) -> None:
                         "material_version": "1.0",
                         "sha256": "a" * 64,
                         "source_type": "product_requirement",
-                        "security_level": "L2",
+                        "security_level": (
+                            "L4" if status == "local_review_required" else "L2"
+                        ),
                         "archive_path": "raw/2026/SRC-PROJECT-A-001/material.md",
                         "ingest_status": status,
                         "ingest_error_code": (
@@ -138,6 +162,8 @@ def _render_materials_ingest_page(library_root: str, status: str) -> None:
             ),
             archive_raw_source=object(),
             wiki_ingest=SuccessfulIngest(),
+            prepare_local_wiki_ingest=LocalPrepare(),
+            confirm_local_wiki_ingest=LocalConfirm(),
         )
     )
 
@@ -213,6 +239,22 @@ def test_material_page_runs_ingest_after_owner_click(tmp_path) -> None:
 
     assert page.success
     assert any("已 Ingest" in item.value for item in page.markdown)
+
+
+def test_material_page_confirms_l4_local_draft_without_external_ingest(tmp_path) -> None:
+    """L3/L4 material exposes only the Owner's local draft confirmation route."""
+    page = AppTest.from_function(
+        _render_materials_ingest_page,
+        args=(str(tmp_path / "library"), "local_review_required"),
+    ).run()
+
+    assert page.button(key="material_copy_local_draft_SRC-PROJECT-A-001")
+    confirm = page.button(key="material_confirm_local_ingest_SRC-PROJECT-A-001")
+    assert confirm
+    with pytest.raises(KeyError):
+        page.button(key="material_ingest_SRC-PROJECT-A-001")
+    confirm.click().run()
+    assert any("已确认并 Ingest" in item.value for item in page.success)
 
 
 def test_material_page_reads_real_failed_lifecycle_without_writing_index(tmp_path) -> None:

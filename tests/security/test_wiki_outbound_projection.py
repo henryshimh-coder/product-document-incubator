@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -11,6 +12,15 @@ from src.domain.enums import AuthorityLevel, SecurityLevel
 from src.domain.models import SourceRecord
 from src.infrastructure.files.project_library import ProjectPaths
 from src.infrastructure.files.wiki_outbound_context import WikiOutboundContextBuilder
+
+
+def test_local_l3_l4_ingest_use_cases_have_no_gateway_dependency() -> None:
+    """Sensitive local confirmation must not have a route to construct a model client."""
+    from src.application.use_cases.confirm_local_wiki_ingest import ConfirmLocalWikiIngest
+    from src.application.use_cases.prepare_local_wiki_ingest import PrepareLocalWikiIngest
+
+    assert "gateway" not in inspect.signature(PrepareLocalWikiIngest).parameters
+    assert "gateway" not in inspect.signature(ConfirmLocalWikiIngest).parameters
 
 
 def _source(
