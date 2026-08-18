@@ -32,6 +32,15 @@ class WikiPageChange(DomainModel):
     after_sha256: Sha256Str
 
 
+class WikiTargetPlan(DomainModel):
+    """Locally computed writable targets for one source's Wiki transaction."""
+
+    project_id: NonEmptyStr
+    source_id: NonEmptyStr
+    source_page_path: NonEmptyStr
+    topic_page_paths: list[NonEmptyStr] = Field(default_factory=list)
+
+
 class WikiChangeSet(DomainModel):
     transaction_id: NonEmptyStr
     project_id: NonEmptyStr

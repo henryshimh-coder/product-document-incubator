@@ -7,7 +7,7 @@ from typing import Any
 import yaml
 
 from src.domain.errors import DomainError, ErrorCode
-from src.domain.wiki import WikiChangeSet
+from src.domain.wiki import WikiChangeSet, WikiTargetPlan
 from src.infrastructure.files.project_library import ProjectPaths
 
 _FRONTMATTER_REQUIRED_FIELDS = {
@@ -31,14 +31,16 @@ _OBSIDIAN_LINK_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
 class WikiValidator:
     """Reject unsafe or internally inconsistent Wiki change sets before commit."""
 
-    def __init__(self, paths: ProjectPaths) -> None:
+    def __init__(self, paths: ProjectPaths, target_plan: WikiTargetPlan) -> None:
         self.paths = paths
+        self.target_plan = target_plan
 
     def validate_change_set(self, change_set: WikiChangeSet) -> None:
         try:
             change_set.validate_contract()
             self._validate_project(change_set)
             changed_paths = {change.relative_path for change in change_set.page_changes}
+            self._validate_authorized_targets(change_set, changed_paths)
             for change in change_set.page_changes:
                 self._validate_project_path(change.relative_path)
                 self._validate_links(change.markdown, changed_paths)
@@ -54,6 +56,27 @@ class WikiValidator:
     def _validate_project(self, change_set: WikiChangeSet) -> None:
         if change_set.project_id != self.paths.project_id:
             raise ValueError("project_id does not match resolved project root")
+
+    def _validate_authorized_targets(
+        self, change_set: WikiChangeSet, changed_paths: set[str]
+    ) -> None:
+        if self.target_plan.project_id != self.paths.project_id:
+            raise ValueError("target plan project_id does not match resolved project root")
+        if self.target_plan.source_id != change_set.source_id:
+            raise ValueError("target plan source_id does not match change set")
+        expected_paths = {
+            "wiki/index.md",
+            "wiki/log.md",
+            ".incubator/source-index.json",
+            self.target_plan.source_page_path,
+            *self.target_plan.topic_page_paths,
+        }
+        if changed_paths != expected_paths:
+            raise ValueError("WIKI_CHANGESET_TARGET_UNAUTHORIZED")
+        if change_set.source_page_path != self.target_plan.source_page_path:
+            raise ValueError("WIKI_CHANGESET_TARGET_UNAUTHORIZED")
+        if set(change_set.topic_page_paths) != set(self.target_plan.topic_page_paths):
+            raise ValueError("WIKI_CHANGESET_TARGET_UNAUTHORIZED")
 
     def _validate_project_path(self, relative_path: str) -> None:
         target = (self.paths.project_root / relative_path).resolve()
