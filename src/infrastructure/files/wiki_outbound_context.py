@@ -5,7 +5,7 @@ import hmac
 import json
 import re
 import secrets
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -15,11 +15,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.domain.enums import SecurityLevel
 from src.domain.errors import DomainError, GatewayError
 from src.domain.models import SourceRecord
+from src.infrastructure.db.connection import connect
 from src.infrastructure.files.extractor import extract_document_bytes
 from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.redactor import redact_text
 
 _CITATION_TOKEN = re.compile(r"【(?P<content>[^【】\r\n]*)】")
 _BULLET = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
+_CANONICAL_SOURCE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _AUTHORIZATION_KEY = secrets.token_bytes(32)
 _AUTHORIZATION_ISSUER = object()
 _AUTHORIZATION_DETAIL = "WIKI_OUTBOUND_AUTHORIZATION_INVALID"
@@ -139,9 +142,26 @@ def validate_wiki_outbound_authorization(
 class WikiOutboundContextBuilder:
     """Build a fail-closed, source-authorized projection of selected Wiki topics."""
 
-    def __init__(self, paths: ProjectPaths, sources: _SourceReading) -> None:
+    def __init__(
+        self,
+        paths: ProjectPaths,
+        sources: _SourceReading,
+        *,
+        db_path: Path | None = None,
+        customer_names: Iterable[str] = (),
+        strategy_terms: Iterable[str] = (),
+        financial_terms: Iterable[str] = (),
+        leader_names: Iterable[str] = (),
+        unpublished_decisions: Iterable[str] = (),
+    ) -> None:
         self.paths = paths
         self.sources = sources
+        self.db_path = db_path.resolve() if db_path is not None else None
+        self.customer_names = tuple(customer_names)
+        self.strategy_terms = tuple(strategy_terms)
+        self.financial_terms = tuple(financial_terms)
+        self.leader_names = tuple(leader_names)
+        self.unpublished_decisions = tuple(unpublished_decisions)
         self.project_root = paths.project_root.resolve()
         self.topics_root = (paths.wiki_root / "topics").resolve()
 
@@ -331,6 +351,19 @@ class WikiOutboundContextBuilder:
             raise _authorization_invalid() from None
 
     def _project_allows_external_model(self, project_id: str) -> bool:
+        # In a composed application the central SQLite registration is the only
+        # authority.  project.json is scaffolding metadata, never an elevation
+        # path for a project whose permission has been revoked centrally.
+        if self.db_path is not None:
+            try:
+                with connect(self.db_path) as connection:
+                    row = connection.execute(
+                        "SELECT allow_external_model FROM projects WHERE id = ?",
+                        (project_id,),
+                    ).fetchone()
+            except OSError:
+                return False
+            return row is not None and bool(row["allow_external_model"])
         project_path = self.paths.system_root / "project.json"
         try:
             payload = json.loads(project_path.read_text(encoding="utf-8"))
@@ -402,6 +435,17 @@ class WikiOutboundContextBuilder:
             statement = _BULLET.sub("", _CITATION_TOKEN.sub("", line)).strip()
             if not statement or statement.startswith("#"):
                 return None
+            redaction = redact_text(
+                statement,
+                security_level=SecurityLevel.L2_INTERNAL,
+                customer_names=self.customer_names,
+                strategy_terms=self.strategy_terms,
+                financial_terms=self.financial_terms,
+                leader_names=self.leader_names,
+                unpublished_decisions=self.unpublished_decisions,
+            )
+            if not redaction.safe_for_external_model or redaction.redacted_text != statement:
+                return None
             statements.append(statement)
             for source in resolved_sources:
                 assert source is not None
@@ -419,20 +463,68 @@ class WikiOutboundContextBuilder:
         )
 
     def _resolve_citation(self, content: str) -> SourceRecord | None:
-        resolved: list[SourceRecord] = []
-        for index, character in enumerate(content):
-            if character not in {":", "："}:
-                continue
-            source_id = content[:index].strip()
-            locator = content[index + 1 :].strip()
-            if not source_id or not locator:
-                continue
-            try:
-                source = self.sources.get(source_id)
-            except (KeyError, TypeError, ValueError):
-                continue
-            resolved.append(source)
-        return max(resolved, key=lambda source: len(source.id), default=None)
+        separators = [index for index, character in enumerate(content) if character in {":", "："}]
+        if not separators:
+            return None
+        # Source IDs are canonical ASCII identifiers.  Splitting at the first
+        # separator preserves normal locators such as "heading:目标; line:1"
+        # while refusing an old/forged colon-bearing ID as an external citation.
+        index = separators[0]
+        source_id = content[:index].strip()
+        locator = content[index + 1 :].strip()
+        if (
+            not _CANONICAL_SOURCE_ID.fullmatch(source_id)
+            or not locator
+            # `SRC:L3:section` is ambiguous under legacy colon-bearing IDs.
+            # A normal Chinese locator may itself contain `:` (for line/page),
+            # but an ASCII source separator followed by another ASCII separator
+            # is never an unambiguous canonical citation.
+            or (content[index] == ":" and ":" in locator)
+        ):
+            return None
+        try:
+            return self.sources.get(source_id)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def safe_source_page(self, source: SourceRecord, markdown: str) -> str | None:
+        """Return an unchanged source page only when its whole content is exportable."""
+
+        cited = self.citation_sources(markdown)
+        if not cited or not any(item.id == source.id for item in cited):
+            return None
+        if any(
+            not self._source_record_is_exportable(item, source.project_id) for item in cited
+        ):
+            return None
+        redaction = redact_text(
+            markdown,
+            security_level=source.security_level,
+            customer_names=self.customer_names,
+            strategy_terms=self.strategy_terms,
+            financial_terms=self.financial_terms,
+            leader_names=self.leader_names,
+            unpublished_decisions=self.unpublished_decisions,
+        )
+        if not redaction.safe_for_external_model or redaction.redacted_text != markdown:
+            return None
+        return markdown
+
+    def citation_sources(self, markdown: str) -> list[SourceRecord]:
+        """Parse complete citation tokens only; malformed tokens fail closed."""
+
+        sources: list[SourceRecord] = []
+        for line in markdown.splitlines():
+            matches = list(_CITATION_TOKEN.finditer(line))
+            remainder = _CITATION_TOKEN.sub("", line)
+            if "【" in remainder or "】" in remainder:
+                raise ValueError("WIKI_CITATION_INVALID")
+            for match in matches:
+                source = self._resolve_citation(match.group("content"))
+                if source is None:
+                    raise ValueError("WIKI_CITATION_INVALID")
+                sources.append(source)
+        return sources
 
     @staticmethod
     def _source_record_is_exportable(source: SourceRecord, project_id: str) -> bool:

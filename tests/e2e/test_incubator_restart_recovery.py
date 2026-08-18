@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import timedelta
+from pathlib import Path
 
 from src.application.container import build_container
 from src.domain.wiki import WikiChangeSet, WikiIngestRun, WikiPageChange
@@ -128,6 +129,9 @@ ingested_at: '2026-08-12T12:00:00Z'
         transaction_id="TXN-CRASHED",
         project_id=paths.project_id,
         source_id=source.id,
+        raw_path=Path(source.archive_path).relative_to(paths.project_root).as_posix(),
+        raw_sha256=source.sha256,
+        raw_size_bytes=source.size_bytes,
         idempotency_key="e" * 64,
         schema_version="2.2",
         generation_mode="external_ai",

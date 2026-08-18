@@ -296,6 +296,26 @@ def test_incubation_excludes_entire_unsafe_topic_from_external_wiki_context(
     assert "wiki/topics/product-principles.md" not in serialized
 
 
+def test_owner_edited_source_page_with_sensitive_citation_never_reaches_gateway(
+    tmp_path: Path,
+) -> None:
+    """A source page is atomic outbound context: one unsafe citation blocks all of it."""
+    paths, service, gateway = _environment(tmp_path)
+    restricted = _add_source(service, "SRC-L3", security_level=SecurityLevel.L3_CONFIDENTIAL)
+    source_page = paths.wiki_root / "sources/SRC-001-需求.md"
+    source_page.write_text(
+        source_page.read_text(encoding="utf-8")
+        + "\n泄露内容【SRC-L3：secret section】\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DomainError, match="EXTERNAL_CALL_DENIED"):
+        service.execute(_command())
+
+    assert gateway.inputs is None
+    assert restricted.security_level is SecurityLevel.L3_CONFIDENTIAL
+
+
 @pytest.mark.parametrize(
     "project_id,topic_body,error_detail",
     [

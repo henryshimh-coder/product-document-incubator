@@ -9,7 +9,7 @@ from pathlib import Path
 from src.application.ports.incubator import IncubatorProjectRepository
 from src.domain.enums import ProjectRootStatus
 from src.domain.errors import DomainError, ErrorCode
-from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.project_library import ProjectPaths, require_safe_project_roles
 
 _REQUIRED_DIRECTORIES = ("raw", "wiki", "schema", "exports", ".incubator")
 
@@ -85,6 +85,10 @@ class ProjectPathResolver:
         )
         if not has_required_directories:
             raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE)
+        try:
+            require_safe_project_roles(paths)
+        except ValueError as error:
+            raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE) from error
 
         metadata_path = paths.system_root / "project.json"
         if metadata_path.is_symlink() or not metadata_path.resolve().is_relative_to(

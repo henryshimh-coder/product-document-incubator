@@ -245,6 +245,20 @@ def ingest_fixture(tmp_path: Path) -> IngestFixture:
     return make_ingest_fixture(tmp_path)
 
 
+def test_central_permission_revocation_blocks_external_wiki_call(ingest_fixture) -> None:
+    """Central SQLite permission wins over permissive project-local metadata."""
+    with connect(ingest_fixture.db_path) as connection:
+        connection.execute(
+            "UPDATE projects SET allow_external_model = 0 WHERE id = ?",
+            ("PROJECT_A",),
+        )
+
+    with pytest.raises(DomainError, match="WIKI_EXTERNAL_CALL_DENIED"):
+        ingest_fixture.execute()
+
+    assert ingest_fixture.gateway.calls == []
+
+
 def test_ingest_archived_l2_source_updates_complete_wiki(ingest_fixture) -> None:
     """Catches a successful run omitting any governed Wiki projection or DB result."""
     before_protected = ingest_fixture.protected_hashes()
@@ -265,6 +279,16 @@ def test_ingest_archived_l2_source_updates_complete_wiki(ingest_fixture) -> None
     assert persisted.source_page_path == result.source_page_path
     assert ingest_fixture.protected_hashes() == before_protected
     assert hashlib.sha256(ingest_fixture.raw_path.read_bytes()).hexdigest() == before_raw
+    with connect(ingest_fixture.db_path) as connection:
+        audit = connection.execute(
+            "SELECT task_type, source_ids_json, outbound_chars, status, error_code "
+            "FROM model_call_logs WHERE task_type = 'wiki_ingest'"
+        ).fetchone()
+    assert audit is not None
+    assert audit["source_ids_json"] == json.dumps([ingest_fixture.source_id], separators=(",", ":"))
+    assert audit["outbound_chars"] > 0
+    assert audit["status"] == "succeeded"
+    assert audit["error_code"] is None
 
 
 def test_successful_duplicate_returns_without_gateway_or_wiki_change(ingest_fixture) -> None:

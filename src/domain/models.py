@@ -372,7 +372,14 @@ class BaselineManifest(DomainModel):
 class ModelCallLog(DomainModel):
     id: NonEmptyStr
     project_id: NonEmptyStr
-    task_type: Literal["ingest", "query", "lint", "document_draft", "structure_suggestion"]
+    task_type: Literal[
+        "ingest",
+        "query",
+        "lint",
+        "document_draft",
+        "structure_suggestion",
+        "wiki_ingest",
+    ]
     workflow_run_id: NonEmptyStr | None
     correlation_id: NonEmptyStr
     source_ids: list[NonEmptyStr]

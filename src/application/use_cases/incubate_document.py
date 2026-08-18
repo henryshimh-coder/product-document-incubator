@@ -126,7 +126,6 @@ class IncubateDocument:
             raise ValueError("incubation project_id does not match active project")
         project = self.projects.get(command.project_id)
         sources = self._sources_for_command(project, command.source_ids)
-        context = self.wiki_context.read_context(command.project_id, command.source_ids)
         if any(source.security_level.value in {"L3", "L4"} for source in sources):
             if len(sources) != 1 or self.local_draft_creator is None:
                 raise DomainError(ErrorCode.EXTERNAL_CALL_DENIED, "DOCUMENT_LOCAL_ROUTE_REQUIRED")
@@ -137,6 +136,7 @@ class IncubateDocument:
                     requested_by=command.requested_by,
                 )
             )
+        context = self.wiki_context.read_context(command.project_id, command.source_ids)
         now = self.now()
         existing = self.drafts.list_for_project(command.project_id)
         version_id = VersionIdFactory.next(

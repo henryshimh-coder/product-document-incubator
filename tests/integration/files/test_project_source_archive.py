@@ -4,6 +4,8 @@ import json
 from datetime import UTC, date, datetime
 from hashlib import sha256
 
+import pytest
+
 from src.domain.enums import AuthorityLevel, DocumentGenerationMode, SecurityLevel
 from src.domain.models import SourceRecord
 from src.infrastructure.files.project_library import ProjectPaths
@@ -39,6 +41,23 @@ def test_archived_browser_bytes_are_saved_without_a_local_source_path(tmp_path) 
 
     assert result.path.is_relative_to(paths.raw_root)
     assert result.path.read_bytes() == b"# requirements\n"
+
+
+def test_archive_rejects_raw_role_symlink_redirecting_into_protected_wiki(tmp_path) -> None:
+    """Raw writes must never follow a project-local role symlink."""
+    from src.infrastructure.files.project_source_archive import ProjectSourceArchive
+
+    paths = ProjectPaths.for_project(tmp_path / "library", "PROJECT_A")
+    for role in ("wiki", "schema", "exports", ".incubator"):
+        (paths.project_root / role).mkdir(parents=True, exist_ok=True)
+    protected = paths.wiki_root / "current"
+    protected.mkdir(parents=True)
+    paths.raw_root.symlink_to(protected, target_is_directory=True)
+
+    with pytest.raises(Exception, match="UNSAFE_PROJECT_RAW_ROOT"):
+        ProjectSourceArchive(paths=paths, source_id="SRC-001", year=2026).save(
+            "material.md", b"must not be written"
+        )
 
 
 def test_source_index_mirrors_wiki_ingest_result(tmp_path) -> None:

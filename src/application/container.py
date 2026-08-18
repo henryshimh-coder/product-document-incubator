@@ -926,6 +926,12 @@ def _build_document_incubation(
         wiki_context=WikiContextReader(
             paths=active_project.paths,
             sources=SqliteSourceRepository(active_project.db_path),
+            db_path=active_project.db_path,
+            customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
+            strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
+            financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
+            leader_names=dictionary("REDACTION_LEADER_NAMES"),
+            unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
         ),
         model_call_logger=ModelCallLogger(active_project.db_path),
         local_draft_creator=_build_local_document_draft(active_project),

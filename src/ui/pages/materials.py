@@ -140,12 +140,15 @@ def _render_index(container: AppContainer) -> None:
             continue
         st.markdown(
             f"**{item.get('material_name') or item.get('filename', '未知文件')}** · "
-            f"{item.get('material_version', '--')} · {item.get('source_id', '--')}  \\n+"
+            f"{item.get('material_version', '--')} · {item.get('source_id', '--')}  \\n"
             f"`{str(item.get('sha256', ''))[:12]}` · {item.get('source_type', '--')} · "
             f"{item.get('ingest_status', '--')}"
         )
         st.code(str(item.get("archive_path", "")), language=None)
         _render_wiki_ingest(container, item)
+        if item.get("local_sensitive_comparison_required"):
+            count = item.get("excluded_sensitive_topic_count", 0)
+            st.warning(f"有 {count} 个相关主题仅可在本地核验，未外发给模型。")
         if item.get("security_level") in {"L3", "L4"} and container.compare_sensitive_source:
             if st.button("与当前方案对照", key=f"compare-{item.get('source_id')}"):
                 try:
@@ -215,8 +218,6 @@ def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
     if item.get("security_level") in sensitive_levels:
         _render_local_wiki_ingest(container, source_id, status)
         return
-    if container.wiki_ingest is None:
-        return
     if status == "ingesting":
         st.button(
             "处理中",
@@ -230,6 +231,10 @@ def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
             st.markdown(f"[查看 Wiki 结果]({source_page_path})")
         else:
             st.markdown("查看 Wiki 结果")
+        return
+    # Historical Wiki outcomes stay visible even if this session has no
+    # external credential.  Only a new/retry action requires the gateway.
+    if container.wiki_ingest is None:
         return
     if status == "ingest_failed":
         st.caption(f"安全错误码：{item.get('ingest_error_code') or 'WIKI_CHANGESET_INVALID'}")

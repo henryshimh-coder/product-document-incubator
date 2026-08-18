@@ -11,6 +11,7 @@ from uuid import uuid4
 from src.domain.incubator import IncubatorSettings
 
 PROJECT_ID_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,63}$")
+_ROLE_DIRECTORIES = ("raw", "wiki", "schema", "exports", ".incubator")
 
 
 @dataclass(frozen=True)
@@ -57,8 +58,12 @@ class ProjectPaths:
     @classmethod
     def _build(cls, library_root: Path, project_id: str, project_root: Path) -> ProjectPaths:
         def inside_project(relative_path: str) -> Path:
-            candidate = (project_root / relative_path).resolve()
-            if not candidate.is_relative_to(project_root):
+            lexical = project_root / relative_path
+            candidate = lexical.resolve()
+            # Role directories are trust boundaries.  A path merely resolving below
+            # the project is insufficient: raw -> wiki/current would otherwise let
+            # archival writes reach a protected release asset.
+            if candidate != lexical or not candidate.is_relative_to(project_root):
                 raise ValueError("derived project path resolves outside library_root")
             return candidate
 
@@ -77,6 +82,23 @@ class ProjectPaths:
             system_root=system_root,
             manifest_path=manifest_path,
         )
+
+
+def require_safe_project_roles(paths: ProjectPaths) -> None:
+    """Reject a root or any role directory redirected through a symlink.
+
+    This is deliberately re-run at write and transaction boundaries.  Validation
+    during project selection alone cannot protect against a later symlink swap.
+    """
+
+    root = paths.project_root
+    if root.is_symlink() or root.resolve() != root or not root.is_dir():
+        raise ValueError("project root is not a canonical directory")
+    for role in _ROLE_DIRECTORIES:
+        lexical = root / role
+        resolved = lexical.resolve()
+        if lexical.is_symlink() or resolved != lexical or not resolved.is_relative_to(root):
+            raise ValueError(f"project role is not a canonical directory: {role}")
 
 
 class ProjectLibraryLocator:

@@ -295,6 +295,9 @@ ingested_at: '2026-08-17T12:00:00Z'
             transaction_id="TXN-A",
             project_id="PROJECT_A",
             source_id="SRC-A",
+            raw_path="raw/SRC-A/material.md",
+            raw_sha256=self._source.sha256,
+            raw_size_bytes=self._source.size_bytes,
             idempotency_key=idempotency_key,
             schema_version="2.2",
             generation_mode=DocumentGenerationMode.EXTERNAL_AI,
@@ -376,6 +379,26 @@ def test_failure_restores_files_and_leaves_no_success_run(
     assert transaction_fixture.snapshot().wiki_hashes == before.wiki_hashes
     assert transaction_fixture.raw_sha256() == before.raw_sha256
     assert transaction_fixture.source().ingest_status == "ingest_failed"
+
+
+def test_raw_mutation_at_database_boundary_requires_recovery_and_never_succeeds(
+    transaction_fixture,
+) -> None:
+    """A changed Raw cannot be converted into a successful Wiki transaction."""
+
+    def mutate_raw(stage: str) -> None:
+        if stage == "before_database_commit":
+            transaction_fixture.raw_path.write_bytes(b"changed after verification")
+
+    transaction_fixture.coordinator.failure_injector = mutate_raw
+
+    with pytest.raises(RuntimeError, match="WIKI_RECOVERY_REQUIRED"):
+        transaction_fixture.coordinator.commit(transaction_fixture.change_set)
+
+    journal = next(
+        (transaction_fixture.paths.system_root / "transactions").iterdir()
+    ) / "journal.json"
+    assert json.loads(journal.read_text(encoding="utf-8"))["state"] == "recovery_required"
     assert transaction_fixture.succeeded_run() is None
 
 

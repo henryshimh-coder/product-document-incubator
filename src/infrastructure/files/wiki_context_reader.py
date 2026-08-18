@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import yaml
@@ -14,7 +15,6 @@ from src.domain.errors import DomainError, ErrorCode
 from src.domain.models import SourceRecord
 from src.infrastructure.files.project_library import ProjectPaths
 from src.infrastructure.files.wiki_outbound_context import (
-    _CITATION_TOKEN,
     WikiOutboundContextBuilder,
 )
 
@@ -24,10 +24,30 @@ _PAGE_CHARS = 1800
 class WikiContextReader:
     """Read only trusted, completed Wiki pages for document incubation."""
 
-    def __init__(self, *, paths: ProjectPaths, sources: SourceRepository) -> None:
+    def __init__(
+        self,
+        *,
+        paths: ProjectPaths,
+        sources: SourceRepository,
+        db_path: Path | None = None,
+        customer_names: Iterable[str] = (),
+        strategy_terms: Iterable[str] = (),
+        financial_terms: Iterable[str] = (),
+        leader_names: Iterable[str] = (),
+        unpublished_decisions: Iterable[str] = (),
+    ) -> None:
         self.paths = paths
         self.sources = sources
-        self.outbound = WikiOutboundContextBuilder(paths, sources)
+        self.outbound = WikiOutboundContextBuilder(
+            paths,
+            sources,
+            db_path=db_path,
+            customer_names=customer_names,
+            strategy_terms=strategy_terms,
+            financial_terms=financial_terms,
+            leader_names=leader_names,
+            unpublished_decisions=unpublished_decisions,
+        )
 
     def list_ingested_sources(self, project_id: str) -> list[WikiSourceView]:
         self._require_project(project_id)
@@ -59,13 +79,28 @@ class WikiContextReader:
             source_path = self._owned_wiki_path(source.source_page_path, "sources")
             source_markdown = self._read_page(source_path)
             self._validate_source_page(source, source_markdown)
-            pages.extend(self._page_chunks(source.id, source_path, "source", source_markdown))
+            try:
+                safe_source = self.outbound.safe_source_page(source, source_markdown)
+            except ValueError as error:
+                raise DomainError(
+                    ErrorCode.EXTERNAL_CALL_DENIED,
+                    "WIKI_SOURCE_EXTERNAL_UNSAFE",
+                ) from error
+            if safe_source is None:
+                # Do not send a partially-cleaned page to an external document
+                # workflow.  Owner must fix the local Wiki page first.
+                raise DomainError(ErrorCode.EXTERNAL_CALL_DENIED, "WIKI_SOURCE_EXTERNAL_UNSAFE")
+            pages.extend(self._page_chunks(source.id, source_path, "source", safe_source))
             conflicts.extend(self._section_items(source_markdown, "冲突与待确认"))
             evidence_gaps.extend(self._section_items(source_markdown, "证据缺口"))
             for topic_path_text in source.topic_page_paths:
                 topic_path = self._owned_wiki_path(topic_path_text, "topics")
                 topic_markdown = self._read_page(topic_path)
-                safe_topic = self._safe_topic_for_source(project_id, source, topic_path)
+                safe_topic, excluded = self._safe_topic_for_source(
+                    project_id, source, topic_path
+                )
+                if excluded:
+                    evidence_gaps.append("存在仅可本地核验的相关主题，未外发给文档模型。")
                 if safe_topic is None:
                     continue
                 pages.extend(
@@ -124,7 +159,7 @@ class WikiContextReader:
         project_id: str,
         source: SourceRecord,
         topic_path: Path,
-    ):
+    ) -> tuple[object | None, bool]:
         try:
             frontmatter, _ = self.outbound._parse_topic(self._read_page(topic_path))
         except (TypeError, ValueError, yaml.YAMLError) as error:
@@ -137,31 +172,26 @@ class WikiContextReader:
         relative_path = topic_path.relative_to(self.paths.project_root).as_posix()
         projection = self.outbound.build(project_id, [relative_path])
         if not projection.safe_related_topics:
-            return None
+            return None, projection.local_sensitive_comparison_required
         topic = projection.safe_related_topics[0]
         if source.id not in topic.source_ids:
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "WIKI_TOPIC_SOURCE_MISMATCH")
-        return topic
+        return topic, False
 
     def _strict_citation_sources(self, markdown: str) -> list[SourceRecord]:
         """Reuse T8's strict token and colon-resolution rules for source-page citations."""
-        sources: list[SourceRecord] = []
-        for line in markdown.splitlines():
-            matches = list(_CITATION_TOKEN.finditer(line))
-            remainder = _CITATION_TOKEN.sub("", line)
-            if "【" in remainder or "】" in remainder:
-                raise DomainError(
-                    ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
-                    "WIKI_SOURCE_CITATION_INVALID",
-                )
-            for match in matches:
-                resolved = self.outbound._resolve_citation(match.group("content"))
-                if resolved is None or resolved.project_id != self.paths.project_id:
-                    raise DomainError(
-                        ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
-                        "WIKI_SOURCE_CITATION_INVALID",
-                    )
-                sources.append(resolved)
+        try:
+            sources = self.outbound.citation_sources(markdown)
+        except ValueError as error:
+            raise DomainError(
+                ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
+                "WIKI_SOURCE_CITATION_INVALID",
+            ) from error
+        if any(source.project_id != self.paths.project_id for source in sources):
+            raise DomainError(
+                ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
+                "WIKI_SOURCE_CITATION_INVALID",
+            )
         return sources
 
     def _owned_wiki_path(self, relative_path: str | None, expected_folder: str) -> Path:

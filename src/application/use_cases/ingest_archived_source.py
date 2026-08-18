@@ -19,9 +19,9 @@ from src.application.ports.wiki_ingest import (
     WikiIngestGenerating,
     WikiIngestRunRepository,
 )
-from src.domain.enums import DocumentGenerationMode, SecurityLevel
+from src.domain.enums import CallResultMode, DocumentGenerationMode, SecurityLevel
 from src.domain.errors import AppError, DomainError, ErrorCode
-from src.domain.models import SourceRecord
+from src.domain.models import ModelCallLog, SourceRecord
 from src.domain.wiki import (
     WikiChangeSet,
     WikiIngestRun,
@@ -45,6 +45,7 @@ from src.infrastructure.gateways.schemas import (
     WikiIngestWorkflowInput,
     WikiIngestWorkflowOutput,
 )
+from src.infrastructure.observability.model_call_logger import ModelCallLogger
 
 WIKI_SCHEMA_VERSION = "2.2"
 MAX_OUTBOUND_SOURCE_CHUNKS = 3
@@ -80,8 +81,18 @@ class IngestArchivedSource:
         self.leader_names = tuple(leader_names)
         self.unpublished_decisions = tuple(unpublished_decisions)
         self.now = now or (lambda: datetime.now(UTC))
-        self.context = WikiOutboundContextBuilder(paths, sources)
+        self.context = WikiOutboundContextBuilder(
+            paths,
+            sources,
+            db_path=db_path,
+            customer_names=self.customer_names,
+            strategy_terms=self.strategy_terms,
+            financial_terms=self.financial_terms,
+            leader_names=self.leader_names,
+            unpublished_decisions=self.unpublished_decisions,
+        )
         self.index = SourceIndexStore(paths)
+        self.model_call_logger = ModelCallLogger(db_path)
         self.lifecycle_lock_path = paths.system_root / "locks" / "wiki-ingest-lifecycle.lock"
 
     def execute(self, command: IngestArchivedSourceInput) -> WikiIngestResultView:
@@ -141,11 +152,49 @@ class IngestArchivedSource:
                 workflow_inputs,
                 related_topic_paths=related_topic_paths,
             )
-            output = self.gateway.generate(
-                workflow_inputs,
-                safety_proof=safety_proof,
-                wiki_authorization=wiki_authorization,
-                user=command.project_id,
+            call_started = self.now()
+            outbound_source_ids = sorted(
+                {
+                    source.id,
+                    *(
+                        source_id
+                        for topic in projection.safe_related_topics
+                        for source_id in topic.source_ids
+                    ),
+                }
+            )
+            outbound_chars = len(
+                json.dumps(
+                    workflow_inputs,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            try:
+                output = self.gateway.generate(
+                    workflow_inputs,
+                    safety_proof=safety_proof,
+                    wiki_authorization=wiki_authorization,
+                    user=command.project_id,
+                )
+            except BaseException as error:
+                self._record_external_model_call(
+                    project_id=command.project_id,
+                    source_ids=outbound_source_ids,
+                    started=call_started,
+                    outbound_chars=outbound_chars,
+                    status="failed",
+                    error_code=getattr(error, "code", ErrorCode.WIKI_CHANGESET_INVALID.value),
+                )
+                raise
+            self._record_external_model_call(
+                project_id=command.project_id,
+                source_ids=outbound_source_ids,
+                started=call_started,
+                outbound_chars=outbound_chars,
+                status="succeeded",
+                error_code=None,
             )
 
             # Re-read immutable evidence after the external boundary and before any
@@ -158,6 +207,7 @@ class IngestArchivedSource:
                 output=output,
                 related_topic_paths=related_topic_paths,
                 committed_at=committed_at,
+                excluded_topic_count=projection.excluded_topic_count,
             )
             validator.validate_change_set(change_set)
             self._verify_same_raw(raw_path, source, raw_payload)
@@ -319,16 +369,17 @@ class IngestArchivedSource:
 
     def _authorize_external(self, source: SourceRecord) -> None:
         try:
-            project = json.loads(
-                (self.paths.system_root / "project.json").read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            project = None
+            with connect(self.db_path) as connection:
+                row = connection.execute(
+                    "SELECT allow_external_model FROM projects WHERE id = ?",
+                    (source.project_id,),
+                ).fetchone()
+            project_allowed = row is not None and bool(row["allow_external_model"])
+        except OSError:
+            project_allowed = False
         allowed = all(
             (
-                isinstance(project, dict),
-                isinstance(project, dict) and project.get("project_id") == source.project_id,
-                isinstance(project, dict) and project.get("allow_external_model") is True,
+                project_allowed,
                 source.security_level
                 in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL},
                 source.is_redacted,
@@ -418,6 +469,7 @@ class IngestArchivedSource:
         output: WikiIngestWorkflowOutput,
         related_topic_paths: list[str],
         committed_at: datetime,
+        excluded_topic_count: int,
     ) -> tuple[WikiValidator, WikiChangeSet]:
         update_paths, new_outputs = self._resolve_topic_targets(
             source,
@@ -444,6 +496,7 @@ class IngestArchivedSource:
             first_locator,
             committed_at,
             output,
+            excluded_topic_count,
         )
         result_digest = hashlib.sha256(
             json.dumps(
@@ -461,6 +514,7 @@ class IngestArchivedSource:
                 first_locator,
                 committed_at,
                 output,
+                excluded_topic_count,
                 existing_markdown=(
                     self._read_required(relative_path)
                     if topic.change_type == "update"
@@ -485,12 +539,16 @@ class IngestArchivedSource:
             topic_paths,
             result_digest,
             committed_at,
+            excluded_topic_count,
         )
         changes = [self._page_change(path, markdown) for path, markdown in contents.items()]
         return validator, WikiChangeSet(
             transaction_id=run.transaction_id,
             project_id=source.project_id,
             source_id=source.id,
+            raw_path=self._relative_raw_path(source),
+            raw_sha256=source.sha256,
+            raw_size_bytes=source.size_bytes,
             idempotency_key=run.idempotency_key,
             schema_version=WIKI_SCHEMA_VERSION,
             generation_mode=DocumentGenerationMode.EXTERNAL_AI,
@@ -498,7 +556,7 @@ class IngestArchivedSource:
             source_page_path=source_page_path,
             topic_page_paths=topic_paths,
             conflict_count=len(output.conflicts),
-            evidence_gap_count=len(output.evidence_gaps),
+            evidence_gap_count=len(output.evidence_gaps) + int(excluded_topic_count > 0),
             result_digest=result_digest,
         )
 
@@ -552,6 +610,7 @@ class IngestArchivedSource:
         locator: str,
         committed_at: datetime,
         output: WikiIngestWorkflowOutput,
+        excluded_topic_count: int,
     ) -> str:
         frontmatter = {
             "project_id": source.project_id,
@@ -568,7 +627,7 @@ class IngestArchivedSource:
             "ingested_at": committed_at.isoformat(),
         }
         title = source.material_name or Path(source.original_filename).stem
-        findings = self._findings_markdown(output)
+        findings = self._findings_markdown(output, excluded_topic_count)
         return (
             f"---\n{yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()}\n"
             f"---\n# 来源：{title}\n\n{body.strip()}\n\n## 来源定位\n\n"
@@ -582,6 +641,7 @@ class IngestArchivedSource:
         locator: str,
         committed_at: datetime,
         output: WikiIngestWorkflowOutput,
+        excluded_topic_count: int,
         *,
         existing_markdown: str | None,
     ) -> str:
@@ -600,26 +660,39 @@ class IngestArchivedSource:
             # Existing accepted conclusions, conflicts, source IDs, and locators are
             # append-only evidence. Never reconstruct or rewrite their text.
             prefix = existing_markdown.rstrip()
+        citations = " ".join(
+            f"【{source_id}：{self._topic_locator(source, source_id, existing_markdown)}】"
+            for source_id in topic.source_ids
+        )
         addition = (
             f"## Ingest 增量 · {committed_at.isoformat()}\n\n"
-            f"- {topic.markdown.strip()} 【{source.id}：{locator}】\n\n"
-            f"{self._findings_markdown(output)}"
+            f"- {topic.markdown.strip()} {citations}\n\n"
+            f"{self._findings_markdown(output, excluded_topic_count)}"
         )
         return f"{prefix}\n\n{addition}"
 
     @staticmethod
-    def _findings_markdown(output: WikiIngestWorkflowOutput) -> str:
+    def _findings_markdown(
+        output: WikiIngestWorkflowOutput, excluded_topic_count: int = 0
+    ) -> str:
         conflicts = [
             f"- {conflict.summary} · 来源："
             + ", ".join(f"`{source_id}`" for source_id in conflict.source_ids)
             for conflict in output.conflicts
         ] or ["- 无"]
         evidence_gaps = [f"- {gap}" for gap in output.evidence_gaps] or ["- 无"]
+        sensitive_gap = (
+            [
+                f"- {excluded_topic_count} 个相关主题因安全限制仅可本地比对，未外发给模型。"
+            ]
+            if excluded_topic_count
+            else []
+        )
         return (
             "## 冲突与待确认\n\n"
             + "\n".join(conflicts)
             + "\n\n## 证据缺口\n\n"
-            + "\n".join(evidence_gaps)
+            + "\n".join([*evidence_gaps, *sensitive_gap])
         )
 
     def _index_markdown(
@@ -642,6 +715,7 @@ class IngestArchivedSource:
         topic_paths: list[str],
         result_digest: str,
         committed_at: datetime,
+        excluded_topic_count: int,
     ) -> str:
         try:
             payload = json.loads(self._read_required(".incubator/source-index.json"))
@@ -666,6 +740,8 @@ class IngestArchivedSource:
                         "ingest_result_digest": result_digest,
                         "ingest_error_code": None,
                         "generation_mode": DocumentGenerationMode.EXTERNAL_AI.value,
+                        "local_sensitive_comparison_required": excluded_topic_count > 0,
+                        "excluded_sensitive_topic_count": excluded_topic_count,
                     }
                 )
                 updated = True
@@ -715,6 +791,66 @@ class IngestArchivedSource:
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "RAW_READ_FAILED") from None
         if current != original or hashlib.sha256(current).hexdigest() != source.sha256:
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "RAW_CHANGED")
+
+    def _topic_locator(
+        self, source: SourceRecord, source_id: str, existing_markdown: str | None
+    ) -> str:
+        if source_id == source.id:
+            return self._first_source_locator(source)
+        if existing_markdown is None:
+            try:
+                linked = self.sources.get(source_id)
+            except KeyError:
+                raise DomainError(
+                    ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_SOURCE_UNAUTHORIZED"
+                ) from None
+            if linked.project_id != source.project_id:
+                raise DomainError(
+                    ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_SOURCE_UNAUTHORIZED"
+                )
+            return self._first_source_locator(linked)
+        match = re.search(
+            rf"【{re.escape(source_id)}[：:]([^【】\r\n]+)】", existing_markdown
+        )
+        if match is None or not match.group(1).strip():
+            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_SOURCE_LOCATOR_REQUIRED")
+        return match.group(1).strip()
+
+    def _record_external_model_call(
+        self,
+        *,
+        project_id: str,
+        source_ids: list[str],
+        started: datetime,
+        outbound_chars: int,
+        status: str,
+        error_code: str | None,
+    ) -> None:
+        finished = self.now()
+        self.model_call_logger.record(
+            ModelCallLog(
+                id=f"MODEL-WIKI-{new_workflow_task_id('CALL')}",
+                project_id=project_id,
+                task_type="wiki_ingest",
+                workflow_run_id=None,
+                correlation_id=f"WIKI-{new_workflow_task_id('CORR')}",
+                source_ids=source_ids,
+                baseline_version="WIKI-2.2",
+                model_label="dify-wiki-ingest",
+                prompt_version="wiki-ingest-v2.2",
+                schema_version=WIKI_SCHEMA_VERSION,
+                authorized=True,
+                redacted=True,
+                outbound_chars=outbound_chars,
+                outbound_coverage=1.0,
+                result_mode=CallResultMode.REALTIME,
+                status=status,  # type: ignore[arg-type]
+                started_at=started,
+                finished_at=finished,
+                elapsed_ms=max(0, int((finished - started).total_seconds() * 1000)),
+                error_code=error_code,
+            )
+        )
 
     def _record_failure(
         self,

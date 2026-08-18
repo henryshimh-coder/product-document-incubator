@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -16,7 +17,7 @@ from src.application.ports.wiki_ingest import WikiChangeSetValidating
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.wiki import WikiChangeSet, WikiTransactionResult
 from src.infrastructure.db.connection import connect
-from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.project_library import ProjectPaths, require_safe_project_roles
 from src.infrastructure.files.wiki_store import WikiStore
 
 BUILDING = "building"
@@ -38,6 +39,13 @@ class _JournalTarget:
     relative_path: str
     before_sha256: str | None
     after_sha256: str
+
+
+@dataclass(frozen=True)
+class _JournalRawEvidence:
+    relative_path: str
+    sha256: str
+    size_bytes: int
 
 
 class WikiChangeSetStore:
@@ -71,6 +79,11 @@ class WikiChangeSetStore:
             "transaction_id": change_set.transaction_id,
             "project_id": change_set.project_id,
             "source_id": change_set.source_id,
+            "raw": {
+                "relative_path": change_set.raw_path,
+                "sha256": change_set.raw_sha256,
+                "size_bytes": change_set.raw_size_bytes,
+            },
             "idempotency_key": change_set.idempotency_key,
             "schema_version": change_set.schema_version,
             "generation_mode": change_set.generation_mode.value,
@@ -230,6 +243,13 @@ class WikiTransactionCoordinator:
             raise RuntimeError("WIKI_RECOVERY_REQUIRED")
         if self.validator is None:
             raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "WIKI_VALIDATOR_REQUIRED")
+        self._verify_raw_evidence(
+            _JournalRawEvidence(
+                change_set.raw_path,
+                change_set.raw_sha256,
+                change_set.raw_size_bytes,
+            )
+        )
         self.validator.validate_change_set(change_set)
         for change in change_set.page_changes:
             self.wiki.verify_before(change)
@@ -245,8 +265,22 @@ class WikiTransactionCoordinator:
             store.set_state(FILES_COMMITTED, self.clock())
             self.failure_injector("after_files")
             self.failure_injector("before_database_commit")
+            self._verify_raw_evidence(
+                _JournalRawEvidence(
+                    change_set.raw_path,
+                    change_set.raw_sha256,
+                    change_set.raw_size_bytes,
+                )
+            )
             self._commit_database(change_set)
             store.set_state(DATABASE_COMMITTED, self.clock())
+            self._verify_raw_evidence(
+                _JournalRawEvidence(
+                    change_set.raw_path,
+                    change_set.raw_sha256,
+                    change_set.raw_size_bytes,
+                )
+            )
             for change in change_set.page_changes:
                 self.wiki.verify_after(change)
             store.set_state(COMMITTED, self.clock())
@@ -259,9 +293,16 @@ class WikiTransactionCoordinator:
             )
         except Exception as error:
             try:
+                raw = _JournalRawEvidence(
+                    change_set.raw_path,
+                    change_set.raw_sha256,
+                    change_set.raw_size_bytes,
+                )
+                self._verify_raw_evidence(raw)
                 store.set_state(ROLLING_BACK, self.clock(), error_code="WIKI_TRANSACTION_FAILED")
                 for change in reversed(change_set.page_changes):
                     self.wiki.restore(change, store.backup_root)
+                self._verify_raw_evidence(raw)
                 self._record_failure(change_set, "WIKI_TRANSACTION_FAILED")
                 store.set_state(ROLLED_BACK, self.clock(), error_code="WIKI_TRANSACTION_FAILED")
                 store.write_recovery_result(
@@ -312,7 +353,7 @@ class WikiTransactionCoordinator:
         journal: dict[str, object],
     ) -> WikiTransactionResult:
         try:
-            transaction_id, idempotency_key, state, targets = self._validate_journal(
+            transaction_id, idempotency_key, state, targets, raw = self._validate_journal(
                 store, journal
             )
         except Exception as error:
@@ -325,6 +366,11 @@ class WikiTransactionCoordinator:
                 )
             raise RuntimeError("WIKI_RECOVERY_REQUIRED: JOURNAL_INVALID") from error
 
+        try:
+            self._verify_raw_evidence(raw)
+        except Exception:
+            return self._require_recovery(store, journal, transaction_id, idempotency_key)
+
         db_succeeded = self._database_succeeded(journal)
         if state == RECOVERY_REQUIRED:
             return self._result(transaction_id, idempotency_key, RECOVERY_REQUIRED)
@@ -336,6 +382,10 @@ class WikiTransactionCoordinator:
                     transaction_id,
                     idempotency_key,
                 )
+            try:
+                self._verify_raw_evidence(raw)
+            except Exception:
+                return self._require_recovery(store, journal, transaction_id, idempotency_key)
             store.ensure_recovery_result(journal, ROLLED_BACK, self.clock())
             store.cleanup_payloads()
             return self._result(transaction_id, idempotency_key, ROLLED_BACK)
@@ -347,6 +397,10 @@ class WikiTransactionCoordinator:
                     transaction_id,
                     idempotency_key,
                 )
+            try:
+                self._verify_raw_evidence(raw)
+            except Exception:
+                return self._require_recovery(store, journal, transaction_id, idempotency_key)
             store.ensure_recovery_result(journal, COMMITTED, self.clock())
             store.cleanup_payloads()
             return self._result(transaction_id, idempotency_key, COMMITTED)
@@ -362,6 +416,7 @@ class WikiTransactionCoordinator:
                 )
                 for target in reversed(targets):
                     self.wiki.restore(target, store.backup_root)
+                self._verify_raw_evidence(raw)
                 self._record_recovery_failure(journal)
                 store.set_state(
                     ROLLED_BACK,
@@ -381,6 +436,7 @@ class WikiTransactionCoordinator:
             try:
                 for target in targets:
                     self.wiki.verify_after(target)
+                self._verify_raw_evidence(raw)
                 if state == FILES_COMMITTED:
                     store.set_state(DATABASE_COMMITTED, self.clock())
                 store.set_state(COMMITTED, self.clock())
@@ -396,12 +452,13 @@ class WikiTransactionCoordinator:
         self,
         store: WikiChangeSetStore,
         journal: dict[str, object],
-    ) -> tuple[str, str, str, list[_JournalTarget]]:
+    ) -> tuple[str, str, str, list[_JournalTarget], _JournalRawEvidence]:
         transaction_id = journal.get("transaction_id")
         project_id = journal.get("project_id")
         idempotency_key = journal.get("idempotency_key")
         state = journal.get("state")
         raw_targets = journal.get("targets")
+        raw_evidence = journal.get("raw")
         if (
             not isinstance(transaction_id, str)
             or transaction_id != store.transaction_root.name
@@ -411,8 +468,19 @@ class WikiTransactionCoordinator:
             or not isinstance(state, str)
             or not isinstance(raw_targets, list)
             or not raw_targets
+            or not isinstance(raw_evidence, dict)
         ):
             raise ValueError("WIKI_JOURNAL_INVALID")
+        raw_path = raw_evidence.get("relative_path")
+        raw_sha256 = raw_evidence.get("sha256")
+        raw_size_bytes = raw_evidence.get("size_bytes")
+        if (
+            not isinstance(raw_path, str)
+            or not self._is_sha256(raw_sha256)
+            or not isinstance(raw_size_bytes, int)
+            or raw_size_bytes < 0
+        ):
+            raise ValueError("WIKI_JOURNAL_RAW_INVALID")
         targets: list[_JournalTarget] = []
         for item in raw_targets:
             if not isinstance(item, dict):
@@ -428,7 +496,48 @@ class WikiTransactionCoordinator:
                 raise ValueError("WIKI_JOURNAL_TARGET_INVALID")
             self.wiki.target(relative_path)
             targets.append(_JournalTarget(relative_path, before_sha256, after_sha256))
-        return transaction_id, idempotency_key, state, targets
+        return (
+            transaction_id,
+            idempotency_key,
+            state,
+            targets,
+            _JournalRawEvidence(raw_path, raw_sha256, raw_size_bytes),
+        )
+
+    def _verify_raw_evidence(self, evidence: _JournalRawEvidence) -> None:
+        """Verify the same immutable Raw bytes at every durable boundary."""
+
+        try:
+            require_safe_project_roles(self.paths)
+        except ValueError as error:
+            raise RuntimeError("WIKI_RAW_PATH_INVALID") from error
+        relative = Path(evidence.relative_path)
+        if (
+            relative.is_absolute()
+            or "\\" in evidence.relative_path
+            or relative.as_posix() != evidence.relative_path
+            or not evidence.relative_path.startswith("raw/")
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise RuntimeError("WIKI_RAW_PATH_INVALID")
+        lexical = self.paths.project_root / relative
+        resolved = lexical.resolve()
+        if (
+            lexical.is_symlink()
+            or resolved != lexical
+            or not resolved.is_relative_to(self.paths.raw_root)
+            or not resolved.is_file()
+        ):
+            raise RuntimeError("WIKI_RAW_PATH_INVALID")
+        try:
+            payload = resolved.read_bytes()
+        except OSError as error:
+            raise RuntimeError("WIKI_RAW_READ_FAILED") from error
+        if (
+            len(payload) != evidence.size_bytes
+            or hashlib.sha256(payload).hexdigest() != evidence.sha256
+        ):
+            raise RuntimeError("WIKI_RAW_INTEGRITY_FAILED")
 
     @staticmethod
     def _is_sha256(value: object) -> bool:

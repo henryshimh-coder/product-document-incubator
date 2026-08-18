@@ -45,6 +45,12 @@ class WikiChangeSet(DomainModel):
     conflict_count: int = Field(ge=0)
     evidence_gap_count: int = Field(ge=0)
     result_digest: Sha256Str
+    # Immutable Raw evidence captured before a transaction starts.  Defaults
+    # preserve construction compatibility for old pure-domain callers; the
+    # coordinator rejects those sentinel values before any write.
+    raw_path: NonEmptyStr = "raw/unknown"
+    raw_sha256: Sha256Str = "0" * 64
+    raw_size_bytes: int = Field(default=0, ge=0)
 
     def validate_contract(self) -> None:
         paths = [change.relative_path for change in self.page_changes]

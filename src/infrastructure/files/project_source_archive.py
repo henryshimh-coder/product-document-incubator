@@ -10,7 +10,7 @@ from filelock import FileLock
 
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.services.file_safety import sanitize_filename, validate_upload
-from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.project_library import ProjectPaths, require_safe_project_roles
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,10 @@ class ProjectSourceArchive:
     def save(self, filename: str, payload: bytes) -> ProjectArchiveResult:
         filename = validate_upload(filename, payload)
         digest = hashlib.sha256(payload).hexdigest()
+        try:
+            require_safe_project_roles(self.paths)
+        except ValueError as error:
+            raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, "UNSAFE_PROJECT_RAW_ROOT") from error
         raw_root = self.paths.raw_root.resolve()
         project_root = self.paths.project_root.resolve()
         if not raw_root.is_relative_to(project_root):
