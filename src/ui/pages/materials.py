@@ -11,7 +11,9 @@ from src.application.dto.materials import (
     ReclassifySourceInput,
     SensitiveComparisonInput,
 )
+from src.application.dto.wiki_ingest import IngestArchivedSourceInput
 from src.domain.enums import AuthorityLevel, SecurityLevel
+from src.domain.errors import AppError
 from src.domain.material_catalog import MATERIAL_TYPES, NEW_AUTHORITY_LEVELS
 
 
@@ -139,6 +141,7 @@ def _render_index(container: AppContainer) -> None:
             f"{item.get('ingest_status', '--')}"
         )
         st.code(str(item.get("archive_path", "")), language=None)
+        _render_wiki_ingest(container, item)
         if item.get("security_level") in {"L3", "L4"} and container.compare_sensitive_source:
             if st.button("与当前方案对照", key=f"compare-{item.get('source_id')}"):
                 try:
@@ -194,6 +197,58 @@ def _render_index(container: AppContainer) -> None:
                         st.error(f"材料分类调整失败，原分类保持不变。{error}")
                     else:
                         st.success(f"材料分类已调整为“{target.label}”。")
+
+
+def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
+    source_id = str(item.get("source_id", ""))
+    status = item.get("ingest_status")
+    if not source_id or container.wiki_ingest is None:
+        return
+    if status == "ingesting":
+        st.button(
+            "处理中",
+            key=f"material_ingesting_{source_id}",
+            disabled=True,
+        )
+        return
+    if status == "ingested":
+        source_page_path = item.get("source_page_path")
+        if source_page_path:
+            st.markdown(f"[查看 Wiki 结果]({source_page_path})")
+        else:
+            st.markdown("查看 Wiki 结果")
+        return
+    if status == "ingest_failed":
+        st.caption(f"安全错误码：{item.get('ingest_error_code') or 'WIKI_CHANGESET_INVALID'}")
+        label = "重新 Ingest"
+        key = f"material_reingest_{source_id}"
+    elif status == "reingest_recommended":
+        st.info("当前 Wiki 仍可读；请 Owner 明确重新 Ingest。")
+        label = "明确重新 Ingest"
+        key = f"material_reingest_{source_id}"
+    elif status == "pending_ingest":
+        label = "开始 Ingest"
+        key = f"material_ingest_{source_id}"
+    else:
+        return
+    if not st.button(label, key=key, type="primary"):
+        return
+    try:
+        result = container.wiki_ingest.execute(
+            IngestArchivedSourceInput(
+                project_id=container.require_project_id(),
+                source_id=source_id,
+                requested_by="Owner",
+            )
+        )
+    except AppError as error:
+        st.error(f"Wiki Ingest 失败：{error.code}")
+    except (OSError, RuntimeError, ValueError):
+        st.error("Wiki Ingest 失败：WIKI_CHANGESET_INVALID")
+    else:
+        st.success("已 Ingest 到当前项目 Wiki。")
+        if result.source_page_path:
+            st.markdown(f"[已 Ingest · 查看 Wiki 结果]({result.source_page_path})")
 
 
 def _series_options(container: AppContainer) -> tuple[str, ...]:

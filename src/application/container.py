@@ -20,6 +20,7 @@ from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
+from src.application.dto.wiki_ingest import IngestArchivedSourceInput, WikiIngestResultView
 from src.application.ports.incubator import (
     CurrentDocumentExporter,
     DocumentDraftPublisher,
@@ -36,6 +37,7 @@ from src.application.use_cases.export_current_document import ExportCurrentDocum
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
 from src.application.use_cases.incubate_document import IncubateDocument
+from src.application.use_cases.ingest_archived_source import IngestArchivedSource
 from src.application.use_cases.manage_projects import ManageProjects
 from src.application.use_cases.publish_baseline import PublishBaseline
 from src.application.use_cases.publish_document_draft import PublishDocumentDraft
@@ -90,6 +92,7 @@ from src.infrastructure.db.repositories import (
     SqliteReviewUnitOfWork,
     SqliteSourceRepository,
     SqliteStructureSuggestionRepository,
+    SqliteWikiIngestRunRepository,
 )
 from src.infrastructure.db.state_lock import acquire_shared, release
 from src.infrastructure.files.archive import SourceArchive
@@ -112,8 +115,10 @@ from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordi
 from src.infrastructure.gateways.composition import (
     DifyDocumentGatewaySettings,
     DifyGatewaySettings,
+    DifyWikiIngestGatewaySettings,
     WorkflowTimeouts,
     build_document_gateway,
+    build_wiki_ingest_gateway,
     build_workflow_gateways,
     default_workflow_timeouts,
 )
@@ -145,6 +150,10 @@ class SensitiveComparisonService(Protocol):
 
 class LocalDraftService(Protocol):
     def execute(self, command): ...
+
+
+class WikiIngestService(Protocol):
+    def execute(self, command: IngestArchivedSourceInput) -> WikiIngestResultView: ...
 
 
 class QueryService(Protocol):
@@ -234,6 +243,7 @@ class AppContainer:
     reclassify_source: SourceReclassificationService | None = None
     compare_sensitive_source: SensitiveComparisonService | None = None
     create_local_document_draft: LocalDraftService | None = None
+    wiki_ingest: WikiIngestService | None = None
     incubate_document: DocumentIncubation | None = None
     publish_document_draft: DocumentDraftPublisher | None = None
     export_current_document: CurrentDocumentExporter | None = None
@@ -332,6 +342,12 @@ def build_container(
                 reclassify_source=_build_reclassify_source(active_project),
                 compare_sensitive_source=_build_sensitive_comparison(active_project),
                 create_local_document_draft=_build_local_document_draft(active_project),
+                wiki_ingest=_build_wiki_ingest(
+                    settings=settings,
+                    active_project=active_project,
+                    environ=environ,
+                    http_factory=http_factory,
+                ),
                 incubate_document=_build_document_incubation(
                     settings=settings,
                     active_project=active_project,
@@ -481,6 +497,16 @@ def _build_stateful_container(
         ),
         "create_local_document_draft": (
             None if active_project is None else _build_local_document_draft(active_project)
+        ),
+        "wiki_ingest": (
+            None
+            if active_project is None
+            else _build_wiki_ingest(
+                settings=settings,
+                active_project=active_project,
+                environ=environ,
+                http_factory=http_factory,
+            )
         ),
         "incubate_document": (
             None
@@ -749,6 +775,55 @@ def _build_local_document_draft(active_project: ProjectContext) -> CreateLocalDo
         sources=SqliteSourceRepository(active_project.db_path),
         drafts=SqliteDocumentDraftRepository(active_project.db_path),
         store=DocumentStore(active_project.paths),
+    )
+
+
+def _build_wiki_ingest(
+    *,
+    settings: AppSettings,
+    active_project: ProjectContext,
+    environ: Mapping[str, str] | None,
+    http_factory,
+) -> IngestArchivedSource | None:
+    """Compose the optional 2.2 Wiki path only with its dedicated credential."""
+    if active_project.wiki_schema_version != "2.2":
+        return None
+    if environ is None:
+        load_dotenv(active_project.paths.project_root / ".env")
+    runtime = os.environ if environ is None else environ
+    base_url = runtime.get("DIFY_BASE_URL", "").strip()
+    wiki_key = runtime.get("DIFY_WIKI_INGEST_API_KEY", "").strip()
+    if not base_url or not wiki_key:
+        return None
+    try:
+        wiki_settings = DifyWikiIngestGatewaySettings(
+            base_url=base_url,
+            wiki_ingest_api_key=wiki_key,
+        )
+    except ValidationError as error:
+        message = "; ".join(entry["msg"] for entry in error.errors())
+        raise ConfigurationError(
+            f"Invalid Dify Wiki Ingest gateway configuration: {message}"
+        ) from None
+
+    def dictionary(name: str) -> tuple[str, ...]:
+        return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
+
+    return IngestArchivedSource(
+        paths=active_project.paths,
+        db_path=active_project.db_path,
+        sources=SqliteSourceRepository(active_project.db_path),
+        runs=SqliteWikiIngestRunRepository(active_project.db_path),
+        gateway=build_wiki_ingest_gateway(
+            wiki_settings,
+            timeouts=settings.timeouts,
+            http_factory=http_factory or httpx.Client,
+        ),
+        customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
+        strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
+        financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
+        leader_names=dictionary("REDACTION_LEADER_NAMES"),
+        unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
     )
 
 
