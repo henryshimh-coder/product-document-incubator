@@ -40,6 +40,29 @@ def _draft_input() -> dict[str, Any]:
     }
 
 
+def _wiki_draft_input(*, safe_for_external: bool = True) -> dict[str, Any]:
+    return {
+        "schema_version": "2.0",
+        "task_type": "document_draft",
+        "project_id": "PROJECT_A",
+        "project_name": "项目 A",
+        "project_description": "面向真实场景的产品文档",
+        "schema_headings": ["产品概述", "业务流程"],
+        "current_document_markdown": None,
+        "wiki_pages": [
+            {
+                "source_id": "SRC-001",
+                "page_path": "wiki/sources/SRC-001.md",
+                "page_type": "source",
+                "chunk_id": "SRC-001-SOURCE-0001",
+                "locator": "wiki_page:wiki/sources/SRC-001.md; chunk:1",
+                "excerpt": "已 Ingest 的安全 Wiki 内容。",
+                "safe_for_external": safe_for_external,
+            }
+        ],
+    }
+
+
 def _draft_output(
     *,
     markdown: str = "# 项目 A 产品方案\n\n## 产品概述\n\n支持独立项目。",
@@ -96,6 +119,18 @@ def test_document_gateway_rejects_unknown_citation_chunk() -> None:
 
     with pytest.raises(OutputValidationError, match="DOCUMENT_OUTPUT_INVALID"):
         gateway.generate_draft(_draft_input())
+
+
+def test_document_gateway_rejects_unsafe_wiki_pages_before_workflow_invocation() -> None:
+    from src.infrastructure.gateways.document_gateway import DocumentWorkflowGateway
+
+    client = FakeDocumentClient(_draft_output())
+    gateway = DocumentWorkflowGateway(client, timeout_seconds=90)
+
+    with pytest.raises(OutputValidationError, match="DOCUMENT_INPUT_INVALID"):
+        gateway.generate_draft(_wiki_draft_input(safe_for_external=False))
+
+    assert client.last_inputs is None
 
 
 def test_suggestion_input_contains_only_outlines() -> None:

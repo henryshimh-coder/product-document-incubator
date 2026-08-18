@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -12,13 +10,14 @@ from src.application.ports.wiki_ingest import (
     WikiIncubationContext,
     WikiSourceView,
 )
-from src.domain.enums import SecurityLevel
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.models import SourceRecord
 from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.wiki_outbound_context import (
+    _CITATION_TOKEN,
+    WikiOutboundContextBuilder,
+)
 
-_CITATION = re.compile(r"【(?P<source>[A-Za-z0-9_-]+)[：:]")
-_FRONTMATTER = re.compile(r"^---\n(?P<body>.*?)\n---\n", re.DOTALL)
 _PAGE_CHARS = 1800
 
 
@@ -28,6 +27,7 @@ class WikiContextReader:
     def __init__(self, *, paths: ProjectPaths, sources: SourceRepository) -> None:
         self.paths = paths
         self.sources = sources
+        self.outbound = WikiOutboundContextBuilder(paths, sources)
 
     def list_ingested_sources(self, project_id: str) -> list[WikiSourceView]:
         self._require_project(project_id)
@@ -65,24 +65,15 @@ class WikiContextReader:
             for topic_path_text in source.topic_page_paths:
                 topic_path = self._owned_wiki_path(topic_path_text, "topics")
                 topic_markdown = self._read_page(topic_path)
-                cited_ids = set(_CITATION.findall(topic_markdown))
-                referenced = self._source_records(project_id, cited_ids)
-                safe_for_external = bool(referenced) and all(
-                    item.security_level in (
-                        SecurityLevel.L1_PUBLIC_SIMULATED,
-                        SecurityLevel.L2_INTERNAL,
-                    )
-                    and item.is_redacted
-                    and item.allow_external_model
-                    for item in referenced
-                )
+                safe_topic = self._safe_topic_for_source(project_id, source, topic_path)
+                if safe_topic is None:
+                    continue
                 pages.extend(
                     self._page_chunks(
                         source.id,
                         topic_path,
                         "topic",
-                        topic_markdown,
-                        safe_for_external=safe_for_external,
+                        safe_topic.markdown,
                     )
                 )
                 conflicts.extend(self._section_items(topic_markdown, "冲突来源"))
@@ -104,23 +95,14 @@ class WikiContextReader:
             raise ValueError("WIKI_CONTEXT_SOURCE_NOT_INGESTED")
         return source
 
-    def _source_records(self, project_id: str, source_ids: set[str]) -> list[SourceRecord]:
-        records: list[SourceRecord] = []
-        for source_id in source_ids:
-            try:
-                record = self.sources.get(source_id)
-            except KeyError:
-                raise DomainError(
-                    ErrorCode.WIKI_CHANGESET_INVALID,
-                    "WIKI_CITATION_SOURCE_UNKNOWN",
-                ) from None
-            if record.project_id != project_id:
-                raise DomainError(ErrorCode.EXTERNAL_CALL_DENIED, "WIKI_CONTEXT_PROJECT_MISMATCH")
-            records.append(record)
-        return records
-
     def _validate_source_page(self, source: SourceRecord, markdown: str) -> None:
-        frontmatter = self._parse_frontmatter(markdown)
+        try:
+            frontmatter, _ = self.outbound._parse_topic(markdown)
+        except (TypeError, ValueError, yaml.YAMLError) as error:
+            raise DomainError(
+                ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
+                "WIKI_FRONTMATTER_INVALID",
+            ) from error
         if (
             frontmatter.get("project_id") != source.project_id
             or frontmatter.get("source_id") != source.id
@@ -130,11 +112,57 @@ class WikiContextReader:
                 ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
                 "WIKI_SOURCE_FRONTMATTER_MISMATCH",
             )
-        if not any(source_id == source.id for source_id in _CITATION.findall(markdown)):
+        cited = self._strict_citation_sources(markdown)
+        if not any(item.id == source.id for item in cited):
             raise DomainError(
                 ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
                 "WIKI_SOURCE_CITATION_MISSING",
             )
+
+    def _safe_topic_for_source(
+        self,
+        project_id: str,
+        source: SourceRecord,
+        topic_path: Path,
+    ):
+        try:
+            frontmatter, _ = self.outbound._parse_topic(self._read_page(topic_path))
+        except (TypeError, ValueError, yaml.YAMLError) as error:
+            raise DomainError(
+                ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
+                "WIKI_TOPIC_FRONTMATTER_INVALID",
+            ) from error
+        if frontmatter.get("project_id") != project_id:
+            raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "WIKI_TOPIC_PROJECT_MISMATCH")
+        relative_path = topic_path.relative_to(self.paths.project_root).as_posix()
+        projection = self.outbound.build(project_id, [relative_path])
+        if not projection.safe_related_topics:
+            return None
+        topic = projection.safe_related_topics[0]
+        if source.id not in topic.source_ids:
+            raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "WIKI_TOPIC_SOURCE_MISMATCH")
+        return topic
+
+    def _strict_citation_sources(self, markdown: str) -> list[SourceRecord]:
+        """Reuse T8's strict token and colon-resolution rules for source-page citations."""
+        sources: list[SourceRecord] = []
+        for line in markdown.splitlines():
+            matches = list(_CITATION_TOKEN.finditer(line))
+            remainder = _CITATION_TOKEN.sub("", line)
+            if "【" in remainder or "】" in remainder:
+                raise DomainError(
+                    ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
+                    "WIKI_SOURCE_CITATION_INVALID",
+                )
+            for match in matches:
+                resolved = self.outbound._resolve_citation(match.group("content"))
+                if resolved is None or resolved.project_id != self.paths.project_id:
+                    raise DomainError(
+                        ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
+                        "WIKI_SOURCE_CITATION_INVALID",
+                    )
+                sources.append(resolved)
+        return sources
 
     def _owned_wiki_path(self, relative_path: str | None, expected_folder: str) -> Path:
         if not isinstance(relative_path, str) or not relative_path.startswith(
@@ -155,22 +183,6 @@ class WikiContextReader:
         if not target.is_file():
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "WIKI_PAGE_MISSING")
         return target
-
-    @staticmethod
-    def _parse_frontmatter(markdown: str) -> dict[str, Any]:
-        match = _FRONTMATTER.match(markdown)
-        if match is None:
-            raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "WIKI_FRONTMATTER_MISSING")
-        try:
-            payload = yaml.safe_load(match.group("body"))
-        except yaml.YAMLError as error:
-            raise DomainError(
-                ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED,
-                "WIKI_FRONTMATTER_INVALID",
-            ) from error
-        if not isinstance(payload, dict):
-            raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "WIKI_FRONTMATTER_INVALID")
-        return payload
 
     @staticmethod
     def _read_page(path: Path) -> str:

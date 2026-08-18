@@ -32,6 +32,10 @@ class DocumentWorkflowGateway:
         except ValidationError as error:
             raise OutputValidationError("DOCUMENT_INPUT_INVALID") from error
         serialized = validated.model_dump(mode="json")
+        if serialized["wiki_pages"] is not None and any(
+            page["safe_for_external"] is not True for page in serialized["wiki_pages"]
+        ):
+            raise OutputValidationError("DOCUMENT_INPUT_INVALID")
         workflow_run_id, raw_output = invoke(
             self.client,
             serialized,

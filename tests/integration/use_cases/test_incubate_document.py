@@ -5,9 +5,13 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from src.application.dto.documents import IncubateDocumentInput
 from src.domain.enums import AuthorityLevel, SecurityLevel
+from src.domain.errors import DomainError
 from src.domain.models import Project, SourceRecord
+from src.infrastructure.db.connection import connect
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
     SqliteDocumentDraftRepository,
@@ -60,6 +64,16 @@ def _environment(tmp_path: Path, *, with_current: bool = False):
     paths.wiki_root.mkdir(parents=True)
     paths.schema_root.mkdir(parents=True)
     paths.system_root.mkdir(parents=True)
+    (paths.system_root / "project.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "2.2",
+                "project_id": "NEW",
+                "allow_external_model": True,
+            }
+        ),
+        encoding="utf-8",
+    )
     (paths.wiki_root / "log.md").write_text("# 项目日志\n", encoding="utf-8")
     (paths.schema_root / "product-document-template.md").write_text(
         "# 新产品方案\n\n## 产品概述\n\n## 验收标准\n",
@@ -147,6 +161,46 @@ def _command() -> IncubateDocumentInput:
     return IncubateDocumentInput(project_id="NEW", source_ids=["SRC-001"], requested_by="Owner")
 
 
+def _add_source(service, source_id: str, *, security_level: SecurityLevel) -> SourceRecord:
+    template = service.sources.get("SRC-001")
+    source = template.model_copy(
+        update={
+            "id": source_id,
+            "sha256": ("b" if security_level == SecurityLevel.L2_INTERNAL else "c") * 64,
+            "archive_path": f"raw/2026/{source_id}/source.md",
+            "security_level": security_level,
+            "source_page_path": None,
+            "topic_page_paths": [],
+            "allow_external_model": security_level == SecurityLevel.L2_INTERNAL,
+        }
+    )
+    service.sources.add(source)
+    return source
+
+
+def _attach_topic(
+    paths: ProjectPaths,
+    service,
+    *,
+    body: str,
+    project_id: str = "NEW",
+) -> str:
+    path = paths.wiki_root / "topics/product-principles.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\npage_type: topic\ntopic_id: product-principles\nproject_id: "
+        + project_id
+        + "\n---\n# 主题：产品原则\n\n## 当前综合结论\n\n- "
+        + body
+        + "\n",
+        encoding="utf-8",
+    )
+    relative = path.relative_to(paths.project_root).as_posix()
+    source = service.sources.get("SRC-001")
+    service.sources.update(source.model_copy(update={"topic_page_paths": [relative]}))
+    return relative
+
+
 def test_initial_incubation_creates_draft_without_current_baseline(tmp_path: Path) -> None:
     paths, service, gateway = _environment(tmp_path)
     (paths.raw_root / "2026" / "SRC-001" / "需求.md").unlink()
@@ -213,6 +267,56 @@ def test_sensitive_wiki_uses_local_candidate_without_document_gateway(tmp_path: 
     result = service.execute(_command())
 
     assert result.draft.generation_mode.value == "local_manual"
+    assert gateway.inputs is None
+    with connect(service.model_call_logger.db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM model_call_logs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "topic_body",
+    [
+        "安全结论【SRC-001：section】 SECRET-COLON 【SRC:L3:section】",
+        "安全结论【SRC-001：section】 SECRET-CROSS-LINE 【SRC:L3\n：section】",
+        "安全结论【SRC-001：section】 SECRET-MALFORMED 【SRC.L3：section】",
+    ],
+)
+def test_incubation_excludes_entire_unsafe_topic_from_external_wiki_context(
+    tmp_path: Path,
+    topic_body: str,
+) -> None:
+    paths, service, gateway = _environment(tmp_path)
+    _add_source(service, "SRC:L3", security_level=SecurityLevel.L3_CONFIDENTIAL)
+    _attach_topic(paths, service, body=topic_body)
+
+    service.execute(_command())
+
+    assert gateway.inputs is not None
+    serialized = json.dumps(gateway.inputs, ensure_ascii=False)
+    assert "SECRET-" not in serialized
+    assert "wiki/topics/product-principles.md" not in serialized
+
+
+@pytest.mark.parametrize(
+    "project_id,topic_body,error_detail",
+    [
+        ("OTHER", "安全结论【SRC-001：section】", "WIKI_TOPIC_PROJECT_MISMATCH"),
+        ("NEW", "其他结论【SRC-OTHER：section】", "WIKI_TOPIC_SOURCE_MISMATCH"),
+    ],
+)
+def test_incubation_rejects_topic_with_project_or_source_ownership_mismatch(
+    tmp_path: Path,
+    project_id: str,
+    topic_body: str,
+    error_detail: str,
+) -> None:
+    paths, service, gateway = _environment(tmp_path)
+    if "SRC-OTHER" in topic_body:
+        _add_source(service, "SRC-OTHER", security_level=SecurityLevel.L2_INTERNAL)
+    _attach_topic(paths, service, body=topic_body, project_id=project_id)
+
+    with pytest.raises(DomainError, match=error_detail):
+        service.execute(_command())
+
     assert gateway.inputs is None
 
 

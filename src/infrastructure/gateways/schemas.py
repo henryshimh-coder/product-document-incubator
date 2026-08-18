@@ -298,7 +298,7 @@ class WikiDocumentPageInput(WorkflowOutput):
     chunk_id: IdentifierStr
     locator: ScopeStr
     excerpt: MaterialFragment
-    safe_for_external: bool
+    safe_for_external: Literal[True]
 
 
 class DocumentDraftWorkflowInput(WorkflowOutput):
