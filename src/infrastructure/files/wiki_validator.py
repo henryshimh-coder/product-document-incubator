@@ -114,7 +114,12 @@ class WikiValidator:
         if not self._is_topic_path(relative_path):
             raise ValueError("WIKI_TARGET_TOPIC_UNAUTHORIZED")
         target = (self.paths.project_root / relative_path).resolve()
-        if not target.is_relative_to(self.paths.wiki_root) or not target.is_file():
+        topics_root = (self.paths.wiki_root / "topics").resolve()
+        if (
+            not target.is_relative_to(self.paths.wiki_root)
+            or not target.is_relative_to(topics_root)
+            or not target.is_file()
+        ):
             raise ValueError("WIKI_TARGET_TOPIC_UNAUTHORIZED")
         return relative_path
 

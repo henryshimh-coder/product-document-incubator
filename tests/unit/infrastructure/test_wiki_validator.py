@@ -292,3 +292,19 @@ def test_validator_rejects_missing_existing_topic(paths, source):
             existing_topic_paths=["wiki/topics/unapproved-topic.md"],
             new_topic_count=0,
         )
+
+
+def test_validator_rejects_existing_topic_symlink_outside_topics(paths, source):
+    """Catches a topic alias resolving to a non-topic Wiki page."""
+    topics_root = paths.wiki_root / "topics"
+    topics_root.mkdir()
+    (paths.wiki_root / "index.md").write_text("# Index\n", encoding="utf-8")
+    (topics_root / "alias.md").symlink_to("../index.md")
+
+    with pytest.raises(ValueError, match="WIKI_TARGET_TOPIC_UNAUTHORIZED"):
+        WikiValidator(
+            paths,
+            source,
+            existing_topic_paths=["wiki/topics/alias.md"],
+            new_topic_count=0,
+        )
