@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from src.domain.wiki import WikiChangeSet, WikiIngestRun, WikiTransactionResult
 
 if TYPE_CHECKING:
+    from src.infrastructure.files.wiki_outbound_context import WikiOutboundAuthorization
     from src.infrastructure.gateways._common import OutboundSafetyProof
     from src.infrastructure.gateways.schemas import WikiIngestWorkflowOutput
 
@@ -17,6 +18,7 @@ class WikiIngestGenerating(Protocol):
         inputs: Mapping[str, Any],
         *,
         safety_proof: OutboundSafetyProof,
+        wiki_authorization: WikiOutboundAuthorization,
         user: str | None = None,
         timeout_seconds: int | None = None,
     ) -> WikiIngestWorkflowOutput: ...

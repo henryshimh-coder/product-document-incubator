@@ -7,6 +7,10 @@ from pydantic import ValidationError
 
 from src.application.ports.workflow_gateway import WorkflowGateway
 from src.domain.errors import OutputValidationError
+from src.infrastructure.files.wiki_outbound_context import (
+    WikiOutboundAuthorization,
+    validate_wiki_outbound_authorization,
+)
 from src.infrastructure.gateways._common import OutboundSafetyProof, invoke, validate_input
 from src.infrastructure.gateways.schemas import (
     WikiIngestWorkflowInput,
@@ -26,6 +30,7 @@ class WikiIngestGateway:
         inputs: Mapping[str, Any],
         *,
         safety_proof: OutboundSafetyProof,
+        wiki_authorization: WikiOutboundAuthorization,
         user: str | None = None,
         timeout_seconds: int | None = None,
     ) -> WikiIngestWorkflowOutput:
@@ -35,6 +40,7 @@ class WikiIngestGateway:
             invalid_detail="WIKI_INGEST_INPUT_INVALID",
             safety_proof=safety_proof,
         )
+        validate_wiki_outbound_authorization(validated_inputs, wiki_authorization)
         effective_timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         _, raw_output = invoke(
             self.client,

@@ -121,6 +121,7 @@ def source_repository() -> _SourceRepository:
             _source("SRC-L2", security_level=SecurityLevel.L2_INTERNAL),
             _source("SRC-L3", security_level=SecurityLevel.L3_CONFIDENTIAL),
             _source("SRC-L4", security_level=SecurityLevel.L4_RESTRICTED),
+            _source("SRC.L3", security_level=SecurityLevel.L3_CONFIDENTIAL),
             _source(
                 "SRC-UNREDACTED",
                 security_level=SecurityLevel.L2_INTERNAL,
@@ -140,7 +141,7 @@ def source_repository() -> _SourceRepository:
     )
 
 
-@pytest.mark.parametrize("restricted_source_id", ["SRC-L3", "SRC-L4"])
+@pytest.mark.parametrize("restricted_source_id", ["SRC-L3", "SRC-L4", "SRC.L3"])
 def test_projection_excludes_entire_topic_with_any_restricted_source(
     project_wiki: _ProjectWiki,
     source_repository: _SourceRepository,
@@ -160,6 +161,34 @@ def test_projection_excludes_entire_topic_with_any_restricted_source(
     assert "SECRET-PRICE" not in serialized
     assert "pricing" not in serialized
     assert path not in serialized
+    assert projection.safe_related_topics == []
+    assert projection.local_sensitive_comparison_required is True
+    assert projection.excluded_topic_count == 1
+
+
+def test_projection_excludes_whole_topic_for_any_malformed_or_unknown_citation_marker(
+    project_wiki: _ProjectWiki,
+    source_repository: _SourceRepository,
+) -> None:
+    path = project_wiki.write_topic(
+        "mixed-sensitive",
+        citations=["SRC-L1"],
+        body="SECRET-MIXED 【SRC.L3：section】 【SRC-UNKNOWN without-locator】",
+    )
+
+    projection = WikiOutboundContextBuilder(project_wiki.paths, source_repository).build(
+        project_id="PROJECT_A", related_topic_paths=[path]
+    )
+
+    serialized = projection.model_dump_json()
+    for forbidden in (
+        "mixed-sensitive",
+        "SECRET-MIXED",
+        "SRC.L3",
+        "SRC-UNKNOWN",
+        path,
+    ):
+        assert forbidden not in serialized
     assert projection.safe_related_topics == []
     assert projection.local_sensitive_comparison_required is True
     assert projection.excluded_topic_count == 1

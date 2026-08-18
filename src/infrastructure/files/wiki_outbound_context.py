@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
-from collections.abc import Sequence
+import secrets
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.domain.enums import SecurityLevel
+from src.domain.errors import GatewayError
 from src.domain.models import SourceRecord
 from src.infrastructure.files.project_library import ProjectPaths
 
-_CITATION = re.compile(r"【(?P<source_id>[A-Za-z0-9][A-Za-z0-9_-]{0,127})[：:][^】]+】")
+_CITATION_TOKEN = re.compile(r"【(?P<content>[^【】]*)】")
 _BULLET = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
+_AUTHORIZATION_KEY = secrets.token_bytes(32)
+_AUTHORIZATION_ISSUER = object()
+_AUTHORIZATION_DETAIL = "WIKI_OUTBOUND_AUTHORIZATION_INVALID"
 
 
 class _SourceReading(Protocol):
@@ -40,6 +47,92 @@ class WikiOutboundProjection(BaseModel):
     safe_related_topics: list[SafeWikiTopicInput] = Field(max_length=20)
     local_sensitive_comparison_required: bool
     excluded_topic_count: int = Field(ge=0)
+
+
+class WikiOutboundAuthorization:
+    """Opaque, process-local attestation over builder-approved Wiki workflow inputs."""
+
+    __slots__ = ("_payload_digest", "_revalidate", "_signature")
+
+    def __init__(
+        self,
+        issuer: object,
+        *,
+        payload_digest: bytes,
+        signature: bytes,
+        revalidate: Callable[[Mapping[str, Any]], None],
+    ) -> None:
+        if issuer is not _AUTHORIZATION_ISSUER:
+            raise TypeError("WikiOutboundAuthorization must be created by the context builder")
+        object.__setattr__(self, "_payload_digest", payload_digest)
+        object.__setattr__(self, "_signature", signature)
+        object.__setattr__(self, "_revalidate", revalidate)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("WikiOutboundAuthorization is immutable")
+
+    def __repr__(self) -> str:
+        return "WikiOutboundAuthorization(<opaque>)"
+
+
+def _authorization_invalid() -> GatewayError:
+    return GatewayError.workflow_input_invalid(_AUTHORIZATION_DETAIL)
+
+
+def _canonical_workflow_inputs(inputs: Mapping[str, Any]) -> tuple[dict[str, Any], bytes]:
+    from src.infrastructure.gateways.schemas import WikiIngestWorkflowInput
+
+    try:
+        serialized = WikiIngestWorkflowInput.model_validate(inputs).model_dump(mode="json")
+    except ValidationError:
+        raise _authorization_invalid() from None
+    canonical = json.dumps(
+        serialized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return serialized, hashlib.sha256(canonical).digest()
+
+
+def _sign_authorization(
+    payload_digest: bytes,
+    revalidate: Callable[[Mapping[str, Any]], None],
+) -> bytes:
+    return hmac.digest(
+        _AUTHORIZATION_KEY,
+        b"wiki-outbound-authorization-v1\n"
+        + payload_digest
+        + b"\n"
+        + str(id(revalidate)).encode("ascii"),
+        "sha256",
+    )
+
+
+def validate_wiki_outbound_authorization(
+    inputs: Mapping[str, Any],
+    authorization: WikiOutboundAuthorization,
+) -> None:
+    """Reject any payload not exactly attested by the trusted projection builder."""
+
+    serialized, payload_digest = _canonical_workflow_inputs(inputs)
+    if not isinstance(authorization, WikiOutboundAuthorization):
+        raise _authorization_invalid()
+    try:
+        valid = hmac.compare_digest(payload_digest, authorization._payload_digest) and (
+            hmac.compare_digest(
+                _sign_authorization(payload_digest, authorization._revalidate),
+                authorization._signature,
+            )
+        )
+    except (AttributeError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise _authorization_invalid()
+    try:
+        authorization._revalidate(serialized)
+    except (KeyError, TypeError, ValueError, ValidationError):
+        raise _authorization_invalid() from None
 
 
 class WikiOutboundContextBuilder:
@@ -84,6 +177,76 @@ class WikiOutboundContextBuilder:
             local_sensitive_comparison_required=excluded_count > 0,
             excluded_topic_count=excluded_count,
         )
+
+    def authorize(
+        self,
+        inputs: Mapping[str, Any],
+        *,
+        related_topic_paths: Sequence[str],
+    ) -> WikiOutboundAuthorization:
+        """Attest exact inputs only after trusted project, source, and projection checks."""
+
+        serialized, payload_digest = _canonical_workflow_inputs(inputs)
+        paths = tuple(related_topic_paths)
+        self._validate_authorizable(serialized, paths)
+
+        def revalidate(current_inputs: Mapping[str, Any]) -> None:
+            self._validate_authorizable(current_inputs, paths)
+
+        return WikiOutboundAuthorization(
+            _AUTHORIZATION_ISSUER,
+            payload_digest=payload_digest,
+            signature=_sign_authorization(payload_digest, revalidate),
+            revalidate=revalidate,
+        )
+
+    def _validate_authorizable(
+        self,
+        serialized: Mapping[str, Any],
+        related_topic_paths: Sequence[str],
+    ) -> None:
+        project_id = serialized["project_id"]
+        if project_id != self.paths.project_id or not self._project_allows_external_model(
+            project_id
+        ):
+            raise _authorization_invalid()
+
+        expected_projection = self.build(project_id, related_topic_paths)
+        expected_topics = [
+            topic.model_dump(mode="json") for topic in expected_projection.safe_related_topics
+        ]
+        if (
+            serialized["safe_index_projection"]
+            != expected_projection.safe_index_projection
+            or serialized["safe_related_topics"] != expected_topics
+        ):
+            raise _authorization_invalid()
+
+        source_input = serialized["source"]
+        try:
+            source = self.sources.get(source_input["id"])
+        except (KeyError, TypeError, ValueError):
+            raise _authorization_invalid() from None
+        if not self._source_record_is_exportable(source, project_id):
+            raise _authorization_invalid()
+        expected_source = {
+            "id": source.id,
+            "source_type": source.source_type,
+            "material_name": source.material_name or Path(source.original_filename).stem,
+            "document_version": source.document_version,
+            "document_date": source.document_date.isoformat(),
+            "applicable_scope": source.applicable_baseline_version,
+            "authority_level": source.authority_level.value,
+            "security_level": source.security_level.value,
+        }
+        if source_input != expected_source:
+            raise _authorization_invalid()
+
+        chunk_ids = [chunk["chunk_id"] for chunk in serialized["source_chunks"]]
+        if len(chunk_ids) != len(set(chunk_ids)) or any(
+            not chunk_id.startswith(f"{source.id}-") for chunk_id in chunk_ids
+        ):
+            raise _authorization_invalid()
 
     def _project_allows_external_model(self, project_id: str) -> bool:
         project_path = self.paths.system_root / "project.json"
@@ -140,23 +303,33 @@ class WikiOutboundContextBuilder:
         if not isinstance(title, str) or not title.strip():
             return None
 
+        body_without_complete_tokens = _CITATION_TOKEN.sub("", body)
+        if "【" in body_without_complete_tokens or "】" in body_without_complete_tokens:
+            return None
+
         statements: list[str] = []
         source_ids: list[str] = []
         for line in body.splitlines():
-            matches = list(_CITATION.finditer(line))
+            matches = list(_CITATION_TOKEN.finditer(line))
             if not matches:
                 continue
-            statement = _BULLET.sub("", _CITATION.sub("", line)).strip()
+            resolved_sources = [
+                self._resolve_citation(match.group("content")) for match in matches
+            ]
+            if any(source is None for source in resolved_sources):
+                return None
+            statement = _BULLET.sub("", _CITATION_TOKEN.sub("", line)).strip()
             if not statement or statement.startswith("#"):
                 return None
             statements.append(statement)
-            for match in matches:
-                source_id = match.group("source_id")
+            for source in resolved_sources:
+                assert source is not None
+                if not self._source_record_is_exportable(source, project_id):
+                    return None
+                source_id = source.id
                 if source_id not in source_ids:
                     source_ids.append(source_id)
         if not statements or not source_ids:
-            return None
-        if any(not self._source_is_exportable(source_id, project_id) for source_id in source_ids):
             return None
         return SafeWikiTopicInput(
             title=title,
@@ -164,11 +337,23 @@ class WikiOutboundContextBuilder:
             source_ids=source_ids,
         )
 
-    def _source_is_exportable(self, source_id: str, project_id: str) -> bool:
-        try:
-            source = self.sources.get(source_id)
-        except (KeyError, TypeError, ValueError):
-            return False
+    def _resolve_citation(self, content: str) -> SourceRecord | None:
+        for index, character in enumerate(content):
+            if character not in {":", "："}:
+                continue
+            source_id = content[:index].strip()
+            locator = content[index + 1 :].strip()
+            if not source_id or not locator:
+                continue
+            try:
+                source = self.sources.get(source_id)
+            except (KeyError, TypeError, ValueError):
+                continue
+            return source
+        return None
+
+    @staticmethod
+    def _source_record_is_exportable(source: SourceRecord, project_id: str) -> bool:
         return all(
             (
                 source.project_id == project_id,
