@@ -58,6 +58,14 @@ class ErrorCode(StrEnum):
     PUBLISH_SOURCE_INTEGRITY_FAILED = "PUBLISH_SOURCE_INTEGRITY_FAILED"
     PUBLISH_CITATION_UNVERIFIABLE = "PUBLISH_CITATION_UNVERIFIABLE"
     RELATION_CONFLICT = "RELATION_CONFLICT"
+    WIKI_SCHEMA_MISSING = "WIKI_SCHEMA_MISSING"
+    WIKI_SOURCE_INTEGRITY_FAILED = "WIKI_SOURCE_INTEGRITY_FAILED"
+    WIKI_EXTERNAL_CALL_DENIED = "WIKI_EXTERNAL_CALL_DENIED"
+    WIKI_CHANGESET_INVALID = "WIKI_CHANGESET_INVALID"
+    WIKI_CONCURRENT_MODIFICATION = "WIKI_CONCURRENT_MODIFICATION"
+    WIKI_TRANSACTION_FAILED = "WIKI_TRANSACTION_FAILED"
+    WIKI_RECOVERY_REQUIRED = "WIKI_RECOVERY_REQUIRED"
+    WIKI_INGEST_ALREADY_RUNNING = "WIKI_INGEST_ALREADY_RUNNING"
     BASELINE_NOT_FOUND = "BASELINE_NOT_FOUND"
     NOT_FOUND = "NOT_FOUND"
 
@@ -153,6 +161,20 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
         "正式依据缺少可验证的引用定位，无法发布"
     ),
     ErrorCode.RELATION_CONFLICT: ErrorDefinition("追溯关系数据冲突，已阻断写入"),
+    ErrorCode.WIKI_SCHEMA_MISSING: ErrorDefinition("Ingest Schema 缺失，请修复脚手架后重试"),
+    ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED: ErrorDefinition("Raw SHA-256 不一致，不能继续 Ingest"),
+    ErrorCode.WIKI_EXTERNAL_CALL_DENIED: ErrorDefinition("安全策略不允许外部调用，请使用本地路线"),
+    ErrorCode.WIKI_CHANGESET_INVALID: ErrorDefinition("变更集结构或引用非法，请修复后重试"),
+    ErrorCode.WIKI_CONCURRENT_MODIFICATION: ErrorDefinition(
+        "目标 Wiki 页面已被修改，请重新读取后重试"
+    ),
+    ErrorCode.WIKI_TRANSACTION_FAILED: ErrorDefinition(
+        "Wiki 事务提交失败并已回滚，请重试", retryable=True
+    ),
+    ErrorCode.WIKI_RECOVERY_REQUIRED: ErrorDefinition("Wiki 状态需要恢复检查后才能继续"),
+    ErrorCode.WIKI_INGEST_ALREADY_RUNNING: ErrorDefinition(
+        "当前项目已有 Wiki Ingest 正在执行", retryable=True
+    ),
     ErrorCode.BASELINE_NOT_FOUND: ErrorDefinition("当前没有已生效产品方案"),
     ErrorCode.NOT_FOUND: ErrorDefinition("未找到目标记录"),
 }
