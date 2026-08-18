@@ -120,6 +120,7 @@ from src.infrastructure.files.project_source_archive import ProjectSourceArchive
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
+from src.infrastructure.files.wiki_context_reader import WikiContextReader
 from src.infrastructure.gateways.composition import (
     DifyDocumentGatewaySettings,
     DifyGatewaySettings,
@@ -887,25 +888,30 @@ def _build_document_incubation(
     active_project: ProjectContext,
     environ: Mapping[str, str] | None,
     http_factory,
-) -> IncubateDocument | None:
+) -> IncubateDocument:
     """Compose the optional 2.0 drafting path without enabling legacy workflows."""
     if environ is None:
         load_dotenv(active_project.paths.project_root / ".env")
     runtime = os.environ if environ is None else environ
     base_url = runtime.get("DIFY_BASE_URL", "").strip()
     document_key = runtime.get("DIFY_DOCUMENT_API_KEY", "").strip()
-    if not base_url or not document_key:
-        return None
-    try:
-        document_settings = DifyDocumentGatewaySettings(
-            base_url=base_url,
-            document_api_key=document_key,
+    gateway = None
+    if base_url and document_key:
+        try:
+            document_settings = DifyDocumentGatewaySettings(
+                base_url=base_url,
+                document_api_key=document_key,
+            )
+        except ValidationError as error:
+            message = "; ".join(entry["msg"] for entry in error.errors())
+            raise ConfigurationError(
+                f"Invalid Dify document gateway configuration: {message}"
+            ) from None
+        gateway = build_document_gateway(
+            document_settings,
+            timeouts=settings.timeouts,
+            http_factory=http_factory or httpx.Client,
         )
-    except ValidationError as error:
-        message = "; ".join(entry["msg"] for entry in error.errors())
-        raise ConfigurationError(
-            f"Invalid Dify document gateway configuration: {message}"
-        ) from None
 
     def dictionary(name: str) -> tuple[str, ...]:
         return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
@@ -916,12 +922,13 @@ def _build_document_incubation(
         sources=SqliteSourceRepository(active_project.db_path),
         drafts=SqliteDocumentDraftRepository(active_project.db_path),
         store=DocumentStore(active_project.paths),
-        gateway=build_document_gateway(
-            document_settings,
-            timeouts=settings.timeouts,
-            http_factory=http_factory or httpx.Client,
+        gateway=gateway,
+        wiki_context=WikiContextReader(
+            paths=active_project.paths,
+            sources=SqliteSourceRepository(active_project.db_path),
         ),
         model_call_logger=ModelCallLogger(active_project.db_path),
+        local_draft_creator=_build_local_document_draft(active_project),
         accepted_suggestions=SqliteStructureSuggestionRepository(active_project.db_path),
         customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
         strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),

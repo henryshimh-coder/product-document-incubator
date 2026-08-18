@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from src.domain.enums import (
     AuthorityLevel,
@@ -289,6 +289,18 @@ class DocumentSourceFragmentInput(WorkflowOutput):
     authority_level: AuthorityLevel
 
 
+class WikiDocumentPageInput(WorkflowOutput):
+    """A bounded, traceable Wiki page chunk used for document incubation."""
+
+    source_id: IdentifierStr
+    page_path: ScopeStr
+    page_type: Literal["source", "topic"]
+    chunk_id: IdentifierStr
+    locator: ScopeStr
+    excerpt: MaterialFragment
+    safe_for_external: bool
+
+
 class DocumentDraftWorkflowInput(WorkflowOutput):
     schema_version: Literal["2.0"]
     task_type: Literal["document_draft"]
@@ -300,10 +312,21 @@ class DocumentDraftWorkflowInput(WorkflowOutput):
         str | None,
         StringConstraints(max_length=MAX_DOCUMENT_MARKDOWN_CHARS),
     ] = None
-    source_fragments: list[DocumentSourceFragmentInput] = Field(
+    source_fragments: list[DocumentSourceFragmentInput] | None = Field(
+        default=None,
+        max_length=MAX_DOCUMENT_SECTIONS,
+    )
+    wiki_pages: list[WikiDocumentPageInput] | None = Field(
+        default=None,
         min_length=1,
         max_length=MAX_DOCUMENT_SECTIONS,
     )
+
+    @model_validator(mode="after")
+    def require_one_context_type(self) -> DocumentDraftWorkflowInput:
+        if (self.source_fragments is None) == (self.wiki_pages is None):
+            raise ValueError("document draft requires exactly one context type")
+        return self
 
 
 class SectionCitationOutput(WorkflowOutput):

@@ -14,13 +14,13 @@ def render(container: AppContainer) -> None:
     project_id = container.require_project_id()
     service = container.incubate_document
     st.title("文档孵化")
-    st.caption("基于已归档材料生成候选产品文档；候选不会直接覆盖当前生效方案。")
+    st.caption("基于已 Ingest 的 Wiki 页面生成候选产品文档；候选不会直接覆盖当前生效方案。")
     if service is None:
         st.info("文档工作流尚未配置。请设置 DIFY_BASE_URL 与 DIFY_DOCUMENT_API_KEY 后启用。")
         return
     sources = service.list_sources(project_id)
     if not sources:
-        st.warning("请先在“原始材料”归档至少一份允许外部模型调用且已脱敏的材料。")
+        st.warning("请先在“原始材料”完成至少一份材料的 Ingest。")
         return
     labels = {item["id"]: item["label"] for item in sources}
     selected = st.multiselect(
@@ -29,6 +29,16 @@ def render(container: AppContainer) -> None:
         format_func=labels.__getitem__,
         key="incubate_source_ids",
     )
+    if selected:
+        selected_views = [item for item in sources if item["id"] in selected]
+        page_count = sum(int(item["wiki_page_count"]) for item in selected_views)
+        conflict_count = sum(int(item["conflict_count"]) for item in selected_views)
+        gap_count = sum(int(item["evidence_gap_count"]) for item in selected_views)
+        st.caption(f"本次将使用 {page_count} 个 Wiki 页面。")
+        if conflict_count:
+            st.warning(f"所选 Wiki 中有 {conflict_count} 项未解决冲突，请在候选审核时确认。")
+        if gap_count:
+            st.info(f"所选 Wiki 中有 {gap_count} 项证据缺口。")
     if st.button(
         "生成候选产品文档", type="primary", disabled=not selected, key="incubate_generate"
     ):
@@ -96,7 +106,7 @@ def _render_drafts(container: AppContainer) -> None:
 
 
 def _render_context(source_ids: list[str], missing: list[str], gaps: list[str]) -> None:
-    st.caption(f"材料：{'、'.join(source_ids)}")
+    st.caption(f"Wiki 来源：{'、'.join(source_ids)}")
     if missing:
         st.warning(f"待补充章节：{'、'.join(missing)}")
     if gaps:

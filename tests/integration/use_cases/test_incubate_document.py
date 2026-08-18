@@ -16,6 +16,7 @@ from src.infrastructure.db.repositories import (
 )
 from src.infrastructure.files.document_store import DocumentStore
 from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.wiki_context_reader import WikiContextReader
 from src.infrastructure.observability.model_call_logger import ModelCallLogger
 
 NOW = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
@@ -27,9 +28,8 @@ class FakeDocumentGateway:
 
     def generate_draft(self, inputs: dict) -> dict:
         self.inputs = inputs
-        fragment = inputs["source_fragments"][0]
-        assert fragment["source_type"] == "product_requirement"
-        assert fragment["authority_level"] == "formal_decision"
+        page = inputs["wiki_pages"][0]
+        assert page["source_id"] == "SRC-001"
         return {
             "workflow_run_id": "WF-DOCUMENT-001",
             "result": {
@@ -37,14 +37,14 @@ class FakeDocumentGateway:
                 "summary": "已生成首版候选。",
                 "missing_sections": ["验收标准"],
                 "evidence_gaps": [],
-                "source_ids": [fragment["source_id"]],
+                "source_ids": [page["source_id"]],
                 "section_citations": [
                     {
                         "heading": "产品概述",
-                        "source_id": fragment["source_id"],
-                        "chunk_id": fragment["chunk_id"],
-                        "locator": fragment["locator"],
-                        "excerpt": fragment["excerpt"],
+                        "source_id": page["source_id"],
+                        "chunk_id": page["chunk_id"],
+                        "locator": page["locator"],
+                        "excerpt": page["excerpt"],
                     }
                 ],
             },
@@ -111,9 +111,19 @@ def _environment(tmp_path: Path, *, with_current: bool = False):
             is_redacted=True,
             allow_external_model=True,
             is_sandbox=False,
-            ingest_status="archived",
+            ingest_status="ingested",
+            source_page_path="wiki/sources/SRC-001-需求.md",
             created_at=NOW,
         )
+    )
+    source_page = paths.wiki_root / "sources/SRC-001-需求.md"
+    source_page.parent.mkdir(parents=True)
+    source_page.write_text(
+        "---\nproject_id: NEW\nsource_id: SRC-001\nraw_sha256: "
+        + hashlib.sha256(payload).hexdigest()
+        + "\n---\n# 来源：需求\n\n产品文档孵化内容。\n\n"
+        "来源定位【SRC-001：heading:产品目标; line:1】",
+        encoding="utf-8",
     )
     gateway = FakeDocumentGateway()
     service = IncubateDocument(
@@ -123,6 +133,10 @@ def _environment(tmp_path: Path, *, with_current: bool = False):
         drafts=SqliteDocumentDraftRepository(db_path),
         store=DocumentStore(paths),
         gateway=gateway,
+        wiki_context=WikiContextReader(
+            paths=paths,
+            sources=SqliteSourceRepository(db_path),
+        ),
         model_call_logger=ModelCallLogger(db_path),
         now=lambda: NOW,
     )
@@ -135,6 +149,7 @@ def _command() -> IncubateDocumentInput:
 
 def test_initial_incubation_creates_draft_without_current_baseline(tmp_path: Path) -> None:
     paths, service, gateway = _environment(tmp_path)
+    (paths.raw_root / "2026" / "SRC-001" / "需求.md").unlink()
 
     result = service.execute(_command())
 
@@ -148,6 +163,57 @@ def test_initial_incubation_creates_draft_without_current_baseline(tmp_path: Pat
     assert not (paths.wiki_root / "current" / "当前产品方案.md").exists()
     assert gateway.inputs is not None
     assert gateway.inputs["current_document_markdown"] is None
+    assert gateway.inputs["wiki_pages"][0]["page_path"] == "wiki/sources/SRC-001-需求.md"
+
+
+def test_incubation_lists_only_ingested_sources(tmp_path: Path) -> None:
+    _, service, _ = _environment(tmp_path)
+
+    assert service.list_sources("NEW") == [
+        {
+            "id": "SRC-001",
+            "label": "需求.md · SRC-001",
+            "wiki_page_count": 1,
+            "conflict_count": 0,
+            "evidence_gap_count": 0,
+        }
+    ]
+
+
+def test_incubation_excludes_pending_sources(tmp_path: Path) -> None:
+    _, service, _ = _environment(tmp_path)
+    source = service.sources.get("SRC-001")
+    service.sources.update(source.model_copy(update={"ingest_status": "pending_ingest"}))
+
+    assert service.list_sources("NEW") == []
+
+
+def test_sensitive_wiki_uses_local_candidate_without_document_gateway(tmp_path: Path) -> None:
+    from src.application.use_cases.create_local_document_draft import CreateLocalDocumentDraft
+
+    paths, service, gateway = _environment(tmp_path)
+    source = service.sources.get("SRC-001")
+    service.sources.update(
+        source.model_copy(
+            update={
+                "security_level": SecurityLevel.L3_CONFIDENTIAL,
+                "allow_external_model": False,
+            }
+        )
+    )
+    service.local_draft_creator = CreateLocalDocumentDraft(
+        paths=paths,
+        projects=service.projects,
+        sources=service.sources,
+        drafts=service.drafts,
+        store=service.store,
+        now=lambda: NOW,
+    )
+
+    result = service.execute(_command())
+
+    assert result.draft.generation_mode.value == "local_manual"
+    assert gateway.inputs is None
 
 
 def test_incremental_incubation_reads_current_and_never_overwrites_it(tmp_path: Path) -> None:

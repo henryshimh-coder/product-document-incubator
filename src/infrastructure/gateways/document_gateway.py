@@ -44,11 +44,12 @@ class DocumentWorkflowGateway:
             raise OutputValidationError("DOCUMENT_OUTPUT_INVALID") from error
         if not _H1.search(output.document_markdown):
             raise OutputValidationError("DOCUMENT_OUTPUT_INVALID")
+        contexts = serialized["wiki_pages"] or serialized["source_fragments"]
+        assert contexts is not None
         fragments = {
-            (fragment["source_id"], fragment["chunk_id"]): fragment
-            for fragment in serialized["source_fragments"]
+            (fragment["source_id"], fragment["chunk_id"]): fragment for fragment in contexts
         }
-        source_ids = {item["source_id"] for item in serialized["source_fragments"]}
+        source_ids = {item["source_id"] for item in contexts}
         if not set(output.source_ids) <= source_ids:
             raise OutputValidationError("DOCUMENT_OUTPUT_INVALID")
         for citation in output.section_citations:

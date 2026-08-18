@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
 from src.application.dto.documents import IncubateDocumentInput, IncubationView
+from src.application.dto.materials import CreateLocalDraftInput
 from src.application.ports.incubator import DocumentDraftRepository
 from src.application.ports.repositories import ProjectRepository, SourceRepository
-from src.domain.enums import CallResultMode, DocumentDraftStatus
+from src.application.ports.wiki_ingest import WikiContextReading
+from src.domain.enums import CallResultMode, DocumentDraftStatus, SecurityLevel
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.incubator import DocumentDraft, DocumentSectionCitation
 from src.domain.models import ModelCallLog, Project, SourceRecord
 from src.domain.policies.security_policy import can_call_external_model
 from src.infrastructure.files.document_store import DocumentStore
-from src.infrastructure.files.extractor import extract_document_bytes
 from src.infrastructure.files.markdown_sections import extract_headings, validate_product_markdown
 from src.infrastructure.files.project_library import ProjectPaths
 from src.infrastructure.files.redactor import redact_text
@@ -30,6 +29,10 @@ class DocumentWorkflow(Protocol):
 
 class AcceptedSuggestionReader(Protocol):
     def accepted_titles(self, project_id: str) -> list[str]: ...
+
+
+class LocalDocumentDraftCreator(Protocol):
+    def execute(self, command: CreateLocalDraftInput) -> IncubationView: ...
 
 
 class VersionIdFactory:
@@ -55,8 +58,10 @@ class IncubateDocument:
         sources: SourceRepository,
         drafts: DocumentDraftRepository,
         store: DocumentStore,
-        gateway: DocumentWorkflow,
+        gateway: DocumentWorkflow | None,
+        wiki_context: WikiContextReading,
         model_call_logger: ModelCallLogger,
+        local_draft_creator: LocalDocumentDraftCreator | None = None,
         accepted_suggestions: AcceptedSuggestionReader | None = None,
         customer_names: Iterable[str] = (),
         strategy_terms: Iterable[str] = (),
@@ -71,7 +76,9 @@ class IncubateDocument:
         self.drafts = drafts
         self.store = store
         self.gateway = gateway
+        self.wiki_context = wiki_context
         self.model_call_logger = model_call_logger
+        self.local_draft_creator = local_draft_creator
         self.accepted_suggestions = accepted_suggestions
         self.customer_names = tuple(customer_names)
         self.strategy_terms = tuple(strategy_terms)
@@ -84,8 +91,8 @@ class IncubateDocument:
         if project_id != self.paths.project_id:
             raise ValueError("incubation project_id does not match active project")
         return [
-            {"id": source.id, "label": f"{source.original_filename} · {source.id}"}
-            for source in self.sources.list_for_project(project_id)
+            view.model_dump(mode="json")
+            for view in self.wiki_context.list_ingested_sources(project_id)
         ]
 
     def list_drafts(self, project_id: str) -> list[DocumentDraft]:
@@ -119,6 +126,17 @@ class IncubateDocument:
             raise ValueError("incubation project_id does not match active project")
         project = self.projects.get(command.project_id)
         sources = self._sources_for_command(project, command.source_ids)
+        context = self.wiki_context.read_context(command.project_id, command.source_ids)
+        if any(source.security_level.value in {"L3", "L4"} for source in sources):
+            if len(sources) != 1 or self.local_draft_creator is None:
+                raise DomainError(ErrorCode.EXTERNAL_CALL_DENIED, "DOCUMENT_LOCAL_ROUTE_REQUIRED")
+            return self.local_draft_creator.execute(
+                CreateLocalDraftInput(
+                    project_id=command.project_id,
+                    source_id=sources[0].id,
+                    requested_by=command.requested_by,
+                )
+            )
         now = self.now()
         existing = self.drafts.list_for_project(command.project_id)
         version_id = VersionIdFactory.next(
@@ -134,14 +152,20 @@ class IncubateDocument:
             "project_description": project.product_line,
             "schema_headings": self._schema_headings(command.project_id),
             "current_document_markdown": self._safe_current(baseline),
-            "source_fragments": self._source_fragments(sources),
+            "wiki_pages": [
+                page.model_dump(mode="json")
+                for page in context.pages
+                if page.safe_for_external
+            ],
         }
         outbound_chars = len(
             json.dumps(inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
-        source_total_chars = sum(len(item["excerpt"]) for item in inputs["source_fragments"])
+        source_total_chars = sum(len(item["excerpt"]) for item in inputs["wiki_pages"])
         started = self.now()
         try:
+            if self.gateway is None:
+                raise ValueError("DOCUMENT_GATEWAY_NOT_CONFIGURED")
             response = self.gateway.generate_draft(inputs)
             result = response["result"]
             markdown = validate_product_markdown(str(result["document_markdown"]))
@@ -205,56 +229,20 @@ class IncubateDocument:
             raise ValueError("source_ids must be unique")
         selected = [self.sources.get(source_id) for source_id in source_ids]
         for source in selected:
+            if source.ingest_status != "ingested":
+                raise ValueError("DOCUMENT_SOURCE_NOT_INGESTED")
             if source.project_id != project.id:
                 raise DomainError(
                     ErrorCode.EXTERNAL_CALL_DENIED, "DOCUMENT_SOURCE_PROJECT_MISMATCH"
                 )
+            if source.security_level in {
+                SecurityLevel.L3_CONFIDENTIAL,
+                SecurityLevel.L4_RESTRICTED,
+            }:
+                continue
             if not can_call_external_model(project, source):
                 raise DomainError(ErrorCode.EXTERNAL_CALL_DENIED, "DOCUMENT_SOURCE_NOT_AUTHORIZED")
         return selected
-
-    def _source_fragments(self, sources: list[SourceRecord]) -> list[dict[str, str]]:
-        fragments: list[dict[str, str]] = []
-        raw_root = self.paths.raw_root.resolve()
-        for source in sources:
-            archive = Path(source.archive_path).resolve()
-            if not archive.is_relative_to(raw_root):
-                raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, "DOCUMENT_SOURCE_PATH_INVALID")
-            payload = archive.read_bytes()
-            if hashlib.sha256(payload).hexdigest() != source.sha256:
-                raise DomainError(ErrorCode.PUBLISH_SOURCE_INTEGRITY_FAILED)
-            extracted = extract_document_bytes(
-                payload,
-                filename=source.original_filename,
-                source_id=source.id,
-            )
-            for chunk in extracted.chunks:
-                redaction = redact_text(
-                    chunk.text,
-                    security_level=source.security_level,
-                    customer_names=self.customer_names,
-                    strategy_terms=self.strategy_terms,
-                    financial_terms=self.financial_terms,
-                    leader_names=self.leader_names,
-                    unpublished_decisions=self.unpublished_decisions,
-                )
-                if not redaction.safe_for_external_model:
-                    raise DomainError(ErrorCode.REDACTION_REQUIRED, "DOCUMENT_REDACTION_REQUIRED")
-                fragments.append(
-                    {
-                        "source_id": source.id,
-                        "chunk_id": chunk.chunk_id,
-                        "locator": chunk.locator,
-                        "excerpt": redaction.redacted_text,
-                        "source_type": source.source_type,
-                        "authority_level": source.authority_level.value,
-                    }
-                )
-                if len(fragments) == 200:
-                    return fragments
-        if not fragments:
-            raise DomainError(ErrorCode.EXTRACTION_FAILED, "DOCUMENT_SOURCE_EMPTY")
-        return fragments
 
     def _schema_headings(self, project_id: str) -> list[str]:
         template = self.paths.schema_root / "product-document-template.md"
