@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from copy import deepcopy
 from datetime import UTC, date, datetime
@@ -9,10 +8,14 @@ from typing import Any
 
 import pytest
 
+from src.application.dto.documents import ArchiveRawSourceInput
+from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.domain.enums import AuthorityLevel, SecurityLevel
 from src.domain.errors import GatewayError, OutputValidationError
 from src.domain.models import SourceRecord
 from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.project_source_archive import ProjectSourceArchive
+from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_outbound_context import WikiOutboundContextBuilder
 from src.infrastructure.gateways._common import create_outbound_safety_proof
 from src.infrastructure.gateways.schemas import WikiIngestWorkflowInput
@@ -110,6 +113,25 @@ class SourceRepository:
     def get(self, source_id: str) -> SourceRecord:
         return self.sources[source_id]
 
+    def add(self, source: SourceRecord) -> None:
+        self.sources[source.id] = source
+
+    def delete(self, source_id: str, project_id: str) -> None:
+        source = self.sources[source_id]
+        if source.project_id != project_id:
+            raise KeyError(source_id)
+        del self.sources[source_id]
+
+    def find_by_sha256(self, project_id: str, sha256: str) -> SourceRecord | None:
+        return next(
+            (
+                source
+                for source in self.sources.values()
+                if source.project_id == project_id and source.sha256 == sha256
+            ),
+            None,
+        )
+
 
 def source_record(
     source_id: str,
@@ -170,17 +192,19 @@ def authorized_builder(
         encoding="utf-8",
     )
     raw_bytes = b"Approved redacted source statement."
-    trusted_incoming = (incoming_source or source_record("SRC-A")).model_copy(
+    source_template = incoming_source or source_record("SRC-A")
+    archived = ProjectSourceArchive(
+        paths=paths,
+        source_id=source_template.id,
+        year=source_template.document_date.year,
+    ).save(source_template.original_filename, raw_bytes)
+    trusted_incoming = source_template.model_copy(
         update={
-            "original_filename": "SRC-A.md",
-            "archive_path": "raw/SRC-A/SRC-A.md",
-            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
-            "size_bytes": len(raw_bytes),
+            "archive_path": str(archived.path),
+            "sha256": archived.sha256,
+            "size_bytes": archived.size_bytes,
         }
     )
-    raw_path = paths.project_root / trusted_incoming.archive_path
-    raw_path.parent.mkdir(parents=True)
-    raw_path.write_bytes(raw_bytes)
     paths.schema_root.mkdir(parents=True)
     (paths.schema_root / "ingest-contract.md").write_text(
         valid_input()["ingest_contract"],
@@ -204,6 +228,154 @@ def authorized_builder(
         topic.model_dump(mode="json") for topic in projection.safe_related_topics
     ]
     return builder, inputs, related_paths
+
+
+def test_builder_authorizes_unmodified_archive_raw_source_absolute_path(
+    tmp_path: Path,
+) -> None:
+    paths = ProjectPaths.for_project(tmp_path / "library", "PROJECT_A")
+    paths.raw_root.mkdir(parents=True)
+    paths.system_root.mkdir(parents=True)
+    (paths.system_root / "project.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "2.2",
+                "project_id": "PROJECT_A",
+                "allow_external_model": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    topic_path = paths.wiki_root / "topics" / "channels.md"
+    topic_path.parent.mkdir(parents=True)
+    topic_path.write_text(
+        "---\npage_type: topic\ntopic_id: channels\nproject_id: PROJECT_A\n---\n"
+        "\n- Safe channel 【SRC-L1：section】\n",
+        encoding="utf-8",
+    )
+    paths.schema_root.mkdir(parents=True)
+    (paths.schema_root / "ingest-contract.md").write_text(
+        valid_input()["ingest_contract"],
+        encoding="utf-8",
+    )
+    sources = SourceRepository(
+        [
+            source_record(
+                "SRC-L1",
+                security_level=SecurityLevel.L1_PUBLIC_SIMULATED,
+            )
+        ]
+    )
+    archived = ArchiveRawSource(
+        paths=paths,
+        sources=sources,
+        archive_factory=lambda source_id, year: ProjectSourceArchive(
+            paths=paths, source_id=source_id, year=year
+        ),
+        index=SourceIndexStore(paths),
+        wiki_schema_version="2.2",
+        now=lambda: datetime(2026, 8, 17, tzinfo=UTC),
+    ).execute(
+        ArchiveRawSourceInput(
+            project_id="PROJECT_A",
+            uploaded_name="pricing-policy.md",
+            uploaded_bytes=b"Approved redacted source statement.",
+            material_name="Pricing policy",
+            source_type="product_requirement",
+            authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+            source_department="Product",
+            document_date=date(2026, 8, 17),
+            material_version="1.0",
+            security_level=SecurityLevel.L2_INTERNAL,
+            is_redacted_confirmed=True,
+            allow_external_model=True,
+        )
+    )
+    source = sources.get(archived.source_id)
+    inputs = valid_input()
+    inputs["source"] = {
+        "id": source.id,
+        "source_type": source.source_type,
+        "material_name": source.material_name,
+        "document_version": source.document_version,
+        "document_date": source.document_date.isoformat(),
+        "applicable_scope": source.applicable_baseline_version,
+        "authority_level": source.authority_level.value,
+        "security_level": source.security_level.value,
+    }
+    inputs["source_chunks"] = [
+        {
+            "chunk_id": f"{source.id}-0001",
+            "locator": "line:1",
+            "text": "Approved redacted source statement.",
+        }
+    ]
+    related_paths = ["wiki/topics/channels.md"]
+    builder = WikiOutboundContextBuilder(paths, sources)
+    projection = builder.build("PROJECT_A", related_paths)
+    inputs["safe_index_projection"] = projection.safe_index_projection
+    inputs["safe_related_topics"] = [
+        topic.model_dump(mode="json") for topic in projection.safe_related_topics
+    ]
+    client = FakeDifyClient(valid_output())
+
+    WikiIngestGateway(client, timeout_seconds=60).generate(
+        inputs,
+        safety_proof=safety_proof(inputs),
+        wiki_authorization=builder.authorize(
+            inputs, related_topic_paths=related_paths
+        ),
+    )
+
+    assert archived.archive_path.is_absolute()
+    assert client.calls
+
+
+def test_builder_preserves_safe_project_relative_archive_path_support(
+    tmp_path: Path,
+) -> None:
+    builder, inputs, related_paths = authorized_builder(tmp_path)
+    source = builder.sources.get("SRC-A")
+    relative_archive_path = Path(source.archive_path).relative_to(
+        builder.paths.project_root
+    )
+    builder.sources.sources[source.id] = source.model_copy(
+        update={"archive_path": relative_archive_path.as_posix()}
+    )
+    client = FakeDifyClient(valid_output())
+
+    WikiIngestGateway(client, timeout_seconds=60).generate(
+        inputs,
+        safety_proof=safety_proof(inputs),
+        wiki_authorization=builder.authorize(
+            inputs, related_topic_paths=related_paths
+        ),
+    )
+
+    assert relative_archive_path.as_posix().startswith("raw/")
+    assert client.calls
+
+
+def test_builder_rejects_absolute_archive_path_through_symlinked_parent_before_invoke(
+    tmp_path: Path,
+) -> None:
+    builder, inputs, related_paths = authorized_builder(tmp_path)
+    source = builder.sources.get("SRC-A")
+    archive_path = Path(source.archive_path)
+    relocated_parent = tmp_path / "relocated-source-directory"
+    archive_path.parent.rename(relocated_parent)
+    archive_path.parent.symlink_to(relocated_parent, target_is_directory=True)
+    client = FakeDifyClient(valid_output())
+
+    with pytest.raises(GatewayError, match="WIKI_OUTBOUND_AUTHORIZATION_INVALID"):
+        authorization = builder.authorize(inputs, related_topic_paths=related_paths)
+        WikiIngestGateway(client, timeout_seconds=60).generate(
+            inputs,
+            safety_proof=safety_proof(inputs),
+            wiki_authorization=authorization,
+        )
+
+    assert client.calls == []
 
 
 def test_wiki_gateway_sends_only_builder_authorized_projection_with_explicit_timeout(
@@ -384,6 +556,35 @@ def test_builder_refuses_private_content_relabelled_before_authorization_and_no_
         inputs["source_chunks"][0][field.partition(".")[2]] = replacement
     else:
         inputs[field] = replacement
+    client = FakeDifyClient(valid_output())
+
+    with pytest.raises(GatewayError, match="WIKI_OUTBOUND_AUTHORIZATION_INVALID"):
+        authorization = builder.authorize(inputs, related_topic_paths=related_paths)
+        WikiIngestGateway(client, timeout_seconds=60).generate(
+            inputs,
+            safety_proof=safety_proof(inputs),
+            wiki_authorization=authorization,
+        )
+
+    assert client.calls == []
+
+
+def test_builder_rejects_external_schema_parent_redirect_before_authorization(
+    tmp_path: Path,
+) -> None:
+    builder, inputs, related_paths = authorized_builder(tmp_path)
+    private_contract = "PRIVATE-CONTRACT-THROUGH-EXTERNAL-SCHEMA-PARENT"
+    inputs["ingest_contract"] = private_contract
+    contract_path = builder.paths.schema_root / "ingest-contract.md"
+    contract_path.unlink()
+    builder.paths.schema_root.rmdir()
+    external_schema = tmp_path / "external-schema"
+    external_schema.mkdir()
+    (external_schema / "ingest-contract.md").write_text(
+        private_contract,
+        encoding="utf-8",
+    )
+    builder.paths.schema_root.symlink_to(external_schema, target_is_directory=True)
     client = FakeDifyClient(valid_output())
 
     with pytest.raises(GatewayError, match="WIKI_OUTBOUND_AUTHORIZATION_INVALID"):

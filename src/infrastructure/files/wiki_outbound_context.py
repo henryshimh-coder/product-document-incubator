@@ -254,18 +254,30 @@ class WikiOutboundContextBuilder:
             raise _authorization_invalid()
 
     def _trusted_source_chunks(self, source: SourceRecord) -> dict[str, dict[str, str]]:
-        relative_path = Path(source.archive_path)
+        archive_path = Path(source.archive_path)
         if (
-            relative_path.is_absolute()
-            or "\\" in source.archive_path
-            or relative_path.as_posix() != source.archive_path
-            or not source.archive_path.startswith("raw/")
-            or any(part in {"", ".", ".."} for part in relative_path.parts)
+            "\\" in source.archive_path
+            or archive_path.as_posix() != source.archive_path
+            or any(part in {"", ".", ".."} for part in archive_path.parts)
         ):
             raise _authorization_invalid()
-        lexical_path = self.paths.project_root / relative_path
+        project_root = self.paths.project_root
+        raw_root = self.paths.raw_root
+        if (
+            project_root.is_symlink()
+            or project_root.resolve() != project_root
+            or raw_root.is_symlink()
+            or raw_root.resolve() != raw_root
+            or not raw_root.is_relative_to(project_root)
+        ):
+            raise _authorization_invalid()
+        if archive_path.is_absolute():
+            lexical_path = archive_path
+        else:
+            if not source.archive_path.startswith("raw/"):
+                raise _authorization_invalid()
+            lexical_path = project_root / archive_path
         resolved_path = lexical_path.resolve()
-        raw_root = self.paths.raw_root.resolve()
         if (
             lexical_path.is_symlink()
             or resolved_path != lexical_path
@@ -297,12 +309,19 @@ class WikiOutboundContextBuilder:
         }
 
     def _trusted_ingest_contract(self) -> str:
-        lexical_path = self.paths.schema_root / "ingest-contract.md"
+        project_root = self.paths.project_root
+        lexical_schema_root = project_root / "schema"
+        lexical_path = lexical_schema_root / "ingest-contract.md"
         resolved_path = lexical_path.resolve()
-        schema_root = self.paths.schema_root.resolve()
         if (
-            lexical_path.is_symlink()
-            or not resolved_path.is_relative_to(schema_root)
+            project_root.is_symlink()
+            or project_root.resolve() != project_root
+            or self.paths.schema_root != lexical_schema_root
+            or lexical_schema_root.is_symlink()
+            or lexical_schema_root.resolve() != lexical_schema_root
+            or lexical_path.is_symlink()
+            or resolved_path != lexical_path
+            or not resolved_path.is_relative_to(project_root)
             or not resolved_path.is_file()
         ):
             raise _authorization_invalid()
