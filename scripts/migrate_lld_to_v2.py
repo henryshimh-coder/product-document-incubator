@@ -54,7 +54,8 @@ def migrate_lld(source_root: Path, library_root: Path, *, dry_run: bool = False)
             description=legacy["project"].product_line,
             initial_display_version=legacy["manifest"].display_version,
             allow_external_model=legacy["project"].allow_external_model,
-        )
+        ),
+        parent_root=library_root,
     )
     try:
         _write_project_tree(prepared.temp_root, target, legacy)
