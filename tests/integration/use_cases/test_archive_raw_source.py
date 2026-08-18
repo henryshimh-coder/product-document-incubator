@@ -119,8 +119,9 @@ def test_archive_marks_new_2_2_project_material_pending_ingest(tmp_path) -> None
     assert result.ingest_status == "pending_ingest"
 
 
-def test_archive_keeps_legacy_project_material_archived(tmp_path) -> None:
-    """Catches a 2.2 rollout rewriting legacy project material state on archive."""
+def test_archive_keeps_generic_schema_only_project_material_archived(tmp_path) -> None:
+    """Catches generic metadata version being mistaken for the Wiki 2.2 marker."""
+    from src.application.project_context import ProjectContext
     from src.application.use_cases.archive_raw_source import ArchiveRawSource
     from src.domain.models import Project
     from src.infrastructure.files.project_source_archive import ProjectSourceArchive
@@ -129,6 +130,11 @@ def test_archive_keeps_legacy_project_material_archived(tmp_path) -> None:
     library = tmp_path / "library"
     paths = ProjectPaths.for_project(library, "PROJECT_A")
     paths.raw_root.mkdir(parents=True)
+    paths.system_root.mkdir(parents=True)
+    (paths.system_root / "project.json").write_text(
+        json.dumps({"project_id": "PROJECT_A", "schema_version": "2.2"}),
+        encoding="utf-8",
+    )
     db_path = library / ".incubator/product_incubator.db"
     migrate(db_path)
     now = datetime(2026, 8, 12, tzinfo=UTC)
@@ -138,12 +144,15 @@ def test_archive_keeps_legacy_project_material_archived(tmp_path) -> None:
             current_baseline_id=None, allow_external_model=False, created_at=now, updated_at=now,
         )
     )
+    context = ProjectContext("PROJECT_A", paths, db_path)
     result = ArchiveRawSource(
         paths=paths, sources=SqliteSourceRepository(db_path),
         archive_factory=lambda source_id, year: ProjectSourceArchive(
             paths=paths, source_id=source_id, year=year
         ),
-        index=SourceIndexStore(paths), now=lambda: now,
+        index=SourceIndexStore(paths),
+        wiki_schema_version=context.wiki_schema_version,
+        now=lambda: now,
     ).execute(
         _command(tmp_path / "unused.md").model_copy(
             update={
@@ -154,6 +163,7 @@ def test_archive_keeps_legacy_project_material_archived(tmp_path) -> None:
         )
     )
 
+    assert context.wiki_schema_version == "2.1"
     assert result.ingest_status == "archived"
 
 

@@ -15,8 +15,7 @@ def read_wiki_schema_version(paths: ProjectPaths) -> str:
         return "2.1"
     if not isinstance(payload, dict):
         return "2.1"
-    version = payload.get("wiki_schema_version", payload.get("schema_version"))
-    return version if isinstance(version, str) else "2.1"
+    return "2.2" if payload.get("wiki_schema_version") == "2.2" else "2.1"
 
 
 @dataclass(frozen=True)

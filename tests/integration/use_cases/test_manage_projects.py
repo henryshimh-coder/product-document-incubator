@@ -149,6 +149,12 @@ def test_create_project_scaffolds_complete_wiki_atomically(project_environment) 
     assert (root / "exports").is_dir()
     assert (root / ".incubator/project.json").is_file()
     assert (root / ".incubator/source-index.json").is_file()
+    assert (
+        json.loads((root / ".incubator/source-index.json").read_text(encoding="utf-8"))[
+            "schema_version"
+        ]
+        == "2.2"
+    )
     assert not list(library_root.glob(".NEW_PRODUCT.tmp-*"))
     assert (
         json.loads((root / ".incubator/project.json").read_text(encoding="utf-8"))["project_id"]

@@ -20,7 +20,7 @@ class SourceIndexStore:
             raise ValueError("source index project_id mismatch")
         current = self._read()
         entries = {
-            str(item["source_id"]): item
+            str(item["source_id"]): self._normalize_entry(item)
             for item in current["sources"]
             if isinstance(item, dict) and isinstance(item.get("source_id"), str)
         }
@@ -56,6 +56,21 @@ class SourceIndexStore:
             "sources": [entries[key] for key in sorted(entries)],
         }
         self._atomic_write(payload)
+
+    @staticmethod
+    def _normalize_entry(entry: dict) -> dict:
+        normalized = dict(entry)
+        for field, default in (
+            ("ingest_schema_version", None),
+            ("ingested_at", None),
+            ("source_page_path", None),
+            ("topic_page_paths", []),
+            ("ingest_result_digest", None),
+            ("ingest_error_code", None),
+            ("generation_mode", None),
+        ):
+            normalized.setdefault(field, default)
+        return normalized
 
     def _read(self) -> dict:
         if not self.path.is_file():
