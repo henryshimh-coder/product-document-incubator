@@ -142,6 +142,41 @@ def _render_materials_ingest_page(library_root: str, status: str) -> None:
     )
 
 
+def _render_existing_materials_index(
+    library_root: str,
+    project_root: str,
+    db_path: str,
+) -> None:
+    from pathlib import Path as path_type
+
+    from src.application.container import AppContainer, AppSettings
+    from src.application.project_context import ProjectContext
+    from src.infrastructure.files.project_library import ProjectPaths
+    from src.ui.pages.materials import render
+
+    paths = ProjectPaths.for_registered_root(
+        path_type(library_root),
+        "PROJECT_A",
+        path_type(project_root),
+    )
+    render(
+        AppContainer(
+            settings=AppSettings(
+                name="产品文档孵化器",
+                project_id="LLD",
+                default_query_scope="effective",
+                max_upload_mb=20,
+                accepted_extensions=("md",),
+                demo_mode=True,
+                schema_version="1.0",
+            ),
+            active_project=ProjectContext("PROJECT_A", paths, path_type(db_path)),
+            archive_raw_source=object(),
+            wiki_ingest=object(),
+        )
+    )
+
+
 def test_materials_page_renders_a_nonwriting_confirmation_form(tmp_path) -> None:
     """Catches a page visit creating a material archive before Owner confirmation."""
     page = AppTest.from_function(
@@ -178,6 +213,33 @@ def test_material_page_runs_ingest_after_owner_click(tmp_path) -> None:
 
     assert page.success
     assert any("已 Ingest" in item.value for item in page.markdown)
+
+
+def test_material_page_reads_real_failed_lifecycle_without_writing_index(tmp_path) -> None:
+    """Catches a real failed ingest remaining pending or the UI repairing its index itself."""
+    from src.domain.errors import GatewayError
+    from tests.integration.use_cases.test_wiki_ingest import make_ingest_fixture
+
+    fixture = make_ingest_fixture(tmp_path)
+    fixture.gateway.fail(GatewayError.timeout())
+    with pytest.raises(GatewayError):
+        fixture.execute()
+    index_path = fixture.page(".incubator/source-index.json")
+    before_render = index_path.read_bytes()
+
+    page = AppTest.from_function(
+        _render_existing_materials_index,
+        args=(
+            str(fixture.paths.library_root),
+            str(fixture.paths.project_root),
+            str(fixture.db_path),
+        ),
+    ).run()
+
+    rendered = "\n".join(item.value for item in (*page.markdown, *page.caption, *page.info))
+    assert "MODEL_TIMEOUT" in rendered
+    assert page.button(key=f"material_reingest_{fixture.source_id}")
+    assert index_path.read_bytes() == before_render
 
 
 @pytest.mark.parametrize(

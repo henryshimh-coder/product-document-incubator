@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
+from filelock import FileLock, Timeout
 
 from src.application.dto.wiki_ingest import (
     IngestArchivedSourceInput,
@@ -32,6 +33,7 @@ from src.infrastructure.files.extractor import extract_document_bytes
 from src.infrastructure.files.project_audit_log import ProjectAuditLog
 from src.infrastructure.files.project_library import ProjectPaths
 from src.infrastructure.files.redactor import redact_text
+from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
 from src.infrastructure.files.wiki_outbound_context import WikiOutboundContextBuilder
 from src.infrastructure.files.wiki_validator import WikiValidator
@@ -79,14 +81,24 @@ class IngestArchivedSource:
         self.unpublished_decisions = tuple(unpublished_decisions)
         self.now = now or (lambda: datetime.now(UTC))
         self.context = WikiOutboundContextBuilder(paths, sources)
+        self.index = SourceIndexStore(paths)
+        self.lifecycle_lock_path = paths.system_root / "locks" / "wiki-ingest-lifecycle.lock"
 
     def execute(self, command: IngestArchivedSourceInput) -> WikiIngestResultView:
+        self._resolve_project(command.project_id)
+        self._validate_ids(command)
+        self.lifecycle_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with FileLock(self.lifecycle_lock_path, timeout=0):
+                return self._execute_locked(command)
+        except Timeout as error:
+            raise DomainError(ErrorCode.WIKI_INGEST_ALREADY_RUNNING) from error
+
+    def _execute_locked(self, command: IngestArchivedSourceInput) -> WikiIngestResultView:
         source: SourceRecord | None = None
         run: WikiIngestRun | None = None
         try:
-            # Fixed boundary order: resolve -> IDs -> Raw path/SHA -> status/idempotency.
-            self._resolve_project(command.project_id)
-            self._validate_ids(command)
+            # Project resolution/ID checks and the lifecycle lock precede this fixed order.
             source = self._owned_source(command)
             raw_path, raw_payload = self._verified_raw(source)
             idempotency_key = self._idempotency_key(source)
@@ -285,8 +297,13 @@ class IngestArchivedSource:
                 self.runs.add(run)
             else:
                 self.runs.update(run)
+            self.index.upsert(processing)
         except Exception:
-            self.sources.update(source)
+            self._record_failure(
+                processing,
+                run,
+                ErrorCode.WIKI_CHANGESET_INVALID.value,
+            )
             raise
         return run
 
@@ -426,6 +443,7 @@ class IngestArchivedSource:
             output.source_page_markdown,
             first_locator,
             committed_at,
+            output,
         )
         result_digest = hashlib.sha256(
             json.dumps(
@@ -442,6 +460,12 @@ class IngestArchivedSource:
                 topic,
                 first_locator,
                 committed_at,
+                output,
+                existing_markdown=(
+                    self._read_required(relative_path)
+                    if topic.change_type == "update"
+                    else None
+                ),
             )
         contents["wiki/index.md"] = self._index_markdown(
             source,
@@ -499,6 +523,14 @@ class IngestArchivedSource:
             source.project_id, related_topic_paths
         ).safe_related_topics:
             allowed_source_ids.update(projected.source_ids)
+        for conflict in output.conflicts:
+            if source.id not in conflict.source_ids or not set(conflict.source_ids).issubset(
+                allowed_source_ids
+            ):
+                raise DomainError(
+                    ErrorCode.WIKI_CHANGESET_INVALID,
+                    "CONFLICT_SOURCE_UNAUTHORIZED",
+                )
         for topic in output.topic_changes:
             if source.id not in topic.source_ids or not set(topic.source_ids).issubset(
                 allowed_source_ids
@@ -519,6 +551,7 @@ class IngestArchivedSource:
         body: str,
         locator: str,
         committed_at: datetime,
+        output: WikiIngestWorkflowOutput,
     ) -> str:
         frontmatter = {
             "project_id": source.project_id,
@@ -535,25 +568,58 @@ class IngestArchivedSource:
             "ingested_at": committed_at.isoformat(),
         }
         title = source.material_name or Path(source.original_filename).stem
+        findings = self._findings_markdown(output)
         return (
             f"---\n{yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()}\n"
             f"---\n# 来源：{title}\n\n{body.strip()}\n\n## 来源定位\n\n"
-            f"- 归档来源【{source.id}：{locator}】"
+            f"- 归档来源【{source.id}：{locator}】\n\n{findings}"
         )
 
+    def _topic_markdown(
+        self,
+        source: SourceRecord,
+        topic,
+        locator: str,
+        committed_at: datetime,
+        output: WikiIngestWorkflowOutput,
+        *,
+        existing_markdown: str | None,
+    ) -> str:
+        if existing_markdown is None:
+            frontmatter = {
+                "page_type": "topic",
+                "topic_id": topic.topic_id,
+                "project_id": source.project_id,
+                "updated_at": committed_at.isoformat(),
+            }
+            prefix = (
+                f"---\n{yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()}\n"
+                f"---\n# 主题：{topic.title}"
+            )
+        else:
+            # Existing accepted conclusions, conflicts, source IDs, and locators are
+            # append-only evidence. Never reconstruct or rewrite their text.
+            prefix = existing_markdown.rstrip()
+        addition = (
+            f"## Ingest 增量 · {committed_at.isoformat()}\n\n"
+            f"- {topic.markdown.strip()} 【{source.id}：{locator}】\n\n"
+            f"{self._findings_markdown(output)}"
+        )
+        return f"{prefix}\n\n{addition}"
+
     @staticmethod
-    def _topic_markdown(source, topic, locator: str, committed_at: datetime) -> str:
-        frontmatter = {
-            "page_type": "topic",
-            "topic_id": topic.topic_id,
-            "project_id": source.project_id,
-            "updated_at": committed_at.isoformat(),
-        }
-        citations = " ".join(f"【{source_id}：{locator}】" for source_id in topic.source_ids)
+    def _findings_markdown(output: WikiIngestWorkflowOutput) -> str:
+        conflicts = [
+            f"- {conflict.summary} · 来源："
+            + ", ".join(f"`{source_id}`" for source_id in conflict.source_ids)
+            for conflict in output.conflicts
+        ] or ["- 无"]
+        evidence_gaps = [f"- {gap}" for gap in output.evidence_gaps] or ["- 无"]
         return (
-            f"---\n{yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()}\n"
-            f"---\n# 主题：{topic.title}\n\n"
-            f"- {topic.markdown.strip()} {citations}"
+            "## 冲突与待确认\n\n"
+            + "\n".join(conflicts)
+            + "\n\n## 证据缺口\n\n"
+            + "\n".join(evidence_gaps)
         )
 
     def _index_markdown(
@@ -656,17 +722,21 @@ class IngestArchivedSource:
         run: WikiIngestRun | None,
         error_code: str,
     ) -> None:
+        current: SourceRecord | None = None
         try:
             current = self.sources.get(source.id)
             if current.ingest_status != WikiIngestStatus.INGESTED:
-                self.sources.update(
-                    current.model_copy(
-                        update={
-                            "ingest_status": WikiIngestStatus.FAILED,
-                            "ingest_error_code": error_code,
-                        }
-                    )
+                failed = current.model_copy(
+                    update={
+                        "ingest_status": WikiIngestStatus.FAILED,
+                        "ingest_error_code": error_code,
+                    }
                 )
+                self.sources.update(failed)
+                self.index.upsert(failed)
+        except Exception:
+            pass
+        try:
             if run is not None:
                 persisted = self.runs.get_by_transaction(run.transaction_id) or run
                 if persisted.status != WikiIngestStatus.INGESTED:
