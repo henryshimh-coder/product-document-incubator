@@ -1,9 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from src.domain.wiki import WikiChangeSet, WikiIngestRun, WikiTransactionResult
+
+if TYPE_CHECKING:
+    from src.infrastructure.gateways._common import OutboundSafetyProof
+    from src.infrastructure.gateways.schemas import WikiIngestWorkflowOutput
+
+
+class WikiIngestGenerating(Protocol):
+    def generate(
+        self,
+        inputs: Mapping[str, Any],
+        *,
+        safety_proof: OutboundSafetyProof,
+        user: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> WikiIngestWorkflowOutput: ...
 
 
 class WikiChangeSetValidating(Protocol):

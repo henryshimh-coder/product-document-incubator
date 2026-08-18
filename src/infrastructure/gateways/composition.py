@@ -12,6 +12,7 @@ from src.infrastructure.gateways.document_gateway import DocumentWorkflowGateway
 from src.infrastructure.gateways.ingest_gateway import IngestGateway
 from src.infrastructure.gateways.lint_gateway import LintGateway
 from src.infrastructure.gateways.query_gateway import QueryGateway
+from src.infrastructure.gateways.wiki_ingest_gateway import WikiIngestGateway
 
 MAX_WORKFLOW_TIMEOUT_SECONDS = 600
 
@@ -82,6 +83,15 @@ class DifyDocumentGatewaySettings(BaseModel):
     document_api_key: SecretStr = Field(min_length=1)
 
 
+class DifyWikiIngestGatewaySettings(BaseModel):
+    """Independent Wiki Ingest workflow credentials for the 2.2 boundary."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    base_url: HttpUrl
+    wiki_ingest_api_key: SecretStr = Field(min_length=1)
+
+
 def build_workflow_gateways(
     settings: DifyGatewaySettings,
     *,
@@ -133,4 +143,21 @@ def build_document_gateway(
             http=http_factory(),
         ),
         timeout_seconds=timeouts.document_seconds,
+    )
+
+
+def build_wiki_ingest_gateway(
+    settings: DifyWikiIngestGatewaySettings,
+    *,
+    timeouts: WorkflowTimeouts,
+    http_factory: Callable[[], httpx.Client] = httpx.Client,
+) -> WikiIngestGateway:
+    """Compose the dedicated Wiki workflow without coupling legacy gateways."""
+    return WikiIngestGateway(
+        DifyClient(
+            base_url=str(settings.base_url),
+            api_key=settings.wiki_ingest_api_key.get_secret_value(),
+            http=http_factory(),
+        ),
+        timeout_seconds=timeouts.ingest_seconds,
     )
