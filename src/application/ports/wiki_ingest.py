@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from src.domain.wiki import WikiChangeSet, WikiIngestRun
+from src.domain.wiki import WikiChangeSet, WikiIngestRun, WikiTransactionResult
 
 
 class WikiChangeSetValidating(Protocol):
@@ -20,3 +20,9 @@ class WikiIngestRunRepository(Protocol):
     def update(self, run: WikiIngestRun) -> None: ...
 
     def list_interrupted(self, project_id: str, older_than: datetime) -> list[WikiIngestRun]: ...
+
+
+class WikiTransactionCommitting(Protocol):
+    def commit(self, change_set: WikiChangeSet) -> WikiTransactionResult: ...
+
+    def recover(self) -> WikiTransactionResult | None: ...
