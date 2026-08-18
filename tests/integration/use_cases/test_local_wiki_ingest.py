@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from filelock import FileLock
 
 from src.application.dto.wiki_ingest import (
     ConfirmLocalWikiIngestInput,
@@ -229,6 +230,28 @@ def test_failed_local_confirmation_can_retry_with_the_same_draft_and_idempotency
             "SELECT transaction_id, idempotency_key FROM wiki_ingest_runs WHERE source_id = ?",
             (local_ingest_fixture.source_id,),
         ).fetchone()
+
+    with FileLock(local_ingest_fixture.paths.system_root / "locks" / "wiki-ingest.lock"):
+        with pytest.raises(DomainError, match="WIKI_INGEST_ALREADY_RUNNING"):
+            local_ingest_fixture.confirm_source()
+
+    persisted_after_lock = SqliteSourceRepository(local_ingest_fixture.base.db_path).get(
+        local_ingest_fixture.source_id
+    )
+    assert persisted_after_lock.ingest_status == WikiIngestStatus.FAILED
+    source_index_after_lock = json.loads(
+        local_ingest_fixture.base.page(".incubator/source-index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert source_index_after_lock["sources"][0]["ingest_status"] == WikiIngestStatus.FAILED
+    with connect(local_ingest_fixture.base.db_path) as connection:
+        lock_failed_run = connection.execute(
+            "SELECT status FROM wiki_ingest_runs WHERE source_id = ?",
+            (local_ingest_fixture.source_id,),
+        ).fetchone()
+    assert lock_failed_run["status"] == WikiIngestStatus.FAILED
+    assert draft_root.is_dir()
 
     retried = local_ingest_fixture.confirm_source()
 

@@ -101,15 +101,16 @@ class ConfirmLocalWikiIngest:
             idempotency_key=idempotency_key,
         )
         validator.validate_change_set(change_set)
-        self._reuse_failed_run(change_set, committed_at)
-        transaction = self._transaction(validator, committed_at)
+        retry_run = self._reuse_failed_run(change_set, committed_at)
         try:
+            transaction = self._transaction(validator, committed_at)
             committed = transaction.commit(change_set)
-        except RuntimeError as error:
-            if "WIKI_TRANSACTION_FAILED" not in str(error):
-                raise
-            self._synchronize_failed_draft(source.id)
-            raise DomainError(ErrorCode.WIKI_TRANSACTION_FAILED) from None
+        except Exception as error:
+            error_code = self._retryable_error_code(error)
+            self._restore_retryable_failure(source.id, retry_run, error_code)
+            if "WIKI_TRANSACTION_FAILED" in str(error):
+                raise DomainError(ErrorCode.WIKI_TRANSACTION_FAILED) from None
+            raise
         if committed.status != "committed":
             raise DomainError(ErrorCode.WIKI_TRANSACTION_FAILED)
         # Only a completed shared transaction can remove the Owner's draft.
@@ -137,26 +138,28 @@ class ConfirmLocalWikiIngest:
         self.index.upsert(retrying)
         return retrying
 
-    def _reuse_failed_run(self, change_set: WikiChangeSet, started_at: datetime) -> None:
+    def _reuse_failed_run(
+        self, change_set: WikiChangeSet, started_at: datetime
+    ) -> WikiIngestRun | None:
         existing = self._run_by_idempotency(change_set.idempotency_key)
         if existing is None:
-            return
+            return None
         if existing.status != WikiIngestStatus.FAILED:
             raise DomainError(ErrorCode.WIKI_INGEST_ALREADY_RUNNING)
-        self.runs.update(
-            existing.model_copy(
-                update={
-                    "transaction_id": change_set.transaction_id,
-                    "status": WikiIngestStatus.PROCESSING,
-                    "source_page_path": None,
-                    "topic_page_paths": [],
-                    "result_digest": None,
-                    "error_code": None,
-                    "started_at": started_at,
-                    "finished_at": None,
-                }
-            )
+        retry = existing.model_copy(
+            update={
+                "transaction_id": change_set.transaction_id,
+                "status": WikiIngestStatus.PROCESSING,
+                "source_page_path": None,
+                "topic_page_paths": [],
+                "result_digest": None,
+                "error_code": None,
+                "started_at": started_at,
+                "finished_at": None,
+            }
         )
+        self.runs.update(retry)
+        return retry
 
     def _run_by_idempotency(self, idempotency_key: str) -> WikiIngestRun | None:
         from src.infrastructure.db.connection import connect
@@ -180,11 +183,44 @@ class ConfirmLocalWikiIngest:
             clock=lambda: committed_at,
         )
 
-    def _synchronize_failed_draft(self, source_id: str) -> None:
+    def _restore_retryable_failure(
+        self,
+        source_id: str,
+        retry_run: WikiIngestRun | None,
+        error_code: str,
+    ) -> None:
         current = self.sources.get(source_id)
-        if current.ingest_status != WikiIngestStatus.FAILED:
-            raise RuntimeError("WIKI_RECOVERY_REQUIRED: LOCAL_SOURCE_FAILURE_STATE")
-        self.index.upsert(current)
+        if current.ingest_status != WikiIngestStatus.INGESTED:
+            failed = current.model_copy(
+                update={
+                    "ingest_status": WikiIngestStatus.FAILED,
+                    "ingest_error_code": error_code,
+                    "generation_mode": DocumentGenerationMode.LOCAL_MANUAL,
+                }
+            )
+            self.sources.update(failed)
+            self.index.upsert(failed)
+        if retry_run is None:
+            return
+        persisted_run = self.runs.get_by_transaction(retry_run.transaction_id)
+        if persisted_run is not None and persisted_run.status != WikiIngestStatus.INGESTED:
+            self.runs.update(
+                persisted_run.model_copy(
+                    update={
+                        "status": WikiIngestStatus.FAILED,
+                        "error_code": error_code,
+                        "finished_at": self.now(),
+                    }
+                )
+            )
+
+    @staticmethod
+    def _retryable_error_code(error: Exception) -> str:
+        if isinstance(error, DomainError):
+            return error.code
+        if "WIKI_TRANSACTION_FAILED" in str(error):
+            return ErrorCode.WIKI_TRANSACTION_FAILED.value
+        return ErrorCode.WIKI_CHANGESET_INVALID.value
 
     @staticmethod
     def _idempotency_key(source: SourceRecord) -> str:
