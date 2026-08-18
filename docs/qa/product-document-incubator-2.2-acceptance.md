@@ -29,13 +29,13 @@
 | AC-16 | `test_incubate_document.py::test_incubation_lists_only_ingested_sources` | Streamlit “文档孵化”来源清单 | PASS | `3abae54` |
 | AC-17 | `test_wiki_incubation_flow.py::test_l2_archive_ingest_wiki_incubate_publish` | `raw/YYYY/SRC-*/requirements.md` SHA-256 | PASS | `3abae54` |
 | AC-18 | `test_wiki_incubation_flow.py::test_l4_archive_local_edit_confirm_without_gateway` | `wiki/drafts/local-ingest/`、`model_call_logs` | PASS | `3abae54` |
-| AC-19 | `test_wiki_incubation_flow.py::test_two_projects_in_different_roots_complete_isolated_lifecycles` | 两个项目根目录文件树、`wiki_ingest_runs`、`model_call_logs` 与项目级 DB 记录 | PASS | `cb5f767` |
-| AC-20 | `test_wiki_incubation_flow.py::test_legacy_project_remains_openable_without_automatic_writes` | `legacy/LEGACY_A/` 内容树、`.incubator/project.json` 与项目级 DB；允许唯一空运行锁 `.incubator/locks/wiki-ingest.lock` | PASS | `cb5f767` |
-| AC-21 | `test_wiki_incubation_flow.py::test_root_readme_navigates_to_ingested_source_and_topic` | `README.md` -> `wiki/index.md` -> `wiki/sources/*.md`、`wiki/topics/*.md` | PASS | `cb5f767` |
+| AC-19 | `test_wiki_incubation_flow.py::test_two_projects_in_different_roots_complete_isolated_lifecycles` | 两个项目根目录文件树、`wiki_ingest_runs`、`model_call_logs` 与项目级 DB 记录 | PASS | `10a908e` |
+| AC-20 | `test_wiki_incubation_flow.py::test_legacy_project_remains_openable_without_automatic_writes` | `legacy/LEGACY_A/` 内容树、`.incubator/project.json` 与项目级 DB；允许唯一空运行锁 `.incubator/locks/wiki-ingest.lock` | PASS | `10a908e` |
+| AC-21 | `test_wiki_incubation_flow.py::test_root_readme_navigates_to_ingested_source_and_topic` | `README.md` -> `wiki/index.md` -> `wiki/sources/*.md`、`wiki/topics/*.md` | PASS | `10a908e` |
 | AC-22 | `test_wiki_ingest.py::test_ingest_archived_l2_source_updates_complete_wiki` | `wiki/current/`、`wiki/versions/`、`.incubator/current-baseline.json` | PASS | `3abae54` |
 | AC-23 | `test_wiki_incubation_flow.py::test_two_projects_in_different_roots_complete_isolated_lifecycles` | `one/PROJECT_A`、`two/PROJECT_B`，两边独立发布及导出 | PASS | `3abae54` |
 | AC-24 | `test_manage_projects.py::test_create_registers_owner_selected_root` | 中央 DB `projects.project_root_path` | PASS | `3abae54` |
-| AC-25 | `test_wiki_incubation_flow.py::test_project_creation_rejects_invalid_parent_target_and_project_id` | 缺失父目录、已有目标目录与 `../ESCAPE` 输入；不可写目录按下方人工步骤 | PASS | `cb5f767` |
+| AC-25 | `test_wiki_incubation_flow.py::test_project_creation_rejects_invalid_parent_target_and_project_id` | 缺失父目录、已有目标目录与 `../ESCAPE` 输入；不可写目录按下方人工步骤 | PASS | `10a908e` |
 | AC-26 | `test_manage_projects.py::test_create_project_rejects_duplicate_id_without_touching_existing_files` | 已有目标目录的文件哈希 | PASS | `3abae54` |
 | AC-27 | `test_manage_projects.py::test_create_registers_owner_selected_root` | 中央 DB `projects.project_root_path` 后重启项目中心 | PASS | `3abae54` |
 | AC-28 | `test_wiki_incubation_flow.py::test_move_relocate_then_continue_ingest` | 项目中心“路径不可用”与重新定位表单 | PASS | `3abae54` |
