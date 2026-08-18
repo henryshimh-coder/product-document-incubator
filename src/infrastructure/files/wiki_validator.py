@@ -9,7 +9,7 @@ import yaml
 
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.models import SourceRecord
-from src.domain.wiki import WikiChangeSet, WikiTargetPlan
+from src.domain.wiki import WikiChangeSet
 from src.infrastructure.files.project_library import ProjectPaths
 
 _FRONTMATTER_REQUIRED_FIELDS = {
@@ -29,78 +29,38 @@ _FRONTMATTER_REQUIRED_FIELDS = {
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _OBSIDIAN_LINK_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
 _SAFE_PATH_SEGMENT = re.compile(r"[^A-Za-z0-9\u4e00-\u9fff_-]+")
-_TARGET_PLAN_CAPABILITY = object()
-
-
-class WikiTargetPlanner:
-    """Derive authorized Wiki targets from trusted local source and topic inputs."""
-
-    def __init__(self, paths: ProjectPaths) -> None:
-        self.paths = paths
-
-    def build(
-        self,
-        source: SourceRecord,
-        *,
-        existing_topic_paths: Sequence[str],
-        new_topic_titles: Sequence[str],
-    ) -> WikiTargetPlan:
-        if source.project_id != self.paths.project_id:
-            raise ValueError("WIKI_TARGET_PLAN_SOURCE_PROJECT_MISMATCH")
-        source_name = source.material_name or Path(source.original_filename).stem
-        source_page_path = (
-            f"wiki/sources/{self._safe_segment(source.id)}-"
-            f"{self._safe_segment(source_name)}.md"
-        )
-        topic_paths = [self._existing_topic_path(path) for path in existing_topic_paths]
-        topic_paths.extend(self._new_topic_path(title) for title in new_topic_titles)
-        if len(topic_paths) != len(set(topic_paths)):
-            raise ValueError("WIKI_TARGET_PLAN_TOPIC_DUPLICATE")
-        return WikiTargetPlan._from_trusted(
-            capability=_TARGET_PLAN_CAPABILITY,
-            project_id=source.project_id,
-            source_id=source.id,
-            source_page_path=source_page_path,
-            topic_page_paths=tuple(topic_paths),
-        )
-
-    def _existing_topic_path(self, relative_path: str) -> str:
-        if not self._is_topic_path(relative_path):
-            raise ValueError("WIKI_TARGET_PLAN_TOPIC_UNAUTHORIZED")
-        target = (self.paths.project_root / relative_path).resolve()
-        if not target.is_relative_to(self.paths.wiki_root) or not target.is_file():
-            raise ValueError("WIKI_TARGET_PLAN_TOPIC_UNAUTHORIZED")
-        return relative_path
-
-    def _new_topic_path(self, title: str) -> str:
-        return f"wiki/topics/{self._safe_segment(title)}.md"
-
-    @staticmethod
-    def _safe_segment(value: str) -> str:
-        if not isinstance(value, str):
-            raise ValueError("WIKI_TARGET_PLAN_SEGMENT_INVALID")
-        normalized = _SAFE_PATH_SEGMENT.sub("-", value.strip()).strip("-_")
-        if not normalized:
-            raise ValueError("WIKI_TARGET_PLAN_SEGMENT_INVALID")
-        return normalized
-
-    @staticmethod
-    def _is_topic_path(relative_path: str) -> bool:
-        return (
-            isinstance(relative_path, str)
-            and relative_path.startswith("wiki/topics/")
-            and relative_path.endswith(".md")
-            and Path(relative_path).as_posix() == relative_path
-            and all(part not in {"", ".", ".."} for part in Path(relative_path).parts)
-        )
 
 
 class WikiValidator:
     """Reject unsafe or internally inconsistent Wiki change sets before commit."""
 
-    def __init__(self, paths: ProjectPaths, target_plan: WikiTargetPlan) -> None:
+    def __init__(
+        self,
+        paths: ProjectPaths,
+        source: SourceRecord,
+        *,
+        existing_topic_paths: Sequence[str] = (),
+        new_topic_count: int = 0,
+    ) -> None:
         self.paths = paths
-        self.target_plan = target_plan
+        if source.project_id != paths.project_id:
+            raise ValueError("WIKI_TARGET_SOURCE_PROJECT_MISMATCH")
+        if (
+            not isinstance(new_topic_count, int)
+            or isinstance(new_topic_count, bool)
+            or new_topic_count < 0
+        ):
+            raise ValueError("WIKI_TARGET_NEW_TOPIC_COUNT_INVALID")
+        self.source = source
+        self.existing_topic_paths = tuple(
+            self._existing_topic_path(path) for path in existing_topic_paths
+        )
+        generated_topic_paths = tuple(
+            self._new_topic_path(ordinal) for ordinal in range(1, new_topic_count + 1)
+        )
+        self.topic_page_paths = self.existing_topic_paths + generated_topic_paths
+        if len(self.topic_page_paths) != len(set(self.topic_page_paths)):
+            raise ValueError("WIKI_TARGET_TOPIC_DUPLICATE")
 
     def validate_change_set(self, change_set: WikiChangeSet) -> None:
         try:
@@ -123,32 +83,62 @@ class WikiValidator:
     def _validate_project(self, change_set: WikiChangeSet) -> None:
         if change_set.project_id != self.paths.project_id:
             raise ValueError("project_id does not match resolved project root")
+        if change_set.source_id != self.source.id:
+            raise ValueError("source_id does not match trusted source")
 
     def _validate_authorized_targets(
         self, change_set: WikiChangeSet, changed_paths: set[str]
     ) -> None:
-        is_trusted_plan = isinstance(self.target_plan, WikiTargetPlan) and (
-            self.target_plan._is_authorized_by(_TARGET_PLAN_CAPABILITY)
-        )
-        if not is_trusted_plan:
-            raise ValueError("WIKI_CHANGESET_TARGET_PLAN_UNTRUSTED")
-        if self.target_plan.project_id != self.paths.project_id:
-            raise ValueError("target plan project_id does not match resolved project root")
-        if self.target_plan.source_id != change_set.source_id:
-            raise ValueError("target plan source_id does not match change set")
         expected_paths = {
             "wiki/index.md",
             "wiki/log.md",
             ".incubator/source-index.json",
-            self.target_plan.source_page_path,
-            *self.target_plan.topic_page_paths,
+            self._source_page_path(),
+            *self.topic_page_paths,
         }
         if changed_paths != expected_paths:
             raise ValueError("WIKI_CHANGESET_TARGET_UNAUTHORIZED")
-        if change_set.source_page_path != self.target_plan.source_page_path:
+        if change_set.source_page_path != self._source_page_path():
             raise ValueError("WIKI_CHANGESET_TARGET_UNAUTHORIZED")
-        if set(change_set.topic_page_paths) != set(self.target_plan.topic_page_paths):
+        if set(change_set.topic_page_paths) != set(self.topic_page_paths):
             raise ValueError("WIKI_CHANGESET_TARGET_UNAUTHORIZED")
+
+    def _source_page_path(self) -> str:
+        source_name = self.source.material_name or Path(self.source.original_filename).stem
+        return (
+            f"wiki/sources/{self._safe_segment(self.source.id)}-"
+            f"{self._safe_segment(source_name)}.md"
+        )
+
+    def _existing_topic_path(self, relative_path: str) -> str:
+        if not self._is_topic_path(relative_path):
+            raise ValueError("WIKI_TARGET_TOPIC_UNAUTHORIZED")
+        target = (self.paths.project_root / relative_path).resolve()
+        if not target.is_relative_to(self.paths.wiki_root) or not target.is_file():
+            raise ValueError("WIKI_TARGET_TOPIC_UNAUTHORIZED")
+        return relative_path
+
+    def _new_topic_path(self, ordinal: int) -> str:
+        return f"wiki/topics/{self._safe_segment(self.source.id)}-topic-{ordinal}.md"
+
+    @staticmethod
+    def _safe_segment(value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("WIKI_TARGET_SEGMENT_INVALID")
+        normalized = _SAFE_PATH_SEGMENT.sub("-", value.strip()).strip("-_")
+        if not normalized:
+            raise ValueError("WIKI_TARGET_SEGMENT_INVALID")
+        return normalized
+
+    @staticmethod
+    def _is_topic_path(relative_path: str) -> bool:
+        return (
+            isinstance(relative_path, str)
+            and relative_path.startswith("wiki/topics/")
+            and relative_path.endswith(".md")
+            and Path(relative_path).as_posix() == relative_path
+            and all(part not in {"", ".", ".."} for part in Path(relative_path).parts)
+        )
 
     def _validate_project_path(self, relative_path: str) -> None:
         target = (self.paths.project_root / relative_path).resolve()

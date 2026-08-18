@@ -32,61 +32,6 @@ class WikiPageChange(DomainModel):
     after_sha256: Sha256Str
 
 
-class WikiTargetPlan:
-    """An immutable target authority produced only by trusted local planning."""
-
-    __slots__ = (
-        "_capability",
-        "_project_id",
-        "_source_id",
-        "_source_page_path",
-        "_topic_page_paths",
-    )
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        raise TypeError("WikiTargetPlan must be built by WikiTargetPlanner")
-
-    def __setattr__(self, name: str, value: object) -> None:
-        raise AttributeError("WikiTargetPlan is immutable")
-
-    @classmethod
-    def _from_trusted(
-        cls,
-        *,
-        capability: object,
-        project_id: str,
-        source_id: str,
-        source_page_path: str,
-        topic_page_paths: tuple[str, ...],
-    ) -> WikiTargetPlan:
-        plan = object.__new__(cls)
-        object.__setattr__(plan, "_capability", capability)
-        object.__setattr__(plan, "_project_id", project_id)
-        object.__setattr__(plan, "_source_id", source_id)
-        object.__setattr__(plan, "_source_page_path", source_page_path)
-        object.__setattr__(plan, "_topic_page_paths", topic_page_paths)
-        return plan
-
-    @property
-    def project_id(self) -> str:
-        return self._project_id
-
-    @property
-    def source_id(self) -> str:
-        return self._source_id
-
-    @property
-    def source_page_path(self) -> str:
-        return self._source_page_path
-
-    @property
-    def topic_page_paths(self) -> tuple[str, ...]:
-        return self._topic_page_paths
-
-    def _is_authorized_by(self, capability: object) -> bool:
-        return self._capability is capability
-
-
 class WikiChangeSet(DomainModel):
     transaction_id: NonEmptyStr
     project_id: NonEmptyStr

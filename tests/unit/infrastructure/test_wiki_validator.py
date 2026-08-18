@@ -10,7 +10,7 @@ from src.domain.errors import DomainError
 from src.domain.models import SourceRecord
 from src.domain.wiki import WikiChangeSet, WikiPageChange
 from src.infrastructure.files.project_library import ProjectPaths
-from src.infrastructure.files.wiki_validator import WikiTargetPlanner, WikiValidator
+from src.infrastructure.files.wiki_validator import WikiValidator
 
 SHA_A = "a" * 64
 
@@ -120,46 +120,45 @@ def source() -> SourceRecord:
 
 
 @pytest.fixture
-def target_plan_factory(paths, source):
-    planner = WikiTargetPlanner(paths)
-
+def validator_factory(paths, source):
     def factory(
         *,
         existing_topic_paths: list[str] | None = None,
-        new_topic_titles: list[str] | None = None,
+        new_topic_count: int = 0,
     ):
-        return planner.build(
+        return WikiValidator(
+            paths,
             source,
             existing_topic_paths=existing_topic_paths or [],
-            new_topic_titles=new_topic_titles or [],
+            new_topic_count=new_topic_count,
         )
 
     return factory
 
 
-def test_validator_accepts_governed_change_set(paths, change_set_factory, target_plan_factory):
+def test_validator_accepts_governed_change_set(paths, change_set_factory, validator_factory):
     """Catches rejecting a complete change set that can safely stay within this project."""
-    WikiValidator(paths, target_plan_factory()).validate_change_set(change_set_factory())
+    validator_factory().validate_change_set(change_set_factory())
 
 
-def test_validator_rejects_cross_project_source_id(paths, change_set_factory, target_plan_factory):
+def test_validator_rejects_cross_project_source_id(paths, change_set_factory, validator_factory):
     """Catches source-page metadata that could attribute another project's source here."""
     change = change_set_factory(markdown="source_id: SRC-PROJECT-B-001")
 
     with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
-        WikiValidator(paths, target_plan_factory()).validate_change_set(change)
+        validator_factory().validate_change_set(change)
 
 
-def test_validator_rejects_broken_obsidian_link(paths, change_set_factory, target_plan_factory):
+def test_validator_rejects_broken_obsidian_link(paths, change_set_factory, validator_factory):
     """Catches a Wiki page linking to a topic absent from the transaction and project."""
     change = change_set_factory(markdown="[[wiki/topics/missing]]")
 
     with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
-        WikiValidator(paths, target_plan_factory()).validate_change_set(change)
+        validator_factory().validate_change_set(change)
 
 
 def test_validator_rejects_source_frontmatter_without_raw_integrity(
-    paths, change_set_factory, target_plan_factory
+    paths, change_set_factory, validator_factory
 ):
     """Catches source pages that omit the recorded immutable Raw digest."""
     change = change_set_factory(
@@ -172,11 +171,11 @@ source_id: SRC-PROJECT-A-001
     )
 
     with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
-        WikiValidator(paths, target_plan_factory()).validate_change_set(change)
+        validator_factory().validate_change_set(change)
 
 
 def test_validator_rejects_blank_required_source_frontmatter_value(
-    paths, change_set_factory, target_plan_factory
+    paths, change_set_factory, validator_factory
 ):
     """Catches a source page whose nominal metadata cannot identify its material version."""
     markdown = change_set_factory().page_changes[0].markdown.replace(
@@ -184,9 +183,7 @@ def test_validator_rejects_blank_required_source_frontmatter_value(
     )
 
     with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
-        WikiValidator(paths, target_plan_factory()).validate_change_set(
-            change_set_factory(markdown=markdown)
-        )
+        validator_factory().validate_change_set(change_set_factory(markdown=markdown))
 
 
 @pytest.mark.parametrize(
@@ -197,7 +194,7 @@ def test_validator_rejects_blank_required_source_frontmatter_value(
     ],
 )
 def test_validator_rejects_allowlisted_but_unapproved_target(
-    paths, change_set_factory, target_plan_factory, unapproved_path
+    paths, change_set_factory, validator_factory, unapproved_path
 ):
     """Catches model output selecting a governed-looking page outside the local target plan."""
     change_set = change_set_factory()
@@ -222,7 +219,7 @@ def test_validator_rejects_allowlisted_but_unapproved_target(
         )
 
     with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
-        WikiValidator(paths, target_plan_factory()).validate_change_set(change_set)
+        validator_factory().validate_change_set(change_set)
 
 
 @pytest.mark.parametrize(
@@ -232,19 +229,20 @@ def test_validator_rejects_allowlisted_but_unapproved_target(
         "wiki/topics/unapproved-topic.md",
     ],
 )
-def test_validator_rejects_target_plan_built_from_same_model_paths(
-    paths, change_set_factory, target_plan_factory, unapproved_path
+def test_validator_rejects_model_path_without_caller_target_plan(
+    paths, source, change_set_factory, unapproved_path
 ):
-    """Catches a caller laundering model-selected targets through a public target-plan DTO."""
+    """Catches a change set asserting an allowlisted path the validator did not derive."""
     change_set = change_set_factory()
     page_changes = list(change_set.page_changes)
+    new_topic_count = 0
     if unapproved_path.startswith("wiki/sources/"):
         page_changes[0] = page_changes[0].model_copy(update={"relative_path": unapproved_path})
         change_set = change_set.model_copy(
             update={"page_changes": page_changes, "source_page_path": unapproved_path}
         )
-        target_plan = target_plan_factory()
     else:
+        new_topic_count = 1
         page_changes.append(
             WikiPageChange(
                 relative_path=unapproved_path,
@@ -257,45 +255,40 @@ def test_validator_rejects_target_plan_built_from_same_model_paths(
         change_set = change_set.model_copy(
             update={"page_changes": page_changes, "topic_page_paths": [unapproved_path]}
         )
-        target_plan = target_plan_factory(new_topic_titles=[unapproved_path])
 
     with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
-        WikiValidator(paths, target_plan).validate_change_set(change_set)
+        WikiValidator(
+            paths, source, new_topic_count=new_topic_count
+        ).validate_change_set(change_set)
 
 
-def test_validator_accepts_link_to_changed_topic(paths, change_set_factory, target_plan_factory):
+def test_validator_accepts_link_to_changed_topic(paths, change_set_factory, validator_factory):
     """Catches rejecting a source page link whose target is safely included in this commit."""
     topic = WikiPageChange(
-        relative_path="wiki/topics/pricing.md",
+        relative_path="wiki/topics/SRC-PROJECT-A-001-topic-1.md",
         operation="create",
         before_sha256=None,
         markdown="# Pricing\n",
         after_sha256=SHA_A,
     )
-    source_markdown = change_set_factory().page_changes[0].markdown + "\n[[wiki/topics/pricing]]\n"
+    source_markdown = change_set_factory().page_changes[0].markdown + (
+        "\n[[wiki/topics/SRC-PROJECT-A-001-topic-1]]\n"
+    )
     change = change_set_factory(
         markdown=source_markdown,
         page_changes=[*change_set_factory().page_changes, topic],
-        topic_page_paths=["wiki/topics/pricing.md"],
+        topic_page_paths=["wiki/topics/SRC-PROJECT-A-001-topic-1.md"],
     )
 
-    plan = target_plan_factory(new_topic_titles=["pricing"])
-    WikiValidator(paths, plan).validate_change_set(change)
+    validator_factory(new_topic_count=1).validate_change_set(change)
 
 
-def test_target_planner_rejects_missing_existing_topic(paths, source):
+def test_validator_rejects_missing_existing_topic(paths, source):
     """Catches model output claiming an existing topic that is absent from this project."""
-    with pytest.raises(ValueError, match="WIKI_TARGET_PLAN_TOPIC_UNAUTHORIZED"):
-        WikiTargetPlanner(paths).build(
+    with pytest.raises(ValueError, match="WIKI_TARGET_TOPIC_UNAUTHORIZED"):
+        WikiValidator(
+            paths,
             source,
             existing_topic_paths=["wiki/topics/unapproved-topic.md"],
-            new_topic_titles=[],
+            new_topic_count=0,
         )
-
-
-def test_target_plan_cannot_be_mutated_after_trusted_construction(target_plan_factory):
-    """Catches post-construction replacement of locally derived target authority."""
-    plan = target_plan_factory()
-
-    with pytest.raises(AttributeError):
-        plan._source_page_path = "wiki/sources/SRC-OTHER-material.md"
