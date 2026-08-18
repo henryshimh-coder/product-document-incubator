@@ -13,11 +13,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.domain.enums import SecurityLevel
-from src.domain.errors import GatewayError
+from src.domain.errors import DomainError, GatewayError
 from src.domain.models import SourceRecord
+from src.infrastructure.files.extractor import extract_document_bytes
 from src.infrastructure.files.project_library import ProjectPaths
 
-_CITATION_TOKEN = re.compile(r"【(?P<content>[^【】]*)】")
+_CITATION_TOKEN = re.compile(r"【(?P<content>[^【】\r\n]*)】")
 _BULLET = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
 _AUTHORIZATION_KEY = secrets.token_bytes(32)
 _AUTHORIZATION_ISSUER = object()
@@ -242,11 +243,73 @@ class WikiOutboundContextBuilder:
         if source_input != expected_source:
             raise _authorization_invalid()
 
+        trusted_chunks = self._trusted_source_chunks(source)
         chunk_ids = [chunk["chunk_id"] for chunk in serialized["source_chunks"]]
         if len(chunk_ids) != len(set(chunk_ids)) or any(
-            not chunk_id.startswith(f"{source.id}-") for chunk_id in chunk_ids
+            trusted_chunks.get(chunk["chunk_id"]) != chunk
+            for chunk in serialized["source_chunks"]
         ):
             raise _authorization_invalid()
+        if serialized["ingest_contract"] != self._trusted_ingest_contract():
+            raise _authorization_invalid()
+
+    def _trusted_source_chunks(self, source: SourceRecord) -> dict[str, dict[str, str]]:
+        relative_path = Path(source.archive_path)
+        if (
+            relative_path.is_absolute()
+            or "\\" in source.archive_path
+            or relative_path.as_posix() != source.archive_path
+            or not source.archive_path.startswith("raw/")
+            or any(part in {"", ".", ".."} for part in relative_path.parts)
+        ):
+            raise _authorization_invalid()
+        lexical_path = self.paths.project_root / relative_path
+        resolved_path = lexical_path.resolve()
+        raw_root = self.paths.raw_root.resolve()
+        if (
+            lexical_path.is_symlink()
+            or resolved_path != lexical_path
+            or not resolved_path.is_relative_to(raw_root)
+            or not resolved_path.is_file()
+        ):
+            raise _authorization_invalid()
+        try:
+            payload = resolved_path.read_bytes()
+        except OSError:
+            raise _authorization_invalid() from None
+        if hashlib.sha256(payload).hexdigest() != source.sha256:
+            raise _authorization_invalid()
+        try:
+            document = extract_document_bytes(
+                payload,
+                filename=source.original_filename,
+                source_id=source.id,
+            )
+        except DomainError:
+            raise _authorization_invalid() from None
+        return {
+            chunk.chunk_id: {
+                "chunk_id": chunk.chunk_id,
+                "locator": chunk.locator,
+                "text": chunk.text,
+            }
+            for chunk in document.chunks
+        }
+
+    def _trusted_ingest_contract(self) -> str:
+        lexical_path = self.paths.schema_root / "ingest-contract.md"
+        resolved_path = lexical_path.resolve()
+        schema_root = self.paths.schema_root.resolve()
+        if (
+            lexical_path.is_symlink()
+            or not resolved_path.is_relative_to(schema_root)
+            or not resolved_path.is_file()
+        ):
+            raise _authorization_invalid()
+        try:
+            return resolved_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            raise _authorization_invalid() from None
 
     def _project_allows_external_model(self, project_id: str) -> bool:
         project_path = self.paths.system_root / "project.json"
@@ -303,14 +366,13 @@ class WikiOutboundContextBuilder:
         if not isinstance(title, str) or not title.strip():
             return None
 
-        body_without_complete_tokens = _CITATION_TOKEN.sub("", body)
-        if "【" in body_without_complete_tokens or "】" in body_without_complete_tokens:
-            return None
-
         statements: list[str] = []
         source_ids: list[str] = []
         for line in body.splitlines():
             matches = list(_CITATION_TOKEN.finditer(line))
+            line_without_complete_tokens = _CITATION_TOKEN.sub("", line)
+            if "【" in line_without_complete_tokens or "】" in line_without_complete_tokens:
+                return None
             if not matches:
                 continue
             resolved_sources = [
@@ -338,6 +400,7 @@ class WikiOutboundContextBuilder:
         )
 
     def _resolve_citation(self, content: str) -> SourceRecord | None:
+        resolved: list[SourceRecord] = []
         for index, character in enumerate(content):
             if character not in {":", "："}:
                 continue
@@ -349,8 +412,8 @@ class WikiOutboundContextBuilder:
                 source = self.sources.get(source_id)
             except (KeyError, TypeError, ValueError):
                 continue
-            return source
-        return None
+            resolved.append(source)
+        return max(resolved, key=lambda source: len(source.id), default=None)
 
     @staticmethod
     def _source_record_is_exportable(source: SourceRecord, project_id: str) -> bool:

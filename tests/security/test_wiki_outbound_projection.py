@@ -122,6 +122,8 @@ def source_repository() -> _SourceRepository:
             _source("SRC-L3", security_level=SecurityLevel.L3_CONFIDENTIAL),
             _source("SRC-L4", security_level=SecurityLevel.L4_RESTRICTED),
             _source("SRC.L3", security_level=SecurityLevel.L3_CONFIDENTIAL),
+            _source("SRC", security_level=SecurityLevel.L1_PUBLIC_SIMULATED),
+            _source("SRC:L3", security_level=SecurityLevel.L3_CONFIDENTIAL),
             _source(
                 "SRC-UNREDACTED",
                 security_level=SecurityLevel.L2_INTERNAL,
@@ -188,6 +190,50 @@ def test_projection_excludes_whole_topic_for_any_malformed_or_unknown_citation_m
         "SRC-UNKNOWN",
         path,
     ):
+        assert forbidden not in serialized
+    assert projection.safe_related_topics == []
+    assert projection.local_sensitive_comparison_required is True
+    assert projection.excluded_topic_count == 1
+
+
+def test_projection_resolves_longest_known_colon_source_id_before_authorizing(
+    project_wiki: _ProjectWiki,
+    source_repository: _SourceRepository,
+) -> None:
+    path = project_wiki.write_topic(
+        "colon-ambiguous",
+        citations=[],
+        body="SECRET-COLON 【SRC:L3:section】",
+    )
+
+    projection = WikiOutboundContextBuilder(project_wiki.paths, source_repository).build(
+        project_id="PROJECT_A", related_topic_paths=[path]
+    )
+
+    serialized = projection.model_dump_json()
+    for forbidden in ("colon-ambiguous", "SECRET-COLON", "SRC:L3", path):
+        assert forbidden not in serialized
+    assert projection.safe_related_topics == []
+    assert projection.local_sensitive_comparison_required is True
+    assert projection.excluded_topic_count == 1
+
+
+def test_projection_rejects_cross_line_citation_token_for_whole_topic(
+    project_wiki: _ProjectWiki,
+    source_repository: _SourceRepository,
+) -> None:
+    path = project_wiki.write_topic(
+        "cross-line",
+        citations=["SRC-L1"],
+        body="ignored 【SRC-L3\n：section】 SECRET-CROSS-LINE",
+    )
+
+    projection = WikiOutboundContextBuilder(project_wiki.paths, source_repository).build(
+        project_id="PROJECT_A", related_topic_paths=[path]
+    )
+
+    serialized = projection.model_dump_json()
+    for forbidden in ("cross-line", "SECRET-CROSS-LINE", "SRC-L3", path):
         assert forbidden not in serialized
     assert projection.safe_related_topics == []
     assert projection.local_sensitive_comparison_required is True

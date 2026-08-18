@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from datetime import UTC, date, datetime
@@ -46,7 +47,7 @@ def valid_input(*, task_id: str = "TASK-1") -> dict[str, Any]:
         "source_chunks": [
             {
                 "chunk_id": "SRC-A-0001",
-                "locator": "Section 1",
+                "locator": "line:1",
                 "text": "Approved redacted source statement.",
             }
         ],
@@ -168,9 +169,26 @@ def authorized_builder(
         "\n- Safe channel 【SRC-L1：section】\n",
         encoding="utf-8",
     )
+    raw_bytes = b"Approved redacted source statement."
+    trusted_incoming = (incoming_source or source_record("SRC-A")).model_copy(
+        update={
+            "original_filename": "SRC-A.md",
+            "archive_path": "raw/SRC-A/SRC-A.md",
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "size_bytes": len(raw_bytes),
+        }
+    )
+    raw_path = paths.project_root / trusted_incoming.archive_path
+    raw_path.parent.mkdir(parents=True)
+    raw_path.write_bytes(raw_bytes)
+    paths.schema_root.mkdir(parents=True)
+    (paths.schema_root / "ingest-contract.md").write_text(
+        valid_input()["ingest_contract"],
+        encoding="utf-8",
+    )
     repository = SourceRepository(
         [
-            incoming_source or source_record("SRC-A"),
+            trusted_incoming,
             source_record(
                 "SRC-L1",
                 security_level=SecurityLevel.L1_PUBLIC_SIMULATED,
@@ -339,6 +357,37 @@ def test_wiki_gateway_rejects_relabelled_content_even_with_valid_generic_proof(
     client = FakeDifyClient(valid_output())
 
     with pytest.raises(GatewayError, match="WIKI_OUTBOUND_AUTHORIZATION_INVALID"):
+        WikiIngestGateway(client, timeout_seconds=60).generate(
+            inputs,
+            safety_proof=safety_proof(inputs),
+            wiki_authorization=authorization,
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("source_chunks.text", "PRIVATE-CONTENT-BEFORE-AUTHORIZATION"),
+        ("source_chunks.locator", "private:whole-file"),
+        ("ingest_contract", "PRIVATE-DOCUMENT-RELABELLED-AS-CONTRACT"),
+    ],
+)
+def test_builder_refuses_private_content_relabelled_before_authorization_and_no_invoke(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    builder, inputs, related_paths = authorized_builder(tmp_path)
+    if field.startswith("source_chunks."):
+        inputs["source_chunks"][0][field.partition(".")[2]] = replacement
+    else:
+        inputs[field] = replacement
+    client = FakeDifyClient(valid_output())
+
+    with pytest.raises(GatewayError, match="WIKI_OUTBOUND_AUTHORIZATION_INVALID"):
+        authorization = builder.authorize(inputs, related_topic_paths=related_paths)
         WikiIngestGateway(client, timeout_seconds=60).generate(
             inputs,
             safety_proof=safety_proof(inputs),
