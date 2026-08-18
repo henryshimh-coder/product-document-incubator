@@ -30,7 +30,7 @@
 | AC-17 | `test_wiki_incubation_flow.py::test_l2_archive_ingest_wiki_incubate_publish` | `raw/YYYY/SRC-*/requirements.md` SHA-256 | PASS | `3abae54` |
 | AC-18 | `test_wiki_incubation_flow.py::test_l4_archive_local_edit_confirm_without_gateway` | `wiki/drafts/local-ingest/`、`model_call_logs` | PASS | `3abae54` |
 | AC-19 | `test_wiki_incubation_flow.py::test_two_projects_in_different_roots_complete_isolated_lifecycles` | 两个项目根目录文件树、`wiki_ingest_runs`、`model_call_logs` 与项目级 DB 记录 | PASS | `10a908e` |
-| AC-20 | `test_wiki_incubation_flow.py::test_legacy_project_remains_openable_without_automatic_writes` | 不含 2.2 README/AGENTS/sources/topics 的 `legacy/LEGACY_A/` 内容树、`.incubator/project.json` 与项目级 DB；允许唯一零字节 `.incubator/locks/wiki-ingest.lock` | PASS | `6e4d3e1` |
+| AC-20 | `test_wiki_incubation_flow.py::test_legacy_project_remains_openable_without_automatic_writes` | 不含 2.2 README/AGENTS/sources/topics 的 `legacy/LEGACY_A/` 内容树、`.incubator/project.json` 与项目级 DB；允许唯一零字节 `.incubator/locks/wiki-ingest.lock` | PASS | `96c385d` |
 | AC-21 | `test_wiki_incubation_flow.py::test_root_readme_navigates_to_ingested_source_and_topic` | `README.md` -> `wiki/index.md` -> `wiki/sources/*.md`、`wiki/topics/*.md` | PASS | `10a908e` |
 | AC-22 | `test_wiki_ingest.py::test_ingest_archived_l2_source_updates_complete_wiki` | `wiki/current/`、`wiki/versions/`、`.incubator/current-baseline.json` | PASS | `3abae54` |
 | AC-23 | `test_wiki_incubation_flow.py::test_two_projects_in_different_roots_complete_isolated_lifecycles` | `one/PROJECT_A`、`two/PROJECT_B`，两边独立发布及导出 | PASS | `3abae54` |
