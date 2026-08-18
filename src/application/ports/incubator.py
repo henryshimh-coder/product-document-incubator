@@ -15,7 +15,11 @@ from src.application.dto.documents import (
     PublishDocumentDraftInput,
     SuggestStructureInput,
 )
-from src.application.dto.projects import CreateProjectInput, ProjectSelection
+from src.application.dto.projects import (
+    CreateProjectInput,
+    ProjectSelection,
+    RelocateProjectInput,
+)
 from src.domain.enums import ProjectRootStatus
 from src.domain.incubator import (
     DocumentDraft,
@@ -79,6 +83,8 @@ class ProjectManagement(Protocol):
     def list(self) -> list[ProjectSummary]: ...
 
     def switch(self, project_id: str) -> ProjectSelection: ...
+
+    def relocate(self, command: RelocateProjectInput) -> ProjectSelection: ...
 
 
 class RawSourceArchiving(Protocol):

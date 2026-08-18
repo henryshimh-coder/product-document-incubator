@@ -19,6 +19,12 @@ class CreateProjectInput(ProjectDto):
     description: str = Field(min_length=1, max_length=500)
     initial_display_version: str | None = Field(default=None, max_length=50)
     allow_external_model: bool = False
+    parent_root: Path | None = None
+
+
+class RelocateProjectInput(ProjectDto):
+    project_id: str = Field(pattern=r"^[A-Z0-9][A-Z0-9_-]{0,63}$")
+    project_root: Path
 
 
 class ProjectSelection(ProjectDto):

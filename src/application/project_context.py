@@ -8,7 +8,7 @@ from src.infrastructure.files.project_library import ProjectPaths
 
 @dataclass(frozen=True)
 class ProjectContext:
-    """The single runtime boundary for an Owner-selected product project."""
+    """The runtime boundary for a registered project and the central control database."""
 
     project_id: str
     paths: ProjectPaths

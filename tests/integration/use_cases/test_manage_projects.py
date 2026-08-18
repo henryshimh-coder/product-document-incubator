@@ -58,7 +58,12 @@ def project_environment(tmp_path: Path):
     return manager, library_root, projects, settings
 
 
-def new_project_command(project_id: str):
+@pytest.fixture
+def manager(project_environment):
+    return project_environment[0]
+
+
+def new_project_command(project_id: str, parent_root: Path | None = None):
     from src.application.dto.projects import CreateProjectInput
 
     return CreateProjectInput(
@@ -67,7 +72,14 @@ def new_project_command(project_id: str):
         description="验证产品方案孵化",
         initial_display_version=None,
         allow_external_model=False,
+        parent_root=parent_root,
     )
+
+
+def create_managed_project(manager, project_id: str, parent_root: Path) -> Path:
+    parent_root.mkdir()
+    manager.create(new_project_command(project_id, parent_root=parent_root))
+    return parent_root / project_id
 
 
 def test_scaffolder_builds_complete_2_2_wiki_llm_tree(
@@ -144,6 +156,33 @@ def test_create_project_scaffolds_complete_wiki_atomically(project_environment) 
     )
 
 
+def test_create_registers_owner_selected_root(manager, tmp_path):
+    """Catches external project roots being scaffolded without durable registration."""
+    parent = tmp_path / "customer-projects"
+    parent.mkdir()
+
+    created = manager.create(new_project_command("PROJECT_A", parent_root=parent))
+
+    assert Path(created.project_root_path) == (parent / "PROJECT_A").resolve()
+    assert (parent / "PROJECT_A/README.md").is_file()
+
+
+def test_relocate_updates_only_registry(project_environment, tmp_path):
+    """Catches relocation rebuilding or mutating a project directory instead of registering it."""
+    from src.application.dto.projects import RelocateProjectInput
+
+    manager, _, _, _ = project_environment
+    original = create_managed_project(manager, "PROJECT_A", tmp_path / "one")
+    moved = tmp_path / "two/PROJECT_A"
+    moved.parent.mkdir()
+    original.rename(moved)
+
+    manager.relocate(RelocateProjectInput(project_id="PROJECT_A", project_root=moved))
+
+    assert manager.projects.get("PROJECT_A").project_root_path == str(moved.resolve())
+    assert (moved / "wiki/index.md").is_file()
+
+
 def test_create_project_rejects_duplicate_id_without_touching_existing_files(
     project_environment,
 ) -> None:
@@ -193,7 +232,7 @@ def test_database_failure_quarantines_committed_directory(
         manager.create(new_project_command("QUARANTINE"))
 
     assert not (library_root / "QUARANTINE").exists()
-    quarantined = list((library_root / ".incubator/quarantine").glob("QUARANTINE-*"))
+    quarantined = list(library_root.glob(".QUARANTINE.quarantine-*"))
     assert len(quarantined) == 1
     assert (quarantined[0] / "schema/AGENTS.md").is_file()
 

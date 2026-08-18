@@ -49,6 +49,7 @@ from src.application.use_cases.run_lint import (
 )
 from src.application.use_cases.run_query import RunQuery
 from src.application.use_cases.suggest_document_structure import SuggestDocumentStructure
+from src.domain.errors import DomainError
 from src.domain.models import (
     Baseline,
     ChangeRequest,
@@ -100,8 +101,8 @@ from src.infrastructure.files.markdown_store import MarkdownStore
 from src.infrastructure.files.project_library import (
     JsonIncubatorSettingsStore,
     ProjectLibraryLocator,
-    ProjectPaths,
 )
+from src.infrastructure.files.project_path_resolver import ProjectPathResolver
 from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 from src.infrastructure.files.project_source_archive import ProjectSourceArchive
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
@@ -313,10 +314,13 @@ def build_container(
     if incubator_settings is not None:
         if incubator_settings.current_project_id is None:
             return AppContainer(settings=settings, manage_projects=project_management)
-        active_project = _build_project_context(
-            project_management=project_management,
-            project_id=incubator_settings.current_project_id,
-        )
+        try:
+            active_project = _build_project_context(
+                project_management=project_management,
+                project_id=incubator_settings.current_project_id,
+            )
+        except DomainError:
+            return AppContainer(settings=settings, manage_projects=project_management)
         if not active_project.paths.manifest_path.is_file():
             return AppContainer(
                 settings=settings,
@@ -678,20 +682,22 @@ def _build_project_management(
         now=now,
         locator=locator,
         schema_source=schema_source,
+        path_resolver=ProjectPathResolver(
+            library_root,
+            SqliteProjectRepository(database_path),
+            now=now,
+        ),
     )
 
 
 def _build_project_context(
     *, project_management: ProjectManagement, project_id: str
 ) -> ProjectContext:
-    paths = ProjectPaths.for_project(project_management.library_root, project_id)
-    project_management.projects.get(project_id)
-    if not paths.project_root.is_dir():
-        raise FileNotFoundError(f"project directory not found: {project_id}")
+    paths = project_management.path_resolver.resolve(project_id)
     return ProjectContext(
         project_id=project_id,
         paths=paths,
-        db_path=paths.library_root / ".incubator/product_incubator.db",
+        db_path=project_management.library_root / ".incubator/product_incubator.db",
     )
 
 

@@ -10,11 +10,18 @@ from uuid import uuid4
 
 from filelock import FileLock
 
-from src.application.dto.projects import CreateProjectInput, ProjectSelection
+from src.application.dto.projects import (
+    CreateProjectInput,
+    ProjectSelection,
+    RelocateProjectInput,
+)
 from src.application.ports.incubator import (
     IncubatorProjectRepository,
     IncubatorSettingsStore,
+    ProjectPathResolving,
 )
+from src.domain.enums import ProjectRootStatus
+from src.domain.errors import DomainError, ErrorCode
 from src.domain.incubator import IncubatorSettings, ProjectSummary
 from src.domain.models import Project
 from src.infrastructure.db.migrations import migrate
@@ -22,8 +29,8 @@ from src.infrastructure.db.repositories import SqliteProjectRepository
 from src.infrastructure.files.project_library import (
     JsonIncubatorSettingsStore,
     ProjectLibraryLocator,
-    ProjectPaths,
 )
+from src.infrastructure.files.project_path_resolver import ProjectPathResolver
 from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 
 
@@ -38,6 +45,7 @@ class ManageProjects:
         now: Callable[[], datetime],
         locator: ProjectLibraryLocator | None = None,
         schema_source: Path | None = None,
+        path_resolver: ProjectPathResolving | None = None,
     ) -> None:
         self.library_root = library_root.expanduser().resolve()
         self.projects = projects
@@ -46,6 +54,9 @@ class ManageProjects:
         self.now = now
         self.locator = locator
         self.schema_source = schema_source
+        self.path_resolver = path_resolver or ProjectPathResolver(
+            self.library_root, self.projects, now=self.now
+        )
 
     def initialize(self, owner_name: str, library_root: Path) -> IncubatorSettings:
         selected_root = library_root.expanduser().resolve()
@@ -78,6 +89,9 @@ class ManageProjects:
         self.projects = next_projects
         self.scaffolder = next_scaffolder
         self.settings = next_settings
+        self.path_resolver = ProjectPathResolver(
+            self.library_root, self.projects, now=self.now
+        )
         return configured
 
     def create(self, command: CreateProjectInput) -> Project:
@@ -88,9 +102,15 @@ class ManageProjects:
             return self._create_locked(command)
 
     def _create_locked(self, command: CreateProjectInput) -> Project:
-        paths = ProjectPaths.for_project(self.library_root, command.project_id)
-        if paths.project_root.exists():
-            raise ValueError(f"project already exists: {command.project_id}")
+        requested_parent = command.parent_root or self.library_root
+        try:
+            parent_root = self.path_resolver.validate_parent(
+                requested_parent, command.project_id
+            )
+        except DomainError as error:
+            if error.code == ErrorCode.PROJECT_ROOT_ALREADY_EXISTS.value:
+                raise ValueError(f"project already exists: {command.project_id}") from error
+            raise
         try:
             self.projects.get(command.project_id)
         except KeyError:
@@ -98,7 +118,7 @@ class ManageProjects:
         else:
             raise ValueError(f"project already exists: {command.project_id}")
 
-        prepared = self.scaffolder.prepare(command, parent_root=self.library_root)
+        prepared = self.scaffolder.prepare(command, parent_root=parent_root)
         committed = False
         try:
             self.scaffolder.validate(prepared)
@@ -114,12 +134,17 @@ class ManageProjects:
                 allow_external_model=command.allow_external_model,
                 created_at=timestamp,
                 updated_at=timestamp,
+                project_root_path=str(prepared.paths.project_root),
+                root_status=ProjectRootStatus.AVAILABLE,
+                root_last_verified_at=timestamp,
             )
             self.projects.add(project)
             return project
         except BaseException:
             if committed:
-                self._quarantine_committed_project(command.project_id)
+                self._quarantine_committed_project(
+                    prepared.paths.project_root, command.project_id
+                )
             else:
                 self.scaffolder.abort(prepared)
             raise
@@ -129,17 +154,49 @@ class ManageProjects:
 
     def switch(self, project_id: str) -> ProjectSelection:
         self.projects.get(project_id)
-        paths = ProjectPaths.for_project(self.library_root, project_id)
-        if not paths.project_root.is_dir():
-            raise FileNotFoundError(f"project directory not found: {project_id}")
+        try:
+            paths = self.path_resolver.resolve(project_id)
+        except DomainError as error:
+            raise FileNotFoundError(f"project directory not found: {project_id}") from error
         current_settings = self.settings.load()
         if current_settings is None:
             raise RuntimeError("incubator Owner settings are required")
         self.settings.save(current_settings.model_copy(update={"current_project_id": project_id}))
         return ProjectSelection(project_id=project_id, project_root=paths.project_root)
 
+    def relocate(self, command: RelocateProjectInput) -> ProjectSelection:
+        paths = self.path_resolver.validate_relocation(
+            command.project_id, command.project_root
+        )
+        self.projects.update_root_location(
+            command.project_id,
+            paths.project_root,
+            ProjectRootStatus.AVAILABLE,
+            self.now(),
+        )
+        return ProjectSelection(
+            project_id=command.project_id,
+            project_root=paths.project_root,
+        )
+
     def _summary(self, project: Project) -> ProjectSummary:
-        paths = ProjectPaths.for_project(self.library_root, project.id)
+        try:
+            paths = self.path_resolver.resolve(project.id)
+        except DomainError:
+            refreshed = self.projects.get(project.id)
+            return ProjectSummary(
+                project_id=refreshed.id,
+                name=refreshed.name,
+                stage=refreshed.stage,
+                current_version=None,
+                source_count=0,
+                draft_count=0,
+                updated_at=refreshed.updated_at,
+                project_root_path=refreshed.project_root_path,
+                root_status=refreshed.root_status,
+                root_last_verified_at=refreshed.root_last_verified_at,
+            )
+        refreshed = self.projects.get(project.id)
         source_count = 0
         source_index = paths.system_root / "source-index.json"
         if source_index.is_file():
@@ -165,23 +222,23 @@ class ManageProjects:
             value = manifest.get("current_version")
             current_version = value if isinstance(value, str) and value.strip() else None
         return ProjectSummary(
-            project_id=project.id,
-            name=project.name,
-            stage=project.stage,
+            project_id=refreshed.id,
+            name=refreshed.name,
+            stage=refreshed.stage,
             current_version=current_version,
             source_count=source_count,
             draft_count=draft_count,
-            updated_at=project.updated_at,
+            updated_at=refreshed.updated_at,
+            project_root_path=refreshed.project_root_path,
+            root_status=refreshed.root_status,
+            root_last_verified_at=refreshed.root_last_verified_at,
         )
 
-    def _quarantine_committed_project(self, project_id: str) -> None:
-        paths = ProjectPaths.for_project(self.library_root, project_id)
-        if not paths.project_root.exists():
+    def _quarantine_committed_project(self, project_root: Path, project_id: str) -> None:
+        if not project_root.exists():
             return
-        quarantine_root = self.library_root / ".incubator/quarantine"
-        quarantine_root.mkdir(parents=True, exist_ok=True)
-        quarantine_path = quarantine_root / f"{project_id}-{uuid4().hex}"
-        os.replace(paths.project_root, quarantine_path)
+        quarantine_path = project_root.parent / f".{project_id}.quarantine-{uuid4().hex}"
+        os.replace(project_root, quarantine_path)
 
 
 SESSION_STATE_WHITELIST = {
