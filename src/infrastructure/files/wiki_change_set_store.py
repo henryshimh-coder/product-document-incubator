@@ -139,6 +139,15 @@ class WikiChangeSetStore:
         }
         self._atomic_json(self.result_path, result)
 
+    def ensure_recovery_result(
+        self,
+        journal: dict[str, object],
+        status: str,
+        now: datetime,
+    ) -> None:
+        if not self.result_path.is_file():
+            self.write_recovery_result(journal, status, now)
+
     def write_journal(self, journal: dict[str, object]) -> None:
         self.transaction_root.mkdir(parents=True, exist_ok=True)
         self._atomic_json(self.journal_path, journal)
@@ -171,7 +180,7 @@ class WikiTransactionCoordinator:
         *,
         paths: ProjectPaths,
         db_path: Path,
-        validator: WikiChangeSetValidating,
+        validator: WikiChangeSetValidating | None,
         clock: Clock | None = None,
         failure_injector: FailureInjector | None = None,
         interrupted_after: timedelta = timedelta(minutes=15),
@@ -219,6 +228,8 @@ class WikiTransactionCoordinator:
         recovered = self._recover_all_locked()
         if recovered is not None and recovered.status == RECOVERY_REQUIRED:
             raise RuntimeError("WIKI_RECOVERY_REQUIRED")
+        if self.validator is None:
+            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "WIKI_VALIDATOR_REQUIRED")
         self.validator.validate_change_set(change_set)
         for change in change_set.page_changes:
             self.wiki.verify_before(change)
@@ -276,10 +287,13 @@ class WikiTransactionCoordinator:
         for transaction_root in transactions_root.iterdir():
             if not transaction_root.is_dir() or transaction_root.is_symlink():
                 continue
-            store = WikiChangeSetStore(self.paths, transaction_root.name)
-            if not store.journal_path.is_file():
-                continue
-            journal = store.read_journal()
+            try:
+                store = WikiChangeSetStore(self.paths, transaction_root.name)
+                if not store.journal_path.is_file():
+                    continue
+                journal = store.read_journal()
+            except Exception as error:
+                raise RuntimeError("WIKI_RECOVERY_REQUIRED: JOURNAL_INVALID") from error
             created_at = journal.get("created_at")
             stores.append((str(created_at), store, journal))
         result: WikiTransactionResult | None = None
@@ -315,6 +329,15 @@ class WikiTransactionCoordinator:
         if state == RECOVERY_REQUIRED:
             return self._result(transaction_id, idempotency_key, RECOVERY_REQUIRED)
         if state == ROLLED_BACK:
+            if db_succeeded:
+                return self._require_recovery(
+                    store,
+                    journal,
+                    transaction_id,
+                    idempotency_key,
+                )
+            store.ensure_recovery_result(journal, ROLLED_BACK, self.clock())
+            store.cleanup_payloads()
             return self._result(transaction_id, idempotency_key, ROLLED_BACK)
         if state == COMMITTED:
             if not db_succeeded:
@@ -324,6 +347,7 @@ class WikiTransactionCoordinator:
                     transaction_id,
                     idempotency_key,
                 )
+            store.ensure_recovery_result(journal, COMMITTED, self.clock())
             store.cleanup_payloads()
             return self._result(transaction_id, idempotency_key, COMMITTED)
 

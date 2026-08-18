@@ -4,7 +4,6 @@ import hashlib
 from datetime import timedelta
 
 from src.application.container import build_container
-from src.application.use_cases.recover_wiki_transaction import RecoverWikiTransaction
 from src.domain.wiki import WikiChangeSet, WikiIngestRun, WikiPageChange
 from src.infrastructure.db.repositories import (
     SqliteSourceRepository,
@@ -60,15 +59,12 @@ def test_project_restart_automatically_fails_orphaned_ingest_run(tmp_path) -> No
             started_at=source.created_at - timedelta(hours=1),
         )
     )
-    coordinator = WikiTransactionCoordinator(
-        paths=paths,
-        db_path=harness.db_path,
-        validator=WikiValidator(paths, source),
-        clock=lambda: source.created_at,
-        interrupted_after=timedelta(minutes=15),
-    )
+    harness.manager.switch(paths.project_id)
 
-    RecoverWikiTransaction(project_id=paths.project_id, coordinator=coordinator)
+    container = build_container(
+        environ={"INCUBATOR_LIBRARY_ROOT": str(harness.library_root)}
+    )
+    container.close()
 
     recovered_source = sources.get(source.id)
     recovered_run = runs.get_by_transaction("TXN-ORPHAN")
@@ -169,16 +165,13 @@ ingested_at: '2026-08-12T12:00:00Z'
         crashed.wiki.commit_staged(change, store.staged_root)
     store.set_state(FILES_COMMITTED, NOW)
 
-    restarted = WikiTransactionCoordinator(
-        paths=paths,
-        db_path=harness.db_path,
-        validator=validator,
-        clock=lambda: NOW,
-    )
-    recovery = RecoverWikiTransaction(project_id=paths.project_id, coordinator=restarted)
+    harness.manager.switch(paths.project_id)
 
-    assert recovery.startup_result is not None
-    assert recovery.startup_result.status == "rolled_back"
+    container = build_container(
+        environ={"INCUBATOR_LIBRARY_ROOT": str(harness.library_root)}
+    )
+    container.close()
+
     assert not (paths.project_root / source_page_path).exists()
     for relative_path, expected_hash in before_hashes.items():
         assert _sha256((paths.project_root / relative_path).read_bytes()) == expected_hash

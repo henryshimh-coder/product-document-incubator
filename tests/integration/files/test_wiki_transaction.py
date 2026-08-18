@@ -22,8 +22,11 @@ from src.infrastructure.db.repositories import (
 from src.infrastructure.files.project_audit_log import ProjectAuditLog
 from src.infrastructure.files.project_library import ProjectPaths
 from src.infrastructure.files.wiki_change_set_store import (
+    COMMITTED,
+    DATABASE_COMMITTED,
     FILES_COMMITTED,
     PREPARED,
+    ROLLED_BACK,
     WikiChangeSetStore,
     WikiTransactionCoordinator,
 )
@@ -147,10 +150,24 @@ class _TransactionFixture:
     def owner_edits(self, relative_path: str, content: str) -> None:
         self.page(relative_path).write_text(content, encoding="utf-8")
 
-    def seed_interrupted(self, journal_state: str, *, db_succeeded: bool) -> None:
+    def restarted_coordinator(self) -> WikiTransactionCoordinator:
+        return WikiTransactionCoordinator(
+            paths=self.paths,
+            db_path=self.db_path,
+            validator=WikiValidator(
+                self.paths,
+                self._source,
+                existing_topic_paths=["wiki/topics/pricing.md"],
+            ),
+            clock=lambda: NOW,
+        )
+
+    def seed_interrupted(
+        self, journal_state: str, *, db_succeeded: bool
+    ) -> WikiChangeSetStore:
         store = WikiChangeSetStore(self.paths, self.change_set.transaction_id)
         store.prepare(self.change_set, self.coordinator.wiki, NOW)
-        if journal_state in {FILES_COMMITTED, "database_committed"}:
+        if journal_state in {FILES_COMMITTED, DATABASE_COMMITTED, COMMITTED}:
             for change in self.change_set.page_changes:
                 self.coordinator.wiki.commit_staged(change, store.staged_root)
             store.set_state(FILES_COMMITTED, NOW)
@@ -183,7 +200,31 @@ class _TransactionFixture:
                     finished_at=NOW,
                 )
             )
+        elif journal_state == ROLLED_BACK:
+            failed_source = self.source().model_copy(
+                update={
+                    "ingest_status": "ingest_failed",
+                    "ingest_error_code": "WIKI_TRANSACTION_FAILED",
+                }
+            )
+            SqliteSourceRepository(self.db_path).update(failed_source)
+            SqliteWikiIngestRunRepository(self.db_path).add(
+                WikiIngestRun(
+                    id="RUN-RECOVERY",
+                    project_id=self.change_set.project_id,
+                    source_id=self.change_set.source_id,
+                    transaction_id=self.change_set.transaction_id,
+                    idempotency_key=self.change_set.idempotency_key,
+                    schema_version="2.2",
+                    generation_mode=self.change_set.generation_mode,
+                    status="ingest_failed",
+                    error_code="WIKI_TRANSACTION_FAILED",
+                    started_at=NOW,
+                    finished_at=NOW,
+                )
+            )
         store.set_state(journal_state, NOW)
+        return store
 
     def snapshot(self) -> _Snapshot:
         wiki_hashes = {
@@ -344,8 +385,12 @@ def test_failure_restores_files_and_leaves_no_success_run(
         (PREPARED, False, "rolled_back"),
         (FILES_COMMITTED, False, "rolled_back"),
         (FILES_COMMITTED, True, "committed"),
-        ("database_committed", True, "committed"),
-        ("database_committed", False, "recovery_required"),
+        (DATABASE_COMMITTED, True, "committed"),
+        (DATABASE_COMMITTED, False, "recovery_required"),
+        (COMMITTED, True, "committed"),
+        (COMMITTED, False, "recovery_required"),
+        (ROLLED_BACK, False, "rolled_back"),
+        (ROLLED_BACK, True, "recovery_required"),
     ],
 )
 def test_recovery_matrix(
@@ -355,12 +400,93 @@ def test_recovery_matrix(
     expected: str,
 ) -> None:
     """Catches recovery guessing against the durable journal/DB truth matrix."""
-    transaction_fixture.seed_interrupted(journal_state, db_succeeded=db_succeeded)
+    before = transaction_fixture.snapshot()
+    store = transaction_fixture.seed_interrupted(
+        journal_state, db_succeeded=db_succeeded
+    )
 
     result = transaction_fixture.coordinator.recover()
 
     assert result is not None
     assert result.status == expected
+    journal = json.loads(store.journal_path.read_text(encoding="utf-8"))
+    assert journal["state"] == expected
+    assert transaction_fixture.raw_sha256() == before.raw_sha256
+    assert transaction_fixture.snapshot().protected_hashes == before.protected_hashes
+    assert (transaction_fixture.succeeded_run() is not None) is db_succeeded
+    if expected == "committed":
+        for change in transaction_fixture.change_set.page_changes:
+            assert _sha256(transaction_fixture.page(change.relative_path).read_bytes()) == (
+                change.after_sha256
+            )
+        assert transaction_fixture.source().ingest_status == "ingested"
+        assert store.result_path.is_file()
+        assert not store.staged_root.exists()
+        assert not store.backup_root.exists()
+    elif expected == "rolled_back":
+        assert transaction_fixture.snapshot().wiki_hashes == before.wiki_hashes
+        assert transaction_fixture.source().ingest_status == "ingest_failed"
+        assert store.result_path.is_file()
+        assert not store.staged_root.exists()
+        assert not store.backup_root.exists()
+    else:
+        assert store.result_path.is_file()
+        assert store.staged_root.is_dir()
+        assert store.backup_root.is_dir()
+        with pytest.raises(RuntimeError, match="WIKI_RECOVERY_REQUIRED"):
+            transaction_fixture.coordinator.commit(transaction_fixture.change_set)
+
+
+@pytest.mark.parametrize(
+    ("terminal_state", "db_succeeded", "expected"),
+    [
+        (COMMITTED, True, "committed"),
+        (ROLLED_BACK, False, "rolled_back"),
+    ],
+)
+def test_recovery_completes_terminal_crash_window_idempotently(
+    transaction_fixture: _TransactionFixture,
+    terminal_state: str,
+    db_succeeded: bool,
+    expected: str,
+) -> None:
+    """Catches a crash after terminal journal state leaving content or no result summary."""
+    store = transaction_fixture.seed_interrupted(
+        terminal_state, db_succeeded=db_succeeded
+    )
+    assert not store.result_path.exists()
+    assert store.staged_root.is_dir()
+    assert store.backup_root.is_dir()
+
+    first = transaction_fixture.restarted_coordinator().recover()
+
+    assert first is not None
+    assert first.status == expected
+    result_bytes = store.result_path.read_bytes()
+    assert not store.staged_root.exists()
+    assert not store.backup_root.exists()
+
+    second = transaction_fixture.restarted_coordinator().recover()
+
+    assert second is not None
+    assert second.status == expected
+    assert store.result_path.read_bytes() == result_bytes
+
+
+@pytest.mark.parametrize("journal_payload", ["{not-json", "[]"])
+def test_invalid_journal_uses_stable_recovery_required_boundary(
+    transaction_fixture: _TransactionFixture,
+    journal_payload: str,
+) -> None:
+    """Catches corrupt journal parsing errors escaping the safe recovery boundary."""
+    store = WikiChangeSetStore(transaction_fixture.paths, "TXN-BAD-JOURNAL")
+    store.transaction_root.mkdir(parents=True)
+    store.journal_path.write_text(journal_payload, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="WIKI_RECOVERY_REQUIRED"):
+        transaction_fixture.coordinator.recover()
+    with pytest.raises(RuntimeError, match="WIKI_RECOVERY_REQUIRED"):
+        transaction_fixture.coordinator.commit(transaction_fixture.change_set)
 
 
 def test_before_hash_change_aborts_without_overwriting_owner_edit(

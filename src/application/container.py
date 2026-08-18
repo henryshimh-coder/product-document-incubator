@@ -41,6 +41,7 @@ from src.application.use_cases.publish_baseline import PublishBaseline
 from src.application.use_cases.publish_document_draft import PublishDocumentDraft
 from src.application.use_cases.reclassify_source import ReclassifySource
 from src.application.use_cases.record_decision import RecordDecision
+from src.application.use_cases.recover_wiki_transaction import RecoverWikiTransaction
 from src.application.use_cases.review_change_request import ReviewChangeRequest
 from src.application.use_cases.run_lint import (
     DeterministicLintRunner,
@@ -107,6 +108,7 @@ from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 from src.infrastructure.files.project_source_archive import ProjectSourceArchive
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.files.source_index_store import SourceIndexStore
+from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
 from src.infrastructure.gateways.composition import (
     DifyDocumentGatewaySettings,
     DifyGatewaySettings,
@@ -694,11 +696,20 @@ def _build_project_context(
     *, project_management: ProjectManagement, project_id: str
 ) -> ProjectContext:
     paths = project_management.path_resolver.resolve(project_id)
-    return ProjectContext(
+    context = ProjectContext(
         project_id=project_id,
         paths=paths,
         db_path=project_management.library_root / ".incubator/product_incubator.db",
     )
+    RecoverWikiTransaction(
+        project_id=project_id,
+        coordinator=WikiTransactionCoordinator(
+            paths=paths,
+            db_path=context.db_path,
+            validator=None,
+        ),
+    )
+    return context
 
 
 def _build_raw_source_archive(active_project: ProjectContext) -> ArchiveRawSource:
