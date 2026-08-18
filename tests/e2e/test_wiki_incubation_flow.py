@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
-
 import pytest
 from pydantic import ValidationError
 
 from src.application.dto.projects import CreateProjectInput
-from src.domain.enums import ProjectRootStatus
 from src.domain.errors import DomainError
-from src.domain.models import Project
 from src.domain.wiki import WikiIngestStatus
 from tests.e2e.harness import WikiIncubatorHarness
 
@@ -100,36 +95,35 @@ def test_move_relocate_then_continue_ingest(wiki_harness, tmp_path):
 
 
 def test_legacy_project_remains_openable_without_automatic_writes(wiki_harness, tmp_path):
-    legacy_root = tmp_path / "legacy" / "LEGACY_A"
-    for directory in ("raw", "wiki", "schema", "exports", ".incubator"):
-        (legacy_root / directory).mkdir(parents=True, exist_ok=True)
-    (legacy_root / ".incubator" / "project.json").write_text(
-        json.dumps({"project_id": "LEGACY_A", "schema_version": "2.1"}),
-        encoding="utf-8",
-    )
-    sentinel = legacy_root / "wiki" / "legacy.md"
-    sentinel.write_text("2.1 historical content\n", encoding="utf-8")
-    wiki_harness.projects.add(
-        Project(
-            id="LEGACY_A",
-            name="Legacy A",
-            product_line="Legacy",
-            stage="active",
-            current_baseline_id=None,
-            allow_external_model=False,
-            created_at=datetime(2026, 8, 17, tzinfo=UTC),
-            updated_at=datetime(2026, 8, 17, tzinfo=UTC),
-            project_root_path=str(legacy_root),
-            root_status=ProjectRootStatus.AVAILABLE,
-        )
-    )
-    before = wiki_harness.tree_hashes(wiki_harness.open_project("LEGACY_A"))
+    parent = tmp_path / "legacy"
+    parent.mkdir()
+    legacy = wiki_harness.start_legacy_project("LEGACY_A", parent)
+    before_tree = wiki_harness.tree_hashes(legacy)
+    before_content = {
+        path: digest
+        for path, digest in before_tree.items()
+        if not path.startswith(".incubator/locks/")
+    }
+    before_records = wiki_harness.project_records(legacy.project_id)
 
-    opened = wiki_harness.open_project("LEGACY_A")
+    container = wiki_harness.restart_container()
+    try:
+        assert container.active_project is not None
+        assert container.active_project.project_id == legacy.project_id
+        assert container.active_project.wiki_schema_version == "2.1"
+    finally:
+        container.close()
 
-    assert opened.project_root == legacy_root.resolve()
-    assert wiki_harness.tree_hashes(opened) == before
-    assert sentinel.read_text(encoding="utf-8") == "2.1 historical content\n"
+    assert wiki_harness.open_project(legacy.project_id).project_root == legacy.project_root
+    after_tree = wiki_harness.tree_hashes(legacy)
+    after_content = {
+        path: digest
+        for path, digest in after_tree.items()
+        if not path.startswith(".incubator/locks/")
+    }
+    assert after_content == before_content
+    assert set(after_tree).difference(before_tree) <= {".incubator/locks/wiki-ingest.lock"}
+    assert wiki_harness.project_records(legacy.project_id) == before_records
 
 
 def test_root_readme_navigates_to_ingested_source_and_topic(wiki_harness, tmp_path):

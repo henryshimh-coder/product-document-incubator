@@ -17,7 +17,7 @@ import httpx
 
 from scripts.bootstrap_demo import BASELINE_VERSION, RULE_CARD_CONTENT, RULE_CARD_ID
 from scripts.demo_materials import RISK_SENTENCE
-from src.application.container import AppContainer
+from src.application.container import AppContainer, build_container
 from src.application.dto.decision import CreateChangeRequestInput, RecordDecisionInput
 from src.application.dto.documents import (
     ArchiveRawSourceInput,
@@ -58,9 +58,11 @@ from src.domain.models import (
     LintReport,
     QueryResponse,
 )
+from src.infrastructure.db.connection import connect
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
     SqliteDocumentDraftRepository,
+    SqliteModelCallLogRepository,
     SqliteProjectRepository,
     SqliteSourceRepository,
     SqliteWikiIngestRunRepository,
@@ -620,8 +622,19 @@ class WikiIncubatorHarness:
         ).execute(ExportCurrentDocumentInput(project_id=paths.project_id))
 
     def project_records(self, project_id: str) -> dict[str, object]:
+        project = self.projects.get(project_id).model_dump(mode="json")
+        project.pop("root_status")
+        project.pop("root_last_verified_at")
+        with connect(self.db_path) as connection:
+            ingest_runs = [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM wiki_ingest_runs WHERE project_id = ? ORDER BY id",
+                    (project_id,),
+                ).fetchall()
+            ]
         return {
-            "project": self.projects.get(project_id).model_dump(mode="json"),
+            "project": project,
             "sources": [
                 source.model_dump(mode="json")
                 for source in SqliteSourceRepository(self.db_path).list_for_project(project_id)
@@ -632,7 +645,30 @@ class WikiIncubatorHarness:
                     project_id
                 )
             ],
+            "ingest_runs": ingest_runs,
+            "model_calls": [
+                call.model_dump(mode="json")
+                for call in SqliteModelCallLogRepository(self.db_path).list_for_project(
+                    project_id, limit=1000
+                )
+            ],
         }
+
+    def start_legacy_project(self, project_id: str, parent_root: Path) -> ProjectPaths:
+        """Start the normal container against a 2.1-marked project without migration writes."""
+        paths = self.create_project(project_id, parent_root)
+        metadata_path = paths.system_root / "project.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["schema_version"] = "2.1"
+        metadata.pop("wiki_schema_version", None)
+        metadata_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        self.manager.switch(project_id)
+        return paths
+
+    def restart_container(self) -> AppContainer:
+        return build_container(environ={"INCUBATOR_LIBRARY_ROOT": str(self.library_root)})
 
     def relocate(self, project_id: str, project_root: Path) -> ProjectPaths:
         selected = self.manager.relocate(
