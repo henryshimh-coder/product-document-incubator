@@ -38,6 +38,7 @@ from src.domain.models import (
     SourceRecord,
 )
 from src.domain.policies.state_transition import ensure_change_transition
+from src.domain.wiki import WikiIngestRun
 from src.infrastructure.db.connection import connect
 from src.infrastructure.observability.event_logger import (
     AuditDurabilityUncertainError,
@@ -202,8 +203,12 @@ class SqliteSourceRepository:
                     document_date, document_version, applicable_baseline_version,
                     security_level, is_redacted, allow_external_model, is_sandbox,
                     ingest_status, created_at, material_name, material_series_id,
-                    previous_source_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    previous_source_id, ingest_schema_version, ingested_at, source_page_path,
+                    topic_page_paths_json, ingest_result_digest, ingest_error_code, generation_mode
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     source.id,
@@ -229,6 +234,13 @@ class SqliteSourceRepository:
                     source.material_name,
                     source.material_series_id,
                     source.previous_source_id,
+                    source.ingest_schema_version,
+                    source.ingested_at.isoformat() if source.ingested_at is not None else None,
+                    source.source_page_path,
+                    _json_dumps(source.topic_page_paths),
+                    source.ingest_result_digest,
+                    source.ingest_error_code,
+                    source.generation_mode.value if source.generation_mode is not None else None,
                 ),
             )
 
@@ -324,7 +336,9 @@ class SqliteSourceRepository:
                     document_date = ?, document_version = ?, applicable_baseline_version = ?,
                     security_level = ?, is_redacted = ?, allow_external_model = ?,
                     is_sandbox = ?, ingest_status = ?, material_name = ?,
-                    material_series_id = ?, previous_source_id = ?
+                    material_series_id = ?, previous_source_id = ?, ingest_schema_version = ?,
+                    ingested_at = ?, source_page_path = ?, topic_page_paths_json = ?,
+                    ingest_result_digest = ?, ingest_error_code = ?, generation_mode = ?
                 WHERE id = ? AND project_id = ? AND sha256 = ?
                 """,
                 (
@@ -347,6 +361,13 @@ class SqliteSourceRepository:
                     source.material_name,
                     source.material_series_id,
                     source.previous_source_id,
+                    source.ingest_schema_version,
+                    source.ingested_at.isoformat() if source.ingested_at is not None else None,
+                    source.source_page_path,
+                    _json_dumps(source.topic_page_paths),
+                    source.ingest_result_digest,
+                    source.ingest_error_code,
+                    source.generation_mode.value if source.generation_mode is not None else None,
                     source.id,
                     source.project_id,
                     source.sha256,
@@ -371,7 +392,94 @@ class SqliteSourceRepository:
         data = _row_data(row)
         for field in ("is_redacted", "allow_external_model", "is_sandbox"):
             data[field] = bool(data[field])
+        data["topic_page_paths"] = _json_loads(data.pop("topic_page_paths_json"))
         return SourceRecord.model_validate(data)
+
+
+class SqliteWikiIngestRunRepository:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def add(self, run: WikiIngestRun) -> None:
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO wiki_ingest_runs (
+                    id, project_id, source_id, transaction_id, idempotency_key, schema_version,
+                    generation_mode, status, source_page_path, topic_page_paths_json,
+                    result_digest, error_code, started_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._values(run),
+            )
+
+    def get_by_transaction(self, transaction_id: str) -> WikiIngestRun | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM wiki_ingest_runs WHERE transaction_id = ?", (transaction_id,)
+            ).fetchone()
+        return None if row is None else self._to_model(row)
+
+    def get_succeeded_by_idempotency(self, key: str) -> WikiIngestRun | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM wiki_ingest_runs WHERE idempotency_key = ? AND status = 'ingested'",
+                (key,),
+            ).fetchone()
+        return None if row is None else self._to_model(row)
+
+    def update(self, run: WikiIngestRun) -> None:
+        with connect(self.db_path) as connection:
+            result = connection.execute(
+                """
+                UPDATE wiki_ingest_runs
+                SET project_id = ?, source_id = ?, transaction_id = ?, idempotency_key = ?,
+                    schema_version = ?, generation_mode = ?, status = ?, source_page_path = ?,
+                    topic_page_paths_json = ?, result_digest = ?, error_code = ?, started_at = ?,
+                    finished_at = ?
+                WHERE id = ?
+                """,
+                (*self._values(run)[1:], run.id),
+            )
+            if result.rowcount != 1:
+                raise KeyError(f"wiki ingest run not found: {run.id}")
+
+    def list_interrupted(self, project_id: str, older_than: datetime) -> list[WikiIngestRun]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM wiki_ingest_runs
+                WHERE project_id = ? AND status = 'ingesting' AND started_at < ?
+                ORDER BY started_at, id
+                """,
+                (project_id, older_than.isoformat()),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
+    @staticmethod
+    def _values(run: WikiIngestRun) -> tuple[object, ...]:
+        return (
+            run.id,
+            run.project_id,
+            run.source_id,
+            run.transaction_id,
+            run.idempotency_key,
+            run.schema_version,
+            run.generation_mode.value,
+            run.status,
+            run.source_page_path,
+            _json_dumps(run.topic_page_paths),
+            run.result_digest,
+            run.error_code,
+            run.started_at.isoformat(),
+            run.finished_at.isoformat() if run.finished_at is not None else None,
+        )
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> WikiIngestRun:
+        data = _row_data(row)
+        data["topic_page_paths"] = _json_loads(data.pop("topic_page_paths_json"))
+        return WikiIngestRun.model_validate(data)
 
 
 class SqliteDocumentDraftRepository:

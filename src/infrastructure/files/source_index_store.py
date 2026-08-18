@@ -37,10 +37,21 @@ class SourceIndexStore:
             "authority_level": source.authority_level.value,
             "security_level": source.security_level.value,
             "ingest_status": source.ingest_status,
+            "ingest_schema_version": source.ingest_schema_version,
+            "ingested_at": (
+                source.ingested_at.isoformat() if source.ingested_at is not None else None
+            ),
+            "source_page_path": source.source_page_path,
+            "topic_page_paths": source.topic_page_paths,
+            "ingest_result_digest": source.ingest_result_digest,
+            "ingest_error_code": source.ingest_error_code,
+            "generation_mode": (
+                source.generation_mode.value if source.generation_mode is not None else None
+            ),
             "created_at": source.created_at.isoformat(),
         }
         payload = {
-            "schema_version": "2.1",
+            "schema_version": "2.2",
             "project_id": self.paths.project_id,
             "sources": [entries[key] for key in sorted(entries)],
         }
@@ -48,7 +59,7 @@ class SourceIndexStore:
 
     def _read(self) -> dict:
         if not self.path.is_file():
-            return {"schema_version": "2.1", "project_id": self.paths.project_id, "sources": []}
+            return {"schema_version": "2.2", "project_id": self.paths.project_id, "sources": []}
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         if (
             not isinstance(payload, dict)

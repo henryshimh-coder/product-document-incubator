@@ -20,6 +20,7 @@ from src.domain.enums import (
     ChangeReviewAction,
     ChangeStatus,
     DecisionAction,
+    DocumentGenerationMode,
     EvidenceSide,
     IssueSeverity,
     IssueStatus,
@@ -83,6 +84,13 @@ class SourceRecord(DomainModel):
     material_name: NonEmptyStr | None = None
     material_series_id: NonEmptyStr | None = None
     previous_source_id: NonEmptyStr | None = None
+    ingest_schema_version: NonEmptyStr | None = None
+    ingested_at: datetime | None = None
+    source_page_path: NonEmptyStr | None = None
+    topic_page_paths: list[NonEmptyStr] = Field(default_factory=list)
+    ingest_result_digest: Sha256Str | None = None
+    ingest_error_code: NonEmptyStr | None = None
+    generation_mode: DocumentGenerationMode | None = None
 
 
 class KnowledgeCard(DomainModel):

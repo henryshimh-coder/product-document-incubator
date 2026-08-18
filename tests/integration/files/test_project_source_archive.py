@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, date, datetime
 from hashlib import sha256
 
+from src.domain.enums import AuthorityLevel, DocumentGenerationMode, SecurityLevel
+from src.domain.models import SourceRecord
 from src.infrastructure.files.project_library import ProjectPaths
 
 
@@ -35,3 +39,33 @@ def test_archived_browser_bytes_are_saved_without_a_local_source_path(tmp_path) 
 
     assert result.path.is_relative_to(paths.raw_root)
     assert result.path.read_bytes() == b"# requirements\n"
+
+
+def test_source_index_mirrors_wiki_ingest_result(tmp_path) -> None:
+    """Catches successful ingest metadata being omitted from the project-local mirror."""
+    from src.infrastructure.files.source_index_store import SourceIndexStore
+
+    paths = ProjectPaths.for_project(tmp_path / "library", "PROJECT_A")
+    ingested_at = datetime(2026, 8, 17, tzinfo=UTC)
+    source = SourceRecord(
+        id="SRC-001", project_id="PROJECT_A", original_filename="需求说明.md",
+        archive_path="raw/2026/SRC-001/需求说明.md", sha256="a" * 64,
+        mime_type="text/markdown", size_bytes=42, source_type="product_requirement",
+        authority_level=AuthorityLevel.FORMAL_EFFECTIVE, source_department="产品部", provider=None,
+        document_date=date(2026, 8, 17), document_version="v1.0",
+        applicable_baseline_version="未关联基线", security_level=SecurityLevel.L2_INTERNAL,
+        is_redacted=True, allow_external_model=True, is_sandbox=False, ingest_status="ingested",
+        created_at=ingested_at, ingest_schema_version="2.2", ingested_at=ingested_at,
+        source_page_path="wiki/sources/SRC-001-requirements.md",
+        topic_page_paths=["wiki/topics/pricing.md"], ingest_result_digest="b" * 64,
+        generation_mode=DocumentGenerationMode.EXTERNAL_AI,
+    )
+    store = SourceIndexStore(paths)
+
+    store.upsert(source)
+
+    item = json.loads(store.path.read_text(encoding="utf-8"))["sources"][0]
+    assert item["ingest_status"] == "ingested"
+    assert item["source_page_path"] == "wiki/sources/SRC-001-requirements.md"
+    assert item["topic_page_paths"] == ["wiki/topics/pricing.md"]
+    assert item["generation_mode"] == "external_ai"

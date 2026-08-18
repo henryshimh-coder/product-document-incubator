@@ -309,6 +309,18 @@ def migrate(db_path: Path) -> None:
         _add_column_if_missing(connection, "source_records", "material_name", "TEXT")
         _add_column_if_missing(connection, "source_records", "material_series_id", "TEXT")
         _add_column_if_missing(connection, "source_records", "previous_source_id", "TEXT")
+        _add_column_if_missing(connection, "source_records", "ingest_schema_version", "TEXT")
+        _add_column_if_missing(connection, "source_records", "ingested_at", "TEXT")
+        _add_column_if_missing(connection, "source_records", "source_page_path", "TEXT")
+        _add_column_if_missing(
+            connection,
+            "source_records",
+            "topic_page_paths_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )
+        _add_column_if_missing(connection, "source_records", "ingest_result_digest", "TEXT")
+        _add_column_if_missing(connection, "source_records", "ingest_error_code", "TEXT")
+        _add_column_if_missing(connection, "source_records", "generation_mode", "TEXT")
         _add_column_if_missing(connection, "projects", "project_root_path", "TEXT")
         _add_column_if_missing(
             connection,
@@ -360,6 +372,26 @@ def migrate(db_path: Path) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_source_series_version "
             "ON source_records(project_id, material_series_id, document_version) "
             "WHERE material_series_id IS NOT NULL"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wiki_ingest_runs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                source_id TEXT NOT NULL REFERENCES source_records(id),
+                transaction_id TEXT NOT NULL UNIQUE,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                schema_version TEXT NOT NULL,
+                generation_mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                source_page_path TEXT,
+                topic_page_paths_json TEXT NOT NULL DEFAULT '[]',
+                result_digest TEXT,
+                error_code TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            )
+            """
         )
         control_root = db_path.parent.parent
         legacy_projects = connection.execute(

@@ -90,6 +90,32 @@ def test_migrate_creates_documented_tables_and_enables_required_pragmas(
     assert journal_mode == "wal"
 
 
+def test_migrate_adds_wiki_ingest_fields_and_runs_table(tmp_path: Path) -> None:
+    """Catches a 2.2 bootstrap without durable Wiki ingest lifecycle state."""
+    db_path = tmp_path / "product_intelligence.db"
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        source_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(source_records)")
+        }
+        table_names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert {
+        "ingest_schema_version",
+        "ingested_at",
+        "source_page_path",
+        "topic_page_paths_json",
+        "ingest_result_digest",
+        "ingest_error_code",
+        "generation_mode",
+    } <= source_columns
+    assert "wiki_ingest_runs" in table_names
+
+
 def test_migrate_is_idempotent(tmp_path: Path) -> None:
     """Protects repeatable bootstrap and application startup."""
     db_path = tmp_path / "product_intelligence.db"

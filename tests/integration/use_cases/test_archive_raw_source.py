@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -68,6 +69,92 @@ def test_same_hash_in_same_project_returns_existing_source(tmp_path) -> None:
 
     assert second.duplicate is True
     assert second.source_id == first.source_id
+
+
+def test_archive_marks_new_2_2_project_material_pending_ingest(tmp_path) -> None:
+    """Catches new 2.2 project material following the legacy archived-only lifecycle."""
+    from src.application.project_context import ProjectContext
+    from src.application.use_cases.archive_raw_source import ArchiveRawSource
+    from src.domain.models import Project
+    from src.infrastructure.files.project_source_archive import ProjectSourceArchive
+    from src.infrastructure.files.source_index_store import SourceIndexStore
+
+    library = tmp_path / "library"
+    paths = ProjectPaths.for_project(library, "PROJECT_A")
+    paths.raw_root.mkdir(parents=True)
+    paths.system_root.mkdir(parents=True)
+    (paths.system_root / "project.json").write_text(
+        json.dumps({"project_id": "PROJECT_A", "wiki_schema_version": "2.2"}),
+        encoding="utf-8",
+    )
+    db_path = library / ".incubator/product_incubator.db"
+    migrate(db_path)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="PROJECT_A", name="项目 A", product_line="测试", stage="待初始化",
+            current_baseline_id=None, allow_external_model=False, created_at=now, updated_at=now,
+        )
+    )
+    context = ProjectContext("PROJECT_A", paths, db_path)
+    result = ArchiveRawSource(
+        paths=paths, sources=SqliteSourceRepository(db_path),
+        archive_factory=lambda source_id, year: ProjectSourceArchive(
+            paths=paths, source_id=source_id, year=year
+        ),
+        index=SourceIndexStore(paths),
+        wiki_schema_version=context.wiki_schema_version,
+        now=lambda: now,
+    ).execute(
+        _command(tmp_path / "unused.md").model_copy(
+            update={
+                "uploaded_name": "需求.md",
+                "uploaded_bytes": "# 需求\n".encode(),
+                "local_path": None,
+            }
+        )
+    )
+
+    assert context.wiki_schema_version == "2.2"
+    assert result.ingest_status == "pending_ingest"
+
+
+def test_archive_keeps_legacy_project_material_archived(tmp_path) -> None:
+    """Catches a 2.2 rollout rewriting legacy project material state on archive."""
+    from src.application.use_cases.archive_raw_source import ArchiveRawSource
+    from src.domain.models import Project
+    from src.infrastructure.files.project_source_archive import ProjectSourceArchive
+    from src.infrastructure.files.source_index_store import SourceIndexStore
+
+    library = tmp_path / "library"
+    paths = ProjectPaths.for_project(library, "PROJECT_A")
+    paths.raw_root.mkdir(parents=True)
+    db_path = library / ".incubator/product_incubator.db"
+    migrate(db_path)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="PROJECT_A", name="项目 A", product_line="测试", stage="待初始化",
+            current_baseline_id=None, allow_external_model=False, created_at=now, updated_at=now,
+        )
+    )
+    result = ArchiveRawSource(
+        paths=paths, sources=SqliteSourceRepository(db_path),
+        archive_factory=lambda source_id, year: ProjectSourceArchive(
+            paths=paths, source_id=source_id, year=year
+        ),
+        index=SourceIndexStore(paths), now=lambda: now,
+    ).execute(
+        _command(tmp_path / "unused.md").model_copy(
+            update={
+                "uploaded_name": "需求.md",
+                "uploaded_bytes": "# 需求\n".encode(),
+                "local_path": None,
+            }
+        )
+    )
+
+    assert result.ingest_status == "archived"
 
 
 def test_browser_upload_archives_new_material_with_an_explicit_series(tmp_path) -> None:
