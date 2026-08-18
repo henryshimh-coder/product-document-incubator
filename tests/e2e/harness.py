@@ -47,6 +47,7 @@ from src.domain.enums import (
     AuthorityLevel,
     ChangeReviewAction,
     DecisionAction,
+    ProjectRootStatus,
     SecurityLevel,
 )
 from src.domain.errors import DomainError, ErrorCode
@@ -56,6 +57,7 @@ from src.domain.models import (
     DecisionResult,
     IngestReport,
     LintReport,
+    Project,
     QueryResponse,
 )
 from src.infrastructure.db.connection import connect
@@ -655,17 +657,33 @@ class WikiIncubatorHarness:
         }
 
     def start_legacy_project(self, project_id: str, parent_root: Path) -> ProjectPaths:
-        """Start the normal container against a 2.1-marked project without migration writes."""
-        paths = self.create_project(project_id, parent_root)
-        metadata_path = paths.system_root / "project.json"
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["schema_version"] = "2.1"
-        metadata.pop("wiki_schema_version", None)
-        metadata_path.write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        """Register a representative pre-2.2 project without backfilling its content tree."""
+        project_root = parent_root / project_id
+        for directory in ("raw", "wiki", "schema", "exports", ".incubator"):
+            (project_root / directory).mkdir(parents=True, exist_ok=False)
+        (project_root / "wiki" / "index.md").write_text("# Legacy Wiki\n", encoding="utf-8")
+        (project_root / "wiki" / "log.md").write_text("# Legacy Log\n", encoding="utf-8")
+        (project_root / ".incubator" / "project.json").write_text(
+            json.dumps({"project_id": project_id, "schema_version": "2.1"}) + "\n",
+            encoding="utf-8",
+        )
+        timestamp = datetime.now(UTC)
+        self.projects.add(
+            Project(
+                id=project_id,
+                name="Legacy project",
+                product_line="Legacy product line",
+                stage="active",
+                current_baseline_id=None,
+                allow_external_model=False,
+                created_at=timestamp,
+                updated_at=timestamp,
+                project_root_path=str(project_root),
+                root_status=ProjectRootStatus.AVAILABLE,
+            )
         )
         self.manager.switch(project_id)
-        return paths
+        return ProjectPaths.for_registered_root(self.library_root, project_id, project_root)
 
     def restart_container(self) -> AppContainer:
         return build_container(environ={"INCUBATOR_LIBRARY_ROOT": str(self.library_root)})

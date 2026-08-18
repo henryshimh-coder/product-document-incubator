@@ -98,6 +98,10 @@ def test_legacy_project_remains_openable_without_automatic_writes(wiki_harness, 
     parent = tmp_path / "legacy"
     parent.mkdir()
     legacy = wiki_harness.start_legacy_project("LEGACY_A", parent)
+    assert not (legacy.project_root / "README.md").exists()
+    assert not (legacy.project_root / "AGENTS.md").exists()
+    assert not (legacy.wiki_root / "sources").exists()
+    assert not (legacy.wiki_root / "topics").exists()
     before_tree = wiki_harness.tree_hashes(legacy)
     before_content = {
         path: digest
@@ -123,6 +127,8 @@ def test_legacy_project_remains_openable_without_automatic_writes(wiki_harness, 
     }
     assert after_content == before_content
     assert set(after_tree).difference(before_tree) <= {".incubator/locks/wiki-ingest.lock"}
+    lock = legacy.system_root / "locks" / "wiki-ingest.lock"
+    assert not lock.exists() or lock.stat().st_size == 0
     assert wiki_harness.project_records(legacy.project_id) == before_records
 
 
