@@ -28,6 +28,7 @@ from src.infrastructure.files.wiki_change_set_store import (
     FILES_COMMITTED,
     PREPARED,
     ROLLED_BACK,
+    ROLLING_BACK,
     WikiChangeSetStore,
     WikiTransactionCoordinator,
 )
@@ -341,6 +342,18 @@ def transaction_fixture(tmp_path: Path) -> _TransactionFixture:
     return _TransactionFixture(tmp_path)
 
 
+def _seed_rolling_back_with_committed_files(
+    transaction_fixture: _TransactionFixture,
+) -> WikiChangeSetStore:
+    store = transaction_fixture.seed_interrupted(FILES_COMMITTED, db_succeeded=False)
+    transaction_fixture.coordinator._set_transaction_state(
+        store,
+        ROLLING_BACK,
+        error_code="WIKI_INGEST_INTERRUPTED",
+    )
+    return store
+
+
 def test_commit_replaces_all_targets_and_database_once(
     transaction_fixture: _TransactionFixture,
 ) -> None:
@@ -566,6 +579,82 @@ def test_recovery_completes_terminal_crash_window_idempotently(
     assert store.result_path.read_bytes() == result_bytes
 
 
+@pytest.mark.parametrize(
+    ("binding_state", "journal_state", "db_succeeded", "expected"),
+    [
+        (DATABASE_COMMITTED, COMMITTED, True, "committed"),
+        (ROLLING_BACK, ROLLED_BACK, False, "rolled_back"),
+    ],
+    ids=["db-committed-to-committed", "rolling-back-to-rolled-back"],
+)
+def test_recovery_reconciles_lagged_terminal_journal_state(
+    transaction_fixture: _TransactionFixture,
+    binding_state: str,
+    journal_state: str,
+    db_succeeded: bool,
+    expected: str,
+) -> None:
+    """Catches terminal journal tampering being finalized without the predecessor checks."""
+    if binding_state == ROLLING_BACK:
+        store = _seed_rolling_back_with_committed_files(transaction_fixture)
+    else:
+        store = transaction_fixture.seed_interrupted(binding_state, db_succeeded=db_succeeded)
+    journal = store.read_journal()
+    journal["state"] = journal_state
+    store.write_journal(journal)
+
+    result = transaction_fixture.restarted_coordinator().recover()
+
+    assert result is not None
+    assert result.status == expected
+    assert not store.staged_root.exists()
+    assert not store.backup_root.exists()
+
+
+def test_tampered_committed_journal_requires_manual_recovery_when_file_verification_fails(
+    transaction_fixture: _TransactionFixture,
+) -> None:
+    """Catches database_committed -> committed cleanup skipping after-hash verification."""
+    store = transaction_fixture.seed_interrupted(DATABASE_COMMITTED, db_succeeded=True)
+    journal = store.read_journal()
+    journal["state"] = COMMITTED
+    store.write_journal(journal)
+    transaction_fixture.page("wiki/topics/pricing.md").write_text("Owner edit\n", encoding="utf-8")
+
+    result = transaction_fixture.restarted_coordinator().recover()
+
+    assert result is not None
+    assert result.status == "recovery_required"
+    assert store.read_journal()["state"] == "recovery_required"
+    assert store.staged_root.is_dir()
+    assert store.backup_root.is_dir()
+    assert transaction_fixture.source().ingest_status == "ingested"
+    result_payload = json.loads(store.result_path.read_text(encoding="utf-8"))
+    assert result_payload["status"] == "recovery_required"
+
+
+def test_tampered_rolled_back_journal_requires_manual_recovery_when_backup_is_missing(
+    transaction_fixture: _TransactionFixture,
+) -> None:
+    """Catches rolling_back -> rolled_back cleanup skipping deterministic restore checks."""
+    store = _seed_rolling_back_with_committed_files(transaction_fixture)
+    journal = store.read_journal()
+    journal["state"] = ROLLED_BACK
+    store.write_journal(journal)
+    (store.backup_root / "wiki/topics/pricing.md").unlink()
+
+    result = transaction_fixture.restarted_coordinator().recover()
+
+    assert result is not None
+    assert result.status == "recovery_required"
+    assert store.read_journal()["state"] == "recovery_required"
+    assert store.staged_root.is_dir()
+    assert store.backup_root.is_dir()
+    assert transaction_fixture.source().ingest_status == "ingesting"
+    result_payload = json.loads(store.result_path.read_text(encoding="utf-8"))
+    assert result_payload["status"] == "recovery_required"
+
+
 @pytest.mark.parametrize("journal_payload", ["{not-json", "[]"])
 def test_invalid_journal_uses_stable_recovery_required_boundary(
     transaction_fixture: _TransactionFixture,
@@ -721,24 +810,75 @@ def test_later_commits_do_not_revalidate_terminal_transaction_hashes(
     assert result.status == "committed"
 
 
-def test_legacy_identity_binding_recovers_committed_journal_and_allows_next_commit(
+def test_migrated_legacy_identity_binding_recovers_committed_journal_and_allows_next_commit(
     transaction_fixture: _TransactionFixture,
 ) -> None:
-    transaction_fixture.seed_interrupted(COMMITTED, db_succeeded=True)
+    store = transaction_fixture.seed_interrupted(COMMITTED, db_succeeded=True)
     with connect(transaction_fixture.db_path) as connection:
-        connection.execute(
+        row = connection.execute(
             """
-            UPDATE wiki_transaction_bindings
-            SET binding_version = 0
+            SELECT transaction_id, project_id, source_id, idempotency_key,
+                   binding_sha256, created_at
+            FROM wiki_transaction_bindings
             WHERE transaction_id = ?
             """,
             (transaction_fixture.change_set.transaction_id,),
+        ).fetchone()
+        assert row is not None
+        connection.execute(
+            """
+            DROP TABLE wiki_transaction_bindings
+            """,
         )
+        connection.execute(
+            """
+            CREATE TABLE wiki_transaction_bindings (
+                transaction_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                binding_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO wiki_transaction_bindings (
+                transaction_id, project_id, source_id, idempotency_key, binding_sha256, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            tuple(row),
+        )
+    migrate(transaction_fixture.db_path)
+    with connect(transaction_fixture.db_path) as connection:
+        migrated = connection.execute(
+            """
+            SELECT binding_state, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = ?
+            """,
+            (transaction_fixture.change_set.transaction_id,),
+        ).fetchone()
+    assert migrated is not None
+    assert tuple(migrated) == ("building", 0)
 
     recovered = transaction_fixture.restarted_coordinator().recover()
 
     assert recovered is not None
     assert recovered.status == "committed"
+    assert store.read_journal()["state"] == "committed"
+    with connect(transaction_fixture.db_path) as connection:
+        rebound = connection.execute(
+            """
+            SELECT binding_state, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = ?
+            """,
+            (transaction_fixture.change_set.transaction_id,),
+        ).fetchone()
+    assert rebound is not None
+    assert tuple(rebound) == ("committed", 1)
     second = transaction_fixture.rebase_change_set("TXN-B", "b")
     assert transaction_fixture.restarted_coordinator().commit(second).status == "committed"
 

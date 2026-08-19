@@ -150,13 +150,13 @@ def test_migrate_adds_binding_version_to_existing_wiki_transaction_bindings(tmp_
         }
         row = connection.execute(
             """
-            SELECT binding_version
+            SELECT binding_state, binding_version
             FROM wiki_transaction_bindings
             WHERE transaction_id = 'TXN-LEGACY'
             """
         ).fetchone()
     assert columns["binding_version"] == "0"
-    assert row == (0,)
+    assert row == ("committed", 0)
 
 
 def test_migrate_is_idempotent(tmp_path: Path) -> None:

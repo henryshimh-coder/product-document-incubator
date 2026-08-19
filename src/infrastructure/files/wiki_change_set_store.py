@@ -36,9 +36,22 @@ RECOVERY_REQUIRED = "recovery_required"
 FailureInjector = Callable[[str], None]
 Clock = Callable[[], datetime]
 _TRANSACTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_BINDING_VERSION_COMPAT = 0
-_BINDING_VERSION_LEGACY_IDENTITY = 1
-_BINDING_VERSION_TRUSTED_IDENTITY = 2
+# Version semantics:
+# 0 = migrated pre-binding_state identity rows whose binding_state was backfilled
+#     with a placeholder default during migrate(); only terminal journals can be
+#     trusted enough to reopen these rows.
+# 1 = current identity-only binding written by this coordinator.
+_BINDING_VERSION_MIGRATED_IDENTITY = 0
+_BINDING_VERSION_TRUSTED_IDENTITY = 1
+_MIGRATED_BINDING_ALLOWED_TERMINAL_STATES = {
+    COMMITTED,
+    ROLLED_BACK,
+    RECOVERY_REQUIRED,
+}
+_RECOVERY_STATE_BY_LAGGED_TERMINAL_JOURNAL = {
+    (DATABASE_COMMITTED, COMMITTED): DATABASE_COMMITTED,
+    (ROLLING_BACK, ROLLED_BACK): ROLLING_BACK,
+}
 _ALLOWED_JOURNAL_STATES_BY_BINDING = {
     BUILDING: {BUILDING, PREPARED, ROLLING_BACK, RECOVERY_REQUIRED},
     PREPARED: {PREPARED, FILES_COMMITTED, ROLLING_BACK, RECOVERY_REQUIRED},
@@ -443,15 +456,16 @@ class WikiTransactionCoordinator:
         except Exception:
             return self._require_recovery(store, journal, transaction_id, idempotency_key)
 
+        recovery_state = self._recovery_state_for_binding(trusted, state)
         db_succeeded = self._database_succeeded(
             transaction_id,
             trusted.project_id,
             trusted.source_id,
             trusted.idempotency_key,
         )
-        if state == RECOVERY_REQUIRED:
+        if recovery_state == RECOVERY_REQUIRED:
             return self._result(transaction_id, idempotency_key, RECOVERY_REQUIRED)
-        if state == ROLLED_BACK:
+        if recovery_state == ROLLED_BACK:
             if db_succeeded:
                 return self._require_recovery(
                     store,
@@ -463,10 +477,12 @@ class WikiTransactionCoordinator:
                 self._verify_raw_evidence(raw)
             except Exception:
                 return self._require_recovery(store, journal, transaction_id, idempotency_key)
+            if trusted.binding_version == _BINDING_VERSION_MIGRATED_IDENTITY:
+                self._set_transaction_state(store, ROLLED_BACK)
             store.ensure_recovery_result(journal, ROLLED_BACK, self.clock())
             store.cleanup_payloads()
             return self._result(transaction_id, idempotency_key, ROLLED_BACK)
-        if state == COMMITTED:
+        if recovery_state == COMMITTED:
             if not db_succeeded:
                 return self._require_recovery(
                     store,
@@ -478,12 +494,14 @@ class WikiTransactionCoordinator:
                 self._verify_raw_evidence(raw)
             except Exception:
                 return self._require_recovery(store, journal, transaction_id, idempotency_key)
+            if trusted.binding_version == _BINDING_VERSION_MIGRATED_IDENTITY:
+                self._set_transaction_state(store, COMMITTED)
             store.ensure_recovery_result(journal, COMMITTED, self.clock())
             store.cleanup_payloads()
             return self._result(transaction_id, idempotency_key, COMMITTED)
 
-        if state in {BUILDING, PREPARED, ROLLING_BACK} or (
-            state == FILES_COMMITTED and not db_succeeded
+        if recovery_state in {BUILDING, PREPARED, ROLLING_BACK} or (
+            recovery_state == FILES_COMMITTED and not db_succeeded
         ):
             try:
                 self._set_transaction_state(
@@ -510,15 +528,15 @@ class WikiTransactionCoordinator:
             except Exception:
                 return self._require_recovery(store, journal, transaction_id, idempotency_key)
 
-        if state == DATABASE_COMMITTED and not db_succeeded:
+        if recovery_state == DATABASE_COMMITTED and not db_succeeded:
             return self._require_recovery(store, journal, transaction_id, idempotency_key)
 
-        if state in {FILES_COMMITTED, DATABASE_COMMITTED} and db_succeeded:
+        if recovery_state in {FILES_COMMITTED, DATABASE_COMMITTED} and db_succeeded:
             try:
                 for target in targets:
                     self.wiki.verify_after(target)
                 self._verify_raw_evidence(raw)
-                if state == FILES_COMMITTED:
+                if recovery_state == FILES_COMMITTED:
                     self._set_transaction_state(store, DATABASE_COMMITTED)
                 self._set_transaction_state(store, COMMITTED)
                 store.write_recovery_result(journal, COMMITTED, self.clock())
@@ -767,16 +785,22 @@ class WikiTransactionCoordinator:
         if match_kind != "identity":
             raise RuntimeError("WIKI_RECOVERY_REQUIRED")
         store.set_state(state, self.clock(), error_code=error_code)
+        next_binding_version = (
+            _BINDING_VERSION_TRUSTED_IDENTITY
+            if trusted.binding_version == _BINDING_VERSION_MIGRATED_IDENTITY
+            else trusted.binding_version
+        )
         with connect(self.db_path) as connection:
             updated = connection.execute(
                 """
                 UPDATE wiki_transaction_bindings
-                SET binding_state = ?
+                SET binding_state = ?, binding_version = ?
                 WHERE transaction_id = ? AND project_id = ? AND source_id = ?
                   AND idempotency_key = ? AND binding_sha256 = ? AND binding_version = ?
                 """,
                 (
                     state,
+                    next_binding_version,
                     trusted.transaction_id,
                     trusted.project_id,
                     trusted.source_id,
@@ -826,23 +850,39 @@ class WikiTransactionCoordinator:
             project_id != binding.project_id
             or source_id != binding.source_id
             or idempotency_key != binding.idempotency_key
-            or state not in _ALLOWED_JOURNAL_STATES_BY_BINDING.get(binding.binding_state, set())
         ):
             return False
-        match_kind = self._binding_match_kind(
-            binding,
-            state=state,
-            project_id=project_id,
-            source_id=source_id,
-            idempotency_key=idempotency_key,
-            raw=raw,
-            targets=targets,
-        )
-        if match_kind == "identity":
-            return True
-        if match_kind != "legacy_stateful":
+        if (
+            self._binding_match_kind(
+                binding,
+                state=state,
+                project_id=project_id,
+                source_id=source_id,
+                idempotency_key=idempotency_key,
+                raw=raw,
+                targets=targets,
+            )
+            != "identity"
+        ):
             return False
-        return state in {COMMITTED, ROLLED_BACK, RECOVERY_REQUIRED}
+        return state in self._allowed_journal_states(binding)
+
+    @staticmethod
+    def _allowed_journal_states(binding: _TrustedRecoveryBinding) -> set[str]:
+        if binding.binding_version == _BINDING_VERSION_MIGRATED_IDENTITY:
+            return set(_MIGRATED_BINDING_ALLOWED_TERMINAL_STATES)
+        if binding.binding_version == _BINDING_VERSION_TRUSTED_IDENTITY:
+            return set(_ALLOWED_JOURNAL_STATES_BY_BINDING.get(binding.binding_state, set()))
+        return set()
+
+    @staticmethod
+    def _recovery_state_for_binding(binding: _TrustedRecoveryBinding, journal_state: str) -> str:
+        if binding.binding_version == _BINDING_VERSION_MIGRATED_IDENTITY:
+            return journal_state
+        return _RECOVERY_STATE_BY_LAGGED_TERMINAL_JOURNAL.get(
+            (binding.binding_state, journal_state),
+            journal_state,
+        )
 
     def _binding_match_kind(
         self,
@@ -865,19 +905,6 @@ class WikiTransactionCoordinator:
         )
         if self._binding_sha256(identity_payload) == binding.binding_sha256:
             return "identity"
-        if binding.binding_version != _BINDING_VERSION_COMPAT:
-            return None
-        legacy_payload = self._binding_legacy_stateful_payload(
-            transaction_id=binding.transaction_id,
-            project_id=project_id,
-            source_id=source_id,
-            idempotency_key=idempotency_key,
-            state=state,
-            raw=raw,
-            targets=targets,
-        )
-        if self._binding_sha256(legacy_payload) == binding.binding_sha256:
-            return "legacy_stateful"
         return None
 
     @staticmethod

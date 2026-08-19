@@ -509,6 +509,10 @@ def test_model_output_with_injected_citation_body_fails_before_wiki_commit(
         ("title", "产品原则【SRC-L3：section】"),
         ("title", "产品原则【SRC-PROJECT-B-001：section】"),
         ("title", "产品原则【SRC-L3：section"),
+        ("title", "产品原则 src-project-b-001:section"),
+        ("title", "产品原则 Src-Project-B-001：section"),
+        ("title", "产品原则 SRC-PROJECT-B-001:"),
+        ("title", "产品原则 SRC-PROJECT-B-001："),
     ],
     ids=[
         "topic-id-l3",
@@ -516,6 +520,10 @@ def test_model_output_with_injected_citation_body_fails_before_wiki_commit(
         "title-l3",
         "title-cross-project",
         "title-malformed",
+        "title-lowercase-source-id",
+        "title-mixedcase-source-id",
+        "title-dangling-ascii-colon",
+        "title-dangling-fullwidth-colon",
     ],
 )
 def test_topic_metadata_with_citation_tokens_fails_before_transaction_write(

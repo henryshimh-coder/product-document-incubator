@@ -3,7 +3,11 @@ from __future__ import annotations
 import re
 
 _TOPIC_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_CITATION_LIKE_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])[A-Z][A-Z0-9_-]{1,127}\s*[：:]\s*\S")
+_SOURCE_ID_LIKE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"(?P<source>(?:[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+|SRC[A-Za-z0-9_-]{0,124}))"
+    r"\s*[：:]"
+)
 
 
 def validate_topic_id(value: str) -> str:
@@ -30,6 +34,6 @@ def _normalize_metadata(value: str) -> str:
         raise ValueError("TOPIC_METADATA_CITATION_INVALID")
     if "\r" in normalized or "\n" in normalized:
         raise ValueError("TOPIC_METADATA_MULTILINE_INVALID")
-    if _CITATION_LIKE_PATTERN.search(normalized):
+    if _SOURCE_ID_LIKE_PATTERN.search(normalized):
         raise ValueError("TOPIC_METADATA_CITATION_INVALID")
     return normalized
