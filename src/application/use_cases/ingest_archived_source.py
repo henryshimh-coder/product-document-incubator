@@ -40,6 +40,10 @@ from src.infrastructure.files.redactor import redact_text
 from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
 from src.infrastructure.files.wiki_outbound_context import WikiOutboundContextBuilder
+from src.infrastructure.files.wiki_topic_metadata import (
+    validate_topic_id,
+    validate_topic_title,
+)
 from src.infrastructure.files.wiki_validator import WikiValidator
 from src.infrastructure.gateways._common import (
     create_outbound_safety_proof,
@@ -221,6 +225,7 @@ class IngestArchivedSource:
                     error_code=getattr(error, "code", ErrorCode.WIKI_CHANGESET_INVALID.value),
                 )
                 raise
+            self._validate_topic_metadata(output)
             self._validate_model_output_citations(source, output)
             audit_recorded = True
             self._record_external_model_call(
@@ -290,6 +295,18 @@ class IngestArchivedSource:
             if isinstance(error, AppError):
                 raise
             raise DomainError(error_code) from None
+
+    @staticmethod
+    def _validate_topic_metadata(output: WikiIngestWorkflowOutput) -> None:
+        try:
+            for topic in output.topic_changes:
+                validate_topic_id(topic.topic_id)
+                validate_topic_title(topic.title)
+        except ValueError:
+            raise DomainError(
+                ErrorCode.WIKI_CHANGESET_INVALID,
+                "TOPIC_METADATA_INVALID",
+            ) from None
 
     def _resolve_project(self, project_id: str) -> None:
         if project_id != self.paths.project_id:
@@ -445,8 +462,7 @@ class IngestArchivedSource:
                 in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL},
                 source.is_redacted,
                 source.allow_external_model,
-                not source.is_sandbox
-                or source.security_level == SecurityLevel.L1_PUBLIC_SIMULATED,
+                not source.is_sandbox or source.security_level == SecurityLevel.L1_PUBLIC_SIMULATED,
             )
         )
         if not allowed:
@@ -512,9 +528,9 @@ class IngestArchivedSource:
         safe_related_topics: list[dict],
     ) -> dict:
         try:
-            contract = (self.paths.schema_root / "ingest-contract.md").read_text(
-                encoding="utf-8"
-            ).strip()
+            contract = (
+                (self.paths.schema_root / "ingest-contract.md").read_text(encoding="utf-8").strip()
+            )
         except (OSError, UnicodeError):
             raise DomainError(ErrorCode.WIKI_SCHEMA_MISSING) from None
         return {
@@ -524,8 +540,7 @@ class IngestArchivedSource:
             "source": {
                 "id": source.id,
                 "source_type": source.source_type,
-                "material_name": source.material_name
-                or Path(source.original_filename).stem,
+                "material_name": source.material_name or Path(source.original_filename).stem,
                 "document_version": source.document_version,
                 "document_date": source.document_date.isoformat(),
                 "applicable_scope": source.applicable_baseline_version,
@@ -561,9 +576,7 @@ class IngestArchivedSource:
         )
         source_page_path = validator._source_page_path()
         topic_outputs = [
-            topic
-            for topic in output.topic_changes
-            if topic.change_type == "update"
+            topic for topic in output.topic_changes if topic.change_type == "update"
         ] + new_outputs
         topic_paths = list(validator.topic_page_paths)
         first_locator = self._first_source_locator(source)
@@ -593,9 +606,7 @@ class IngestArchivedSource:
                 output,
                 excluded_topic_count,
                 existing_markdown=(
-                    self._read_required(relative_path)
-                    if topic.change_type == "update"
-                    else None
+                    self._read_required(relative_path) if topic.change_type == "update" else None
                 ),
             )
         contents["wiki/index.md"] = self._index_markdown(
@@ -749,9 +760,7 @@ class IngestArchivedSource:
         return f"{prefix}\n\n{addition}"
 
     @staticmethod
-    def _findings_markdown(
-        output: WikiIngestWorkflowOutput, excluded_topic_count: int = 0
-    ) -> str:
+    def _findings_markdown(output: WikiIngestWorkflowOutput, excluded_topic_count: int = 0) -> str:
         conflicts = [
             f"- {conflict.summary} · 来源："
             + ", ".join(f"`{source_id}`" for source_id in conflict.source_ids)
@@ -759,9 +768,7 @@ class IngestArchivedSource:
         ] or ["- 无"]
         evidence_gaps = [f"- {gap}" for gap in output.evidence_gaps] or ["- 无"]
         sensitive_gap = (
-            [
-                f"- {excluded_topic_count} 个相关主题因安全限制仅可本地比对，未外发给模型。"
-            ]
+            [f"- {excluded_topic_count} 个相关主题因安全限制仅可本地比对，未外发给模型。"]
             if excluded_topic_count
             else []
         )
@@ -892,13 +899,9 @@ class IngestArchivedSource:
                     ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_SOURCE_UNAUTHORIZED"
                 ) from None
             if linked.project_id != source.project_id:
-                raise DomainError(
-                    ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_SOURCE_UNAUTHORIZED"
-                )
+                raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_SOURCE_UNAUTHORIZED")
             return self._first_source_locator(linked)
-        match = re.search(
-            rf"【{re.escape(source_id)}[：:]([^【】\r\n]+)】", existing_markdown
-        )
+        match = re.search(rf"【{re.escape(source_id)}[：:]([^【】\r\n]+)】", existing_markdown)
         if match is None or not match.group(1).strip():
             raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_SOURCE_LOCATOR_REQUIRED")
         return match.group(1).strip()
@@ -997,9 +1000,7 @@ class IngestArchivedSource:
                     redacted=redacted,
                     outbound_chars=outbound_chars,
                     outbound_coverage=(1.0 if outbound_chars else 0.0),
-                    result_mode=(
-                        CallResultMode.REALTIME if invoked else CallResultMode.LOCAL_ONLY
-                    ),
+                    result_mode=(CallResultMode.REALTIME if invoked else CallResultMode.LOCAL_ONLY),
                     status=status,  # type: ignore[arg-type]
                     started_at=started,
                     finished_at=finished,

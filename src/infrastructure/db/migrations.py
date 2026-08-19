@@ -402,6 +402,7 @@ def migrate(db_path: Path) -> None:
                 idempotency_key TEXT NOT NULL,
                 binding_state TEXT NOT NULL DEFAULT 'building',
                 binding_sha256 TEXT NOT NULL,
+                binding_version INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )
             """
@@ -411,6 +412,12 @@ def migrate(db_path: Path) -> None:
             "wiki_transaction_bindings",
             "binding_state",
             "TEXT NOT NULL DEFAULT 'building'",
+        )
+        _add_column_if_missing(
+            connection,
+            "wiki_transaction_bindings",
+            "binding_version",
+            "INTEGER NOT NULL DEFAULT 0",
         )
         control_root = db_path.parent.parent
         legacy_projects = connection.execute(

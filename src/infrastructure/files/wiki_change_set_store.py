@@ -36,6 +36,24 @@ RECOVERY_REQUIRED = "recovery_required"
 FailureInjector = Callable[[str], None]
 Clock = Callable[[], datetime]
 _TRANSACTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_BINDING_VERSION_COMPAT = 0
+_BINDING_VERSION_LEGACY_IDENTITY = 1
+_BINDING_VERSION_TRUSTED_IDENTITY = 2
+_ALLOWED_JOURNAL_STATES_BY_BINDING = {
+    BUILDING: {BUILDING, PREPARED, ROLLING_BACK, RECOVERY_REQUIRED},
+    PREPARED: {PREPARED, FILES_COMMITTED, ROLLING_BACK, RECOVERY_REQUIRED},
+    FILES_COMMITTED: {
+        FILES_COMMITTED,
+        DATABASE_COMMITTED,
+        ROLLING_BACK,
+        RECOVERY_REQUIRED,
+    },
+    DATABASE_COMMITTED: {DATABASE_COMMITTED, COMMITTED, RECOVERY_REQUIRED},
+    COMMITTED: {COMMITTED},
+    ROLLING_BACK: {ROLLING_BACK, ROLLED_BACK, RECOVERY_REQUIRED},
+    ROLLED_BACK: {ROLLED_BACK},
+    RECOVERY_REQUIRED: {RECOVERY_REQUIRED},
+}
 
 
 @dataclass(frozen=True)
@@ -60,6 +78,7 @@ class _TrustedRecoveryBinding:
     idempotency_key: str
     binding_state: str
     binding_sha256: str
+    binding_version: int
 
 
 class WikiChangeSetStore:
@@ -284,7 +303,7 @@ class WikiTransactionCoordinator:
         store = WikiChangeSetStore(self.paths, change_set.transaction_id)
         try:
             store.prepare(change_set, self.wiki, self.clock())
-            self._persist_recovery_binding_from_journal(store)
+            self._set_transaction_state(store, PREPARED)
             self.failure_injector("after_prepare")
             for index, change in enumerate(change_set.page_changes):
                 self.wiki.commit_staged(change, store.staged_root)
@@ -683,21 +702,6 @@ class WikiTransactionCoordinator:
             ],
         )
 
-    def _persist_recovery_binding_from_journal(self, store: WikiChangeSetStore) -> None:
-        journal = store.read_journal()
-        transaction_id, project_id, source_id, idempotency_key, state, targets, raw = (
-            self._validate_journal(store, journal)
-        )
-        self._write_recovery_binding(
-            transaction_id=transaction_id,
-            project_id=project_id,
-            source_id=source_id,
-            idempotency_key=idempotency_key,
-            state=state,
-            raw=raw,
-            targets=targets,
-        )
-
     def _write_recovery_binding(
         self,
         *,
@@ -709,12 +713,11 @@ class WikiTransactionCoordinator:
         raw: _JournalRawEvidence,
         targets: list[_JournalTarget],
     ) -> None:
-        payload = self._recovery_binding_payload(
+        payload = self._binding_identity_payload(
             transaction_id=transaction_id,
             project_id=project_id,
             source_id=source_id,
             idempotency_key=idempotency_key,
-            state=state,
             raw=raw,
             targets=targets,
         )
@@ -723,14 +726,8 @@ class WikiTransactionCoordinator:
                 """
                 INSERT INTO wiki_transaction_bindings (
                     transaction_id, project_id, source_id, idempotency_key,
-                    binding_state, binding_sha256, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(transaction_id) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    source_id = excluded.source_id,
-                    idempotency_key = excluded.idempotency_key,
-                    binding_state = excluded.binding_state,
-                    binding_sha256 = excluded.binding_sha256
+                    binding_state, binding_sha256, binding_version, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     transaction_id,
@@ -739,6 +736,7 @@ class WikiTransactionCoordinator:
                     idempotency_key,
                     state,
                     self._binding_sha256(payload),
+                    _BINDING_VERSION_TRUSTED_IDENTITY,
                     self.clock().isoformat(),
                 ),
             )
@@ -750,15 +748,52 @@ class WikiTransactionCoordinator:
         *,
         error_code: str | None = None,
     ) -> None:
+        journal = store.read_journal()
+        transaction_id, project_id, source_id, idempotency_key, journal_state, targets, raw = (
+            self._validate_journal(store, journal)
+        )
+        trusted = self._load_recovery_binding(transaction_id)
+        if trusted is None:
+            raise RuntimeError("WIKI_RECOVERY_REQUIRED")
+        match_kind = self._binding_match_kind(
+            trusted,
+            state=journal_state,
+            project_id=project_id,
+            source_id=source_id,
+            idempotency_key=idempotency_key,
+            raw=raw,
+            targets=targets,
+        )
+        if match_kind != "identity":
+            raise RuntimeError("WIKI_RECOVERY_REQUIRED")
         store.set_state(state, self.clock(), error_code=error_code)
-        self._persist_recovery_binding_from_journal(store)
+        with connect(self.db_path) as connection:
+            updated = connection.execute(
+                """
+                UPDATE wiki_transaction_bindings
+                SET binding_state = ?
+                WHERE transaction_id = ? AND project_id = ? AND source_id = ?
+                  AND idempotency_key = ? AND binding_sha256 = ? AND binding_version = ?
+                """,
+                (
+                    state,
+                    trusted.transaction_id,
+                    trusted.project_id,
+                    trusted.source_id,
+                    trusted.idempotency_key,
+                    trusted.binding_sha256,
+                    trusted.binding_version,
+                ),
+            )
+        if updated.rowcount != 1:
+            raise RuntimeError("WIKI_RECOVERY_REQUIRED")
 
     def _load_recovery_binding(self, transaction_id: str) -> _TrustedRecoveryBinding | None:
         with connect(self.db_path) as connection:
             row = connection.execute(
                 """
                 SELECT transaction_id, project_id, source_id, idempotency_key,
-                       binding_state, binding_sha256
+                       binding_state, binding_sha256, binding_version
                 FROM wiki_transaction_bindings
                 WHERE transaction_id = ?
                 """,
@@ -773,6 +808,7 @@ class WikiTransactionCoordinator:
             idempotency_key=str(row["idempotency_key"]),
             binding_state=str(row["binding_state"]),
             binding_sha256=str(row["binding_sha256"]),
+            binding_version=int(row["binding_version"]),
         )
 
     def _journal_matches_binding(
@@ -790,10 +826,48 @@ class WikiTransactionCoordinator:
             project_id != binding.project_id
             or source_id != binding.source_id
             or idempotency_key != binding.idempotency_key
-            or state != binding.binding_state
+            or state not in _ALLOWED_JOURNAL_STATES_BY_BINDING.get(binding.binding_state, set())
         ):
             return False
-        payload = self._recovery_binding_payload(
+        match_kind = self._binding_match_kind(
+            binding,
+            state=state,
+            project_id=project_id,
+            source_id=source_id,
+            idempotency_key=idempotency_key,
+            raw=raw,
+            targets=targets,
+        )
+        if match_kind == "identity":
+            return True
+        if match_kind != "legacy_stateful":
+            return False
+        return state in {COMMITTED, ROLLED_BACK, RECOVERY_REQUIRED}
+
+    def _binding_match_kind(
+        self,
+        binding: _TrustedRecoveryBinding,
+        *,
+        state: str,
+        project_id: str,
+        source_id: str,
+        idempotency_key: str,
+        raw: _JournalRawEvidence,
+        targets: list[_JournalTarget],
+    ) -> str | None:
+        identity_payload = self._binding_identity_payload(
+            transaction_id=binding.transaction_id,
+            project_id=project_id,
+            source_id=source_id,
+            idempotency_key=idempotency_key,
+            raw=raw,
+            targets=targets,
+        )
+        if self._binding_sha256(identity_payload) == binding.binding_sha256:
+            return "identity"
+        if binding.binding_version != _BINDING_VERSION_COMPAT:
+            return None
+        legacy_payload = self._binding_legacy_stateful_payload(
             transaction_id=binding.transaction_id,
             project_id=project_id,
             source_id=source_id,
@@ -802,16 +876,17 @@ class WikiTransactionCoordinator:
             raw=raw,
             targets=targets,
         )
-        return self._binding_sha256(payload) == binding.binding_sha256
+        if self._binding_sha256(legacy_payload) == binding.binding_sha256:
+            return "legacy_stateful"
+        return None
 
     @staticmethod
-    def _recovery_binding_payload(
+    def _binding_identity_payload(
         *,
         transaction_id: str,
         project_id: str,
         source_id: str,
         idempotency_key: str,
-        state: str,
         raw: _JournalRawEvidence,
         targets: list[_JournalTarget],
     ) -> dict[str, object]:
@@ -820,7 +895,6 @@ class WikiTransactionCoordinator:
             "project_id": project_id,
             "source_id": source_id,
             "idempotency_key": idempotency_key,
-            "state": state,
             "raw": {
                 "relative_path": raw.relative_path,
                 "sha256": raw.sha256,
@@ -835,6 +909,28 @@ class WikiTransactionCoordinator:
                 for target in targets
             ],
         }
+
+    @staticmethod
+    def _binding_legacy_stateful_payload(
+        *,
+        transaction_id: str,
+        project_id: str,
+        source_id: str,
+        idempotency_key: str,
+        state: str,
+        raw: _JournalRawEvidence,
+        targets: list[_JournalTarget],
+    ) -> dict[str, object]:
+        payload = WikiTransactionCoordinator._binding_identity_payload(
+            transaction_id=transaction_id,
+            project_id=project_id,
+            source_id=source_id,
+            idempotency_key=idempotency_key,
+            raw=raw,
+            targets=targets,
+        )
+        payload["state"] = state
+        return payload
 
     @staticmethod
     def _binding_sha256(payload: dict[str, object]) -> str:

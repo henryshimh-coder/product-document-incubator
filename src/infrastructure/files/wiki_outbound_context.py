@@ -24,6 +24,7 @@ from src.infrastructure.files.project_library import (
     require_safe_project_roles,
 )
 from src.infrastructure.files.redactor import redact_text
+from src.infrastructure.files.wiki_topic_metadata import validate_topic_id
 
 _CITATION_TOKEN = re.compile(r"【(?P<content>[^【】\r\n]*)】")
 _BULLET = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
@@ -249,8 +250,7 @@ class WikiOutboundContextBuilder:
             topic.model_dump(mode="json") for topic in expected_projection.safe_related_topics
         ]
         if (
-            serialized["safe_index_projection"]
-            != expected_projection.safe_index_projection
+            serialized["safe_index_projection"] != expected_projection.safe_index_projection
             or serialized["safe_related_topics"] != expected_topics
         ):
             raise _authorization_invalid()
@@ -282,8 +282,7 @@ class WikiOutboundContextBuilder:
         trusted_chunks = self._trusted_source_chunks(source)
         chunk_ids = [chunk["chunk_id"] for chunk in serialized["source_chunks"]]
         if len(chunk_ids) != len(set(chunk_ids)) or any(
-            trusted_chunks.get(chunk["chunk_id"]) != chunk
-            for chunk in serialized["source_chunks"]
+            trusted_chunks.get(chunk["chunk_id"]) != chunk for chunk in serialized["source_chunks"]
         ):
             raise _authorization_invalid()
         if serialized["ingest_contract"] != self._trusted_ingest_contract():
@@ -426,8 +425,9 @@ class WikiOutboundContextBuilder:
             return None
         if frontmatter.get("project_id") != project_id:
             return None
-        title = frontmatter.get("topic_id")
-        if not isinstance(title, str) or not title.strip():
+        try:
+            title = validate_topic_id(frontmatter.get("topic_id"))
+        except ValueError:
             return None
 
         statements: list[str] = []
@@ -439,9 +439,7 @@ class WikiOutboundContextBuilder:
                 return None
             if not matches:
                 continue
-            resolved_sources = [
-                self._resolve_citation(match.group("content")) for match in matches
-            ]
+            resolved_sources = [self._resolve_citation(match.group("content")) for match in matches]
             if any(source is None for source in resolved_sources):
                 return None
             statement = _BULLET.sub("", _CITATION_TOKEN.sub("", line)).strip()
@@ -505,9 +503,7 @@ class WikiOutboundContextBuilder:
         cited = self.citation_sources(markdown)
         if not cited or not any(item.id == source.id for item in cited):
             return None
-        if any(
-            not self._source_record_is_exportable(item, source.project_id) for item in cited
-        ):
+        if any(not self._source_record_is_exportable(item, source.project_id) for item in cited):
             return None
         redaction = redact_text(
             markdown,
@@ -550,12 +546,10 @@ class WikiOutboundContextBuilder:
                 source.project_id == project_id,
                 source.security_level
                 in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL},
-                (not require_ingested)
-                or source.ingest_status == WikiIngestStatus.INGESTED.value,
+                (not require_ingested) or source.ingest_status == WikiIngestStatus.INGESTED.value,
                 source.is_redacted,
                 source.allow_external_model,
-                not source.is_sandbox
-                or source.security_level == SecurityLevel.L1_PUBLIC_SIMULATED,
+                not source.is_sandbox or source.security_level == SecurityLevel.L1_PUBLIC_SIMULATED,
             )
         )
 

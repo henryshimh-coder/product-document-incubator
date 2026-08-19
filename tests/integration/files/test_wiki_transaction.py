@@ -163,13 +163,11 @@ class _TransactionFixture:
             clock=lambda: NOW,
         )
 
-    def seed_interrupted(
-        self, journal_state: str, *, db_succeeded: bool
-    ) -> WikiChangeSetStore:
+    def seed_interrupted(self, journal_state: str, *, db_succeeded: bool) -> WikiChangeSetStore:
         self.coordinator._persist_recovery_binding(self.change_set, state="building")
         store = WikiChangeSetStore(self.paths, self.change_set.transaction_id)
         store.prepare(self.change_set, self.coordinator.wiki, NOW)
-        self.coordinator._persist_recovery_binding_from_journal(store)
+        self.coordinator._set_transaction_state(store, PREPARED)
         if journal_state in {FILES_COMMITTED, DATABASE_COMMITTED, COMMITTED}:
             for change in self.change_set.page_changes:
                 self.coordinator.wiki.commit_staged(change, store.staged_root)
@@ -278,8 +276,7 @@ ingested_at: '2026-08-17T12:00:00Z'
             "wiki/index.md": "# Wiki\n\n- [[wiki/sources/SRC-A-material]]",
             "wiki/log.md": f"# Log\n\n- {idempotency_key} SRC-A ingested",
             ".incubator/source-index.json": (
-                '{"schema_version":"2.2","sources":[{"id":"SRC-A",'
-                '"ingest_status":"ingested"}]}'
+                '{"schema_version":"2.2","sources":[{"id":"SRC-A","ingest_status":"ingested"}]}'
             ),
         }
         changes: list[WikiPageChange] = []
@@ -319,9 +316,7 @@ ingested_at: '2026-08-17T12:00:00Z'
             target = self.page(previous.relative_path)
             markdown = target.read_text(encoding="utf-8")
             if previous.relative_path == "wiki/log.md":
-                markdown = (
-                    f"{markdown.rstrip()}\n\n- {idempotency_key} SRC-A ingested"
-                )
+                markdown = f"{markdown.rstrip()}\n\n- {idempotency_key} SRC-A ingested"
             changes.append(
                 WikiPageChange(
                     relative_path=previous.relative_path,
@@ -357,9 +352,12 @@ def test_commit_replaces_all_targets_and_database_once(
     assert result.status == "committed"
     assert transaction_fixture.source().ingest_status == "ingested"
     assert transaction_fixture.page("wiki/sources/SRC-A-material.md").is_file()
-    assert transaction_fixture.page("wiki/log.md").read_text(encoding="utf-8").count(
-        result.idempotency_key
-    ) == 1
+    assert (
+        transaction_fixture.page("wiki/log.md")
+        .read_text(encoding="utf-8")
+        .count(result.idempotency_key)
+        == 1
+    )
     assert transaction_fixture.raw_sha256() == before.raw_sha256
     assert transaction_fixture.snapshot().protected_hashes == before.protected_hashes
 
@@ -398,9 +396,9 @@ def test_raw_mutation_at_database_boundary_requires_recovery_and_never_succeeds(
     with pytest.raises(RuntimeError, match="WIKI_RECOVERY_REQUIRED"):
         transaction_fixture.coordinator.commit(transaction_fixture.change_set)
 
-    journal = next(
-        (transaction_fixture.paths.system_root / "transactions").iterdir()
-    ) / "journal.json"
+    journal = (
+        next((transaction_fixture.paths.system_root / "transactions").iterdir()) / "journal.json"
+    )
     assert json.loads(journal.read_text(encoding="utf-8"))["state"] == "recovery_required"
     assert transaction_fixture.succeeded_run() is None
 
@@ -427,9 +425,7 @@ def test_recovery_matrix(
 ) -> None:
     """Catches recovery guessing against the durable journal/DB truth matrix."""
     before = transaction_fixture.snapshot()
-    store = transaction_fixture.seed_interrupted(
-        journal_state, db_succeeded=db_succeeded
-    )
+    store = transaction_fixture.seed_interrupted(journal_state, db_succeeded=db_succeeded)
 
     result = transaction_fixture.coordinator.recover()
 
@@ -501,6 +497,41 @@ def test_tampered_journal_requires_recovery_before_restore_or_db_update(
     assert run is None
 
 
+def test_state_transition_rejects_tampered_journal_without_rebinding_db(
+    transaction_fixture: _TransactionFixture,
+) -> None:
+    store = transaction_fixture.seed_interrupted(PREPARED, db_succeeded=False)
+    for change in transaction_fixture.change_set.page_changes:
+        transaction_fixture.coordinator.wiki.commit_staged(change, store.staged_root)
+    with connect(transaction_fixture.db_path) as connection:
+        before = connection.execute(
+            """
+            SELECT binding_state, binding_sha256, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = ?
+            """,
+            (transaction_fixture.change_set.transaction_id,),
+        ).fetchone()
+    journal = store.read_journal()
+    journal["targets"][0]["after_sha256"] = "0" * 64
+    store.write_journal(journal)
+
+    with pytest.raises(RuntimeError, match="WIKI_RECOVERY_REQUIRED"):
+        transaction_fixture.coordinator._set_transaction_state(store, FILES_COMMITTED)
+
+    with connect(transaction_fixture.db_path) as connection:
+        after = connection.execute(
+            """
+            SELECT binding_state, binding_sha256, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = ?
+            """,
+            (transaction_fixture.change_set.transaction_id,),
+        ).fetchone()
+    assert tuple(after) == tuple(before)
+    assert store.read_journal()["state"] == PREPARED
+
+
 @pytest.mark.parametrize(
     ("terminal_state", "db_succeeded", "expected"),
     [
@@ -515,9 +546,7 @@ def test_recovery_completes_terminal_crash_window_idempotently(
     expected: str,
 ) -> None:
     """Catches a crash after terminal journal state leaving content or no result summary."""
-    store = transaction_fixture.seed_interrupted(
-        terminal_state, db_succeeded=db_succeeded
-    )
+    store = transaction_fixture.seed_interrupted(terminal_state, db_succeeded=db_succeeded)
     assert not store.result_path.exists()
     assert store.staged_root.is_dir()
     assert store.backup_root.is_dir()
@@ -562,9 +591,10 @@ def test_before_hash_change_aborts_without_overwriting_owner_edit(
     with pytest.raises(DomainError, match="WIKI_CONCURRENT_MODIFICATION"):
         transaction_fixture.coordinator.commit(transaction_fixture.change_set)
 
-    assert transaction_fixture.page("wiki/topics/pricing.md").read_text(
-        encoding="utf-8"
-    ) == "Owner new text"
+    assert (
+        transaction_fixture.page("wiki/topics/pricing.md").read_text(encoding="utf-8")
+        == "Owner new text"
+    )
 
 
 def test_committed_transaction_keeps_only_content_free_summary(
@@ -603,9 +633,7 @@ def test_audit_log_renders_one_deterministic_ingest_entry(
     )
 
     assert rendered == (
-        "# Log\n\n"
-        "- 2026-08-17T12:00:00+00:00 | Wiki Ingest | SRC-A | TXN-A | "
-        f"{'d' * 64}\n"
+        f"# Log\n\n- 2026-08-17T12:00:00+00:00 | Wiki Ingest | SRC-A | TXN-A | {'d' * 64}\n"
     )
     assert (
         audit.render_ingest(
@@ -646,13 +674,8 @@ def test_rollback_never_overwrites_unknown_owner_edit_and_blocks_next_commit(
         transaction_fixture.coordinator.commit(transaction_fixture.change_set)
 
     assert source_page.read_text(encoding="utf-8") == "Owner recovery text"
-    journal_path = (
-        transaction_fixture.paths.system_root
-        / "transactions/TXN-A/journal.json"
-    )
-    assert json.loads(journal_path.read_text(encoding="utf-8"))["state"] == (
-        "recovery_required"
-    )
+    journal_path = transaction_fixture.paths.system_root / "transactions/TXN-A/journal.json"
+    assert json.loads(journal_path.read_text(encoding="utf-8"))["state"] == ("recovery_required")
     with pytest.raises(RuntimeError, match="WIKI_RECOVERY_REQUIRED"):
         transaction_fixture.coordinator.commit(transaction_fixture.change_set)
     assert source_page.read_text(encoding="utf-8") == "Owner recovery text"
@@ -676,9 +699,7 @@ def test_transaction_id_cannot_escape_fixed_transaction_directory(
     transaction_fixture: _TransactionFixture,
 ) -> None:
     """Catches an untrusted transaction ID redirecting journal/staging outside its root."""
-    escaped = transaction_fixture.change_set.model_copy(
-        update={"transaction_id": "../escaped"}
-    )
+    escaped = transaction_fixture.change_set.model_copy(update={"transaction_id": "../escaped"})
 
     with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
         transaction_fixture.coordinator.commit(escaped)
@@ -698,6 +719,65 @@ def test_later_commits_do_not_revalidate_terminal_transaction_hashes(
     result = transaction_fixture.coordinator.commit(third)
 
     assert result.status == "committed"
+
+
+def test_legacy_identity_binding_recovers_committed_journal_and_allows_next_commit(
+    transaction_fixture: _TransactionFixture,
+) -> None:
+    transaction_fixture.seed_interrupted(COMMITTED, db_succeeded=True)
+    with connect(transaction_fixture.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE wiki_transaction_bindings
+            SET binding_version = 0
+            WHERE transaction_id = ?
+            """,
+            (transaction_fixture.change_set.transaction_id,),
+        )
+
+    recovered = transaction_fixture.restarted_coordinator().recover()
+
+    assert recovered is not None
+    assert recovered.status == "committed"
+    second = transaction_fixture.rebase_change_set("TXN-B", "b")
+    assert transaction_fixture.restarted_coordinator().commit(second).status == "committed"
+
+
+def test_legacy_stateful_binding_for_running_journal_requires_manual_recovery(
+    transaction_fixture: _TransactionFixture,
+) -> None:
+    store = transaction_fixture.seed_interrupted(PREPARED, db_succeeded=False)
+    _, _, _, _, _, targets, raw = transaction_fixture.coordinator._validate_journal(
+        store,
+        store.read_journal(),
+    )
+    legacy_payload = transaction_fixture.coordinator._binding_legacy_stateful_payload(
+        transaction_id=transaction_fixture.change_set.transaction_id,
+        project_id=transaction_fixture.change_set.project_id,
+        source_id=transaction_fixture.change_set.source_id,
+        idempotency_key=transaction_fixture.change_set.idempotency_key,
+        state=PREPARED,
+        raw=raw,
+        targets=targets,
+    )
+    with connect(transaction_fixture.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE wiki_transaction_bindings
+            SET binding_sha256 = ?, binding_version = 0
+            WHERE transaction_id = ?
+            """,
+            (
+                transaction_fixture.coordinator._binding_sha256(legacy_payload),
+                transaction_fixture.change_set.transaction_id,
+            ),
+        )
+
+    result = transaction_fixture.restarted_coordinator().recover()
+
+    assert result is not None
+    assert result.status == "recovery_required"
+    assert store.read_journal()["state"] == "recovery_required"
 
 
 def test_fixed_wiki_symlink_cannot_redirect_commit_into_current(
@@ -723,9 +803,7 @@ def test_success_run_remains_durable_fact_when_source_starts_reingest(
     """Catches a source's next ingest state invalidating its prior successful transaction."""
     transaction_fixture.coordinator.commit(transaction_fixture.change_set)
     sources = SqliteSourceRepository(transaction_fixture.db_path)
-    sources.update(
-        transaction_fixture.source().model_copy(update={"ingest_status": "ingesting"})
-    )
+    sources.update(transaction_fixture.source().model_copy(update={"ingest_status": "ingesting"}))
     reingest = transaction_fixture.rebase_change_set("TXN-REINGEST", "a")
 
     result = transaction_fixture.coordinator.commit(reingest)
@@ -738,9 +816,7 @@ def test_stale_orphan_run_does_not_downgrade_a_newer_ingested_source(
 ) -> None:
     """Catches orphan cleanup replacing a newer authoritative source success."""
     sources = SqliteSourceRepository(transaction_fixture.db_path)
-    sources.update(
-        transaction_fixture.source().model_copy(update={"ingest_status": "ingested"})
-    )
+    sources.update(transaction_fixture.source().model_copy(update={"ingest_status": "ingested"}))
     runs = SqliteWikiIngestRunRepository(transaction_fixture.db_path)
     runs.add(
         WikiIngestRun(

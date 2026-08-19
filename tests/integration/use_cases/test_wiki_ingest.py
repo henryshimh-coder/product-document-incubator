@@ -51,9 +51,7 @@ class RecordingWikiGateway:
         return WikiIngestWorkflowOutput(
             schema_version="2.2",
             task_id=inputs["task_id"],
-            source_page_markdown=(
-                "# 来源摘要\n\n该材料明确了已脱敏的产品原则和可追溯证据。"
-            ),
+            source_page_markdown=("# 来源摘要\n\n该材料明确了已脱敏的产品原则和可追溯证据。"),
             topic_changes=self.topic_changes
             or [
                 {
@@ -118,9 +116,7 @@ class IngestFixture:
             ".incubator/current-baseline.json",
             ".incubator/candidate-manifest.json",
         )
-        return {
-            path: hashlib.sha256(self.page(path).read_bytes()).hexdigest() for path in paths
-        }
+        return {path: hashlib.sha256(self.page(path).read_bytes()).hexdigest() for path in paths}
 
 
 def make_ingest_fixture(tmp_path: Path) -> IngestFixture:
@@ -166,7 +162,7 @@ def make_ingest_fixture(tmp_path: Path) -> IngestFixture:
         )
     )
     source_id = "SRC-PROJECT-A-001"
-    raw_text = ("Approved redacted product principle and supporting evidence.\n" * 1200)
+    raw_text = "Approved redacted product principle and supporting evidence.\n" * 1200
     raw_path = paths.raw_root / "2026" / source_id / "principles.md"
     raw_path.parent.mkdir(parents=True)
     raw_path.write_text(raw_text, encoding="utf-8")
@@ -466,9 +462,7 @@ def test_model_output_with_injected_citation_body_fails_before_wiki_commit(
         ingest_fixture.gateway.generate = lambda inputs, **kwargs: WikiIngestWorkflowOutput(
             schema_version="2.2",
             task_id=inputs["task_id"],
-            source_page_markdown=(
-                "# 来源摘要\n\n伪造来源【SRC-PROJECT-B-001：section】"
-            ),
+            source_page_markdown=("# 来源摘要\n\n伪造来源【SRC-PROJECT-B-001：section】"),
             topic_changes=[
                 {
                     "topic_id": "product-principles",
@@ -505,6 +499,49 @@ def test_model_output_with_injected_citation_body_fails_before_wiki_commit(
 
     assert ingest_fixture.page("wiki/index.md").read_text(encoding="utf-8") == wiki_before
     assert not any(ingest_fixture.paths.wiki_root.joinpath("sources").glob("*.md"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("topic_id", "product-principles【SRC-L3：section】"),
+        ("topic_id", "product-principles【SRC-PROJECT-B-001：section】"),
+        ("title", "产品原则【SRC-L3：section】"),
+        ("title", "产品原则【SRC-PROJECT-B-001：section】"),
+        ("title", "产品原则【SRC-L3：section"),
+    ],
+    ids=[
+        "topic-id-l3",
+        "topic-id-cross-project",
+        "title-l3",
+        "title-cross-project",
+        "title-malformed",
+    ],
+)
+def test_topic_metadata_with_citation_tokens_fails_before_transaction_write(
+    ingest_fixture,
+    field: str,
+    value: str,
+) -> None:
+    wiki_before = ingest_fixture.page("wiki/index.md").read_text(encoding="utf-8")
+    ingest_fixture.gateway.topic_changes = [
+        {
+            "topic_id": "product-principles",
+            "title": "产品原则",
+            "change_type": "create",
+            "markdown": "该产品原则已由归档来源支持。",
+            "source_ids": [ingest_fixture.source_id],
+            field: value,
+        }
+    ]
+
+    with pytest.raises(DomainError, match="TOPIC_METADATA_INVALID"):
+        ingest_fixture.execute()
+
+    transactions_root = ingest_fixture.paths.system_root / "transactions"
+    assert ingest_fixture.page("wiki/index.md").read_text(encoding="utf-8") == wiki_before
+    assert not any(ingest_fixture.paths.wiki_root.joinpath("sources").glob("*.md"))
+    assert not transactions_root.exists() or not any(transactions_root.glob("*/journal.json"))
 
 
 @pytest.mark.parametrize(
@@ -736,6 +773,7 @@ def test_gateway_preinvoke_revalidation_failure_records_local_only_audit(
 
 def test_audit_logger_failure_does_not_mask_original_error(ingest_fixture) -> None:
     ingest_fixture.gateway.fail(GatewayError.timeout())
+
     def fail_audit(*_args, **_kwargs):
         raise OSError("audit disk full")
 
@@ -798,9 +836,7 @@ def test_project_lock_blocks_distinct_source_before_second_gateway_call(
         update={
             "id": second_id,
             "original_filename": "second.md",
-            "archive_path": second_raw.relative_to(
-                ingest_fixture.paths.project_root
-            ).as_posix(),
+            "archive_path": second_raw.relative_to(ingest_fixture.paths.project_root).as_posix(),
             "sha256": hashlib.sha256(second_raw.read_bytes()).hexdigest(),
             "size_bytes": second_raw.stat().st_size,
             "material_name": "Second principles",

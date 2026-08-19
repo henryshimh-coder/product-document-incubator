@@ -12,6 +12,7 @@ from src.infrastructure.db.repositories import (
 )
 from src.infrastructure.files.wiki_change_set_store import (
     FILES_COMMITTED,
+    PREPARED,
     WikiChangeSetStore,
     WikiTransactionCoordinator,
 )
@@ -62,9 +63,7 @@ def test_project_restart_automatically_fails_orphaned_ingest_run(tmp_path) -> No
     )
     harness.manager.switch(paths.project_id)
 
-    container = build_container(
-        environ={"INCUBATOR_LIBRARY_ROOT": str(harness.library_root)}
-    )
+    container = build_container(environ={"INCUBATOR_LIBRARY_ROOT": str(harness.library_root)})
     container.close()
 
     recovered_source = sources.get(source.id)
@@ -166,16 +165,14 @@ ingested_at: '2026-08-12T12:00:00Z'
     crashed._persist_recovery_binding(change_set, state="building")
     store = WikiChangeSetStore(paths, change_set.transaction_id)
     store.prepare(change_set, crashed.wiki, NOW)
-    crashed._persist_recovery_binding_from_journal(store)
+    crashed._set_transaction_state(store, PREPARED)
     for change in change_set.page_changes:
         crashed.wiki.commit_staged(change, store.staged_root)
     crashed._set_transaction_state(store, FILES_COMMITTED)
 
     harness.manager.switch(paths.project_id)
 
-    container = build_container(
-        environ={"INCUBATOR_LIBRARY_ROOT": str(harness.library_root)}
-    )
+    container = build_container(environ={"INCUBATOR_LIBRARY_ROOT": str(harness.library_root)})
     container.close()
 
     assert not (paths.project_root / source_page_path).exists()

@@ -97,9 +97,7 @@ def test_migrate_adds_wiki_ingest_fields_and_runs_table(tmp_path: Path) -> None:
     migrate(db_path)
 
     with sqlite3.connect(db_path) as connection:
-        source_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(source_records)")
-        }
+        source_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_records)")}
         table_names = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -114,6 +112,51 @@ def test_migrate_adds_wiki_ingest_fields_and_runs_table(tmp_path: Path) -> None:
         "generation_mode",
     } <= source_columns
     assert "wiki_ingest_runs" in table_names
+
+
+def test_migrate_adds_binding_version_to_existing_wiki_transaction_bindings(tmp_path: Path) -> None:
+    """Protects legacy 2.2 rows from becoming unreadable after trusted binding upgrades."""
+    db_path = tmp_path / "product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations (version TEXT PRIMARY KEY);
+            INSERT INTO schema_migrations(version) VALUES ('2.2');
+            CREATE TABLE wiki_transaction_bindings (
+                transaction_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                binding_state TEXT NOT NULL DEFAULT 'building',
+                binding_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO wiki_transaction_bindings VALUES (
+                'TXN-LEGACY', 'PROJECT_A', 'SRC-A',
+                'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                'committed',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                '2026-08-17T00:00:00+00:00'
+            );
+            """
+        )
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]: row[4]
+            for row in connection.execute("PRAGMA table_info(wiki_transaction_bindings)")
+        }
+        row = connection.execute(
+            """
+            SELECT binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = 'TXN-LEGACY'
+            """
+        ).fetchone()
+    assert columns["binding_version"] == "0"
+    assert row == (0,)
 
 
 def test_migrate_is_idempotent(tmp_path: Path) -> None:

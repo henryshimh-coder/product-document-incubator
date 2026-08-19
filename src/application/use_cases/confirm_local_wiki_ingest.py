@@ -33,6 +33,7 @@ from src.infrastructure.files.project_audit_log import ProjectAuditLog
 from src.infrastructure.files.project_library import ProjectPaths
 from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
+from src.infrastructure.files.wiki_topic_metadata import validate_topic_id
 from src.infrastructure.files.wiki_validator import WikiValidator
 
 _SOURCE_REQUIRED_HEADINGS = ("# 来源：", "## 来源摘要", "## 来源定位")
@@ -355,8 +356,10 @@ class ConfirmLocalWikiIngest:
         if frontmatter.get("project_id") != source.project_id:
             raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "LOCAL_TOPIC_PROJECT_ID")
         topic_id = frontmatter.get("topic_id")
-        if not isinstance(topic_id, str) or not topic_id.strip():
-            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "LOCAL_TOPIC_ID")
+        try:
+            validate_topic_id(topic_id)
+        except ValueError:
+            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "LOCAL_TOPIC_ID") from None
         if f"【{source.id}：" not in markdown:
             raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "LOCAL_TOPIC_SOURCE_REFERENCE")
         return markdown.strip()
