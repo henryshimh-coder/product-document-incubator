@@ -9,13 +9,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from src.application.dto.projects import CreateProjectInput
 from src.infrastructure.files.project_library import ProjectPaths
 
+ROOT_TEMPLATE_MAP = {
+    "root-README.md": "README.md",
+    "root-AGENTS.md": "AGENTS.md",
+}
+
 SCHEMA_FILENAMES = (
     "AGENTS.md",
+    "ingest-contract.md",
+    "source-page-template.md",
+    "topic-page-template.md",
     "product-document-template.md",
     "field-conventions.md",
 )
@@ -83,20 +91,22 @@ class ProjectScaffolder:
         self.schema_source = schema_source.expanduser().resolve()
         self.now = now
 
-    def prepare(self, command: CreateProjectInput) -> PreparedProject:
-        paths = ProjectPaths.for_project(self.library_root, command.project_id)
+    def prepare(self, command: CreateProjectInput, *, parent_root: Path) -> PreparedProject:
+        parent = parent_root.expanduser().resolve()
+        target = parent / command.project_id
+        paths = ProjectPaths.for_registered_root(self.library_root, command.project_id, target)
         if paths.project_root.exists():
             raise ValueError(f"project already exists: {command.project_id}")
         self._validate_schema_source()
-        self.library_root.mkdir(parents=True, exist_ok=True)
-        temp_root = self.library_root / f".{command.project_id}.tmp-{uuid4().hex}"
+        parent.mkdir(parents=True, exist_ok=True)
+        temp_root = parent / f".{command.project_id}.tmp-{uuid4().hex}"
         prepared = PreparedProject(
             project_id=command.project_id,
             temp_root=temp_root,
             paths=paths,
         )
         try:
-            self._build_tree(prepared, command)
+            self._build_tree(temp_root, command)
             return prepared
         except BaseException:
             self.abort(prepared)
@@ -107,13 +117,19 @@ class ProjectScaffolder:
             "raw",
             "wiki/current",
             "wiki/drafts",
+            "wiki/drafts/local-ingest",
             "wiki/versions",
             "wiki/topics",
+            "wiki/sources",
             "schema",
             "exports",
             ".incubator",
+            ".incubator/transactions",
+            ".incubator/locks",
         )
         required_files = (
+            "README.md",
+            "AGENTS.md",
             "wiki/index.md",
             "wiki/log.md",
             ".incubator/project.json",
@@ -129,58 +145,67 @@ class ProjectScaffolder:
         if prepared.paths.project_root.exists():
             raise ValueError(f"project already exists: {prepared.project_id}")
         _rename_directory_without_replace(prepared.temp_root, prepared.paths.project_root)
-        return ProjectPaths.for_project(self.library_root, prepared.project_id)
+        return prepared.paths
 
     def abort(self, prepared: PreparedProject) -> None:
         temp_root = prepared.temp_root.resolve()
         if (
-            temp_root.parent == self.library_root
-            and temp_root.name.startswith(f".{prepared.project_id}.tmp-")
+            temp_root.parent == prepared.paths.project_root.parent
+            and self._is_prepared_temp_name(temp_root.name, prepared.project_id)
             and temp_root.exists()
         ):
             shutil.rmtree(temp_root)
 
     def _validate_schema_source(self) -> None:
+        required_assets = (*ROOT_TEMPLATE_MAP, *SCHEMA_FILENAMES)
         missing = [
             filename
-            for filename in SCHEMA_FILENAMES
+            for filename in required_assets
             if not (self.schema_source / filename).is_file()
         ]
         if missing:
             raise FileNotFoundError(f"incubator schema assets missing: {', '.join(missing)}")
 
-    def _build_tree(self, prepared: PreparedProject, command: CreateProjectInput) -> None:
+    def _build_tree(self, temp_root: Path, command: CreateProjectInput) -> None:
         for relative_path in (
             "raw",
             "wiki/current",
-            "wiki/drafts",
+            "wiki/drafts/local-ingest",
             "wiki/versions",
             "wiki/topics",
+            "wiki/sources",
             "schema",
             "exports",
-            ".incubator",
+            ".incubator/transactions",
+            ".incubator/locks",
         ):
-            (prepared.temp_root / relative_path).mkdir(parents=True, exist_ok=False)
+            (temp_root / relative_path).mkdir(parents=True, exist_ok=False)
+
+        for source_filename, destination_filename in ROOT_TEMPLATE_MAP.items():
+            shutil.copyfile(
+                self.schema_source / source_filename,
+                temp_root / destination_filename,
+            )
 
         for filename in SCHEMA_FILENAMES:
             shutil.copyfile(
                 self.schema_source / filename,
-                prepared.temp_root / "schema" / filename,
+                temp_root / "schema" / filename,
             )
 
         created_at = self.now().isoformat()
-        (prepared.temp_root / "wiki/index.md").write_text(
+        (temp_root / "wiki/index.md").write_text(
             f"# {command.name}\n\n当前项目尚未发布生效产品文档。\n",
             encoding="utf-8",
         )
-        (prepared.temp_root / "wiki/log.md").write_text(
+        (temp_root / "wiki/log.md").write_text(
             f"# 项目日志\n\n- {created_at} 创建产品文档孵化项目。\n",
             encoding="utf-8",
         )
         self._write_json(
-            prepared.temp_root / ".incubator/project.json",
+            temp_root / ".incubator/project.json",
             {
-                "schema_version": "2.0",
+                "schema_version": "2.2",
                 "product_name": "产品文档孵化器",
                 "project_id": command.project_id,
                 "name": command.name,
@@ -188,16 +213,32 @@ class ProjectScaffolder:
                 "initial_display_version": command.initial_display_version,
                 "allow_external_model": command.allow_external_model,
                 "created_at": created_at,
+                "wiki_initialized": True,
+                "wiki_schema_version": "2.2",
+                "root_readme_path": "README.md",
+                "root_agent_rules_path": "AGENTS.md",
+                "ingest_contract_path": "schema/ingest-contract.md",
             },
         )
         self._write_json(
-            prepared.temp_root / ".incubator/source-index.json",
+            temp_root / ".incubator/source-index.json",
             {
-                "schema_version": "2.0",
+                "schema_version": "2.2",
                 "project_id": command.project_id,
                 "sources": [],
             },
         )
+
+    @staticmethod
+    def _is_prepared_temp_name(name: str, project_id: str) -> bool:
+        prefix = f".{project_id}.tmp-"
+        if not name.startswith(prefix):
+            return False
+        token = name.removeprefix(prefix)
+        try:
+            return UUID(token).hex == token
+        except ValueError:
+            return False
 
     @staticmethod
     def _write_json(path: Path, payload: dict) -> None:

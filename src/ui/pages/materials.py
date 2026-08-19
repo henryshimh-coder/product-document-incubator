@@ -11,7 +11,13 @@ from src.application.dto.materials import (
     ReclassifySourceInput,
     SensitiveComparisonInput,
 )
+from src.application.dto.wiki_ingest import (
+    ConfirmLocalWikiIngestInput,
+    IngestArchivedSourceInput,
+    PrepareLocalWikiIngestInput,
+)
 from src.domain.enums import AuthorityLevel, SecurityLevel
+from src.domain.errors import AppError
 from src.domain.material_catalog import MATERIAL_TYPES, NEW_AUTHORITY_LEVELS
 
 
@@ -134,11 +140,15 @@ def _render_index(container: AppContainer) -> None:
             continue
         st.markdown(
             f"**{item.get('material_name') or item.get('filename', '未知文件')}** · "
-            f"{item.get('material_version', '--')} · {item.get('source_id', '--')}  \\n+"
+            f"{item.get('material_version', '--')} · {item.get('source_id', '--')}  \\n"
             f"`{str(item.get('sha256', ''))[:12]}` · {item.get('source_type', '--')} · "
             f"{item.get('ingest_status', '--')}"
         )
         st.code(str(item.get("archive_path", "")), language=None)
+        _render_wiki_ingest(container, item)
+        if item.get("local_sensitive_comparison_required"):
+            count = item.get("excluded_sensitive_topic_count", 0)
+            st.warning(f"有 {count} 个相关主题仅可在本地核验，未外发给模型。")
         if item.get("security_level") in {"L3", "L4"} and container.compare_sensitive_source:
             if st.button("与当前方案对照", key=f"compare-{item.get('source_id')}"):
                 try:
@@ -194,6 +204,133 @@ def _render_index(container: AppContainer) -> None:
                         st.error(f"材料分类调整失败，原分类保持不变。{error}")
                     else:
                         st.success(f"材料分类已调整为“{target.label}”。")
+
+
+def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
+    source_id = str(item.get("source_id", ""))
+    status = item.get("ingest_status")
+    if not source_id:
+        return
+    sensitive_levels = {
+        SecurityLevel.L3_CONFIDENTIAL.value,
+        SecurityLevel.L4_RESTRICTED.value,
+    }
+    if item.get("security_level") in sensitive_levels:
+        _render_local_wiki_ingest(container, source_id, status)
+        return
+    if status == "ingesting":
+        st.button(
+            "处理中",
+            key=f"material_ingesting_{source_id}",
+            disabled=True,
+        )
+        return
+    if status == "ingested":
+        source_page_path = item.get("source_page_path")
+        if source_page_path:
+            st.markdown(f"[查看 Wiki 结果]({source_page_path})")
+        else:
+            st.markdown("查看 Wiki 结果")
+        return
+    # Historical Wiki outcomes stay visible even if this session has no
+    # external credential.  Only a new/retry action requires the gateway.
+    if container.wiki_ingest is None:
+        return
+    if status == "ingest_failed":
+        st.caption(f"安全错误码：{item.get('ingest_error_code') or 'WIKI_CHANGESET_INVALID'}")
+        label = "重新 Ingest"
+        key = f"material_reingest_{source_id}"
+    elif status == "reingest_recommended":
+        st.info("当前 Wiki 仍可读；请 Owner 明确重新 Ingest。")
+        label = "明确重新 Ingest"
+        key = f"material_reingest_{source_id}"
+    elif status == "pending_ingest":
+        label = "开始 Ingest"
+        key = f"material_ingest_{source_id}"
+    else:
+        return
+    if not st.button(label, key=key, type="primary"):
+        return
+    try:
+        result = container.wiki_ingest.execute(
+            IngestArchivedSourceInput(
+                project_id=container.require_project_id(),
+                source_id=source_id,
+                requested_by="Owner",
+            )
+        )
+    except AppError as error:
+        st.error(f"Wiki Ingest 失败：{error.code}")
+    except (OSError, RuntimeError, ValueError):
+        st.error("Wiki Ingest 失败：WIKI_CHANGESET_INVALID")
+    else:
+        st.success("已 Ingest 到当前项目 Wiki。")
+        if result.source_page_path:
+            st.markdown(f"[已 Ingest · 查看 Wiki 结果]({result.source_page_path})")
+
+
+def _render_local_wiki_ingest(container: AppContainer, source_id: str, status: object) -> None:
+    if status == "ingested":
+        st.markdown("查看 Wiki 结果")
+        return
+    draft_root = container.active_project.paths.wiki_root / "drafts" / "local-ingest" / source_id
+    if status == "local_review_required" or (status == "ingest_failed" and draft_root.is_dir()):
+        if status == "ingest_failed":
+            st.caption("上次本地 Ingest 未提交，草稿已保留，可修正后重新校验。")
+        st.code(str(draft_root), language=None)
+        if st.button("复制草稿路径", key=f"material_copy_local_draft_{source_id}"):
+            st.info("草稿路径已显示，可在本机文件管理器或 Obsidian 中粘贴打开。")
+        if not st.button(
+            "重新校验并确认本地 Ingest" if status == "ingest_failed" else "校验并确认本地 Ingest",
+            key=f"material_confirm_local_ingest_{source_id}",
+            type="primary",
+        ):
+            return
+        if container.confirm_local_wiki_ingest is None:
+            st.error("本地 Ingest 服务尚未就绪。")
+            return
+        try:
+            result = container.confirm_local_wiki_ingest.execute(
+                ConfirmLocalWikiIngestInput(
+                    project_id=container.require_project_id(),
+                    source_id=source_id,
+                    requested_by="Owner",
+                )
+            )
+        except AppError as error:
+            st.error(f"本地 Ingest 校验失败：{error.code}")
+        except (OSError, RuntimeError, ValueError):
+            st.error("本地 Ingest 校验失败：WIKI_CHANGESET_INVALID")
+        else:
+            st.success("已确认并 Ingest 到当前项目 Wiki。")
+            if result.source_page_path:
+                st.markdown(f"[已 Ingest · 查看 Wiki 结果]({result.source_page_path})")
+        return
+    if status not in {"pending_ingest", "ingest_failed", "reingest_recommended"}:
+        return
+    if container.prepare_local_wiki_ingest is None:
+        return
+    if not st.button(
+        "创建本地 Ingest 草稿",
+        key=f"material_prepare_local_ingest_{source_id}",
+        type="primary",
+    ):
+        return
+    try:
+        draft = container.prepare_local_wiki_ingest.execute(
+            PrepareLocalWikiIngestInput(
+                project_id=container.require_project_id(),
+                source_id=source_id,
+                requested_by="Owner",
+            )
+        )
+    except AppError as error:
+        st.error(f"创建本地 Ingest 草稿失败：{error.code}")
+    except (OSError, RuntimeError, ValueError):
+        st.error("创建本地 Ingest 草稿失败：WIKI_CHANGESET_INVALID")
+    else:
+        st.success("已创建本地 Ingest 草稿，请在本机编辑后返回确认。")
+        st.code(str(draft.draft_root), language=None)
 
 
 def _series_options(container: AppContainer) -> tuple[str, ...]:

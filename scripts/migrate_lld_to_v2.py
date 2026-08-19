@@ -54,7 +54,8 @@ def migrate_lld(source_root: Path, library_root: Path, *, dry_run: bool = False)
             description=legacy["project"].product_line,
             initial_display_version=legacy["manifest"].display_version,
             allow_external_model=legacy["project"].allow_external_model,
-        )
+        ),
+        parent_root=library_root,
     )
     try:
         _write_project_tree(prepared.temp_root, target, legacy)
@@ -162,6 +163,15 @@ def _read_legacy_database_copy(
         source_data = dict(row)
         for field in ("is_redacted", "allow_external_model", "is_sandbox"):
             source_data[field] = bool(source_data[field])
+        topic_page_paths_json = source_data.pop("topic_page_paths_json", None)
+        if topic_page_paths_json is not None:
+            try:
+                topic_page_paths = json.loads(topic_page_paths_json)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise ValueError("LEGACY_TOPIC_PAGE_PATHS_INVALID") from error
+            if not isinstance(topic_page_paths, list):
+                raise ValueError("LEGACY_TOPIC_PAGE_PATHS_INVALID")
+            source_data["topic_page_paths"] = topic_page_paths
         sources.append(SourceRecord.model_validate(source_data))
     return (
         Project.model_validate(project_data),

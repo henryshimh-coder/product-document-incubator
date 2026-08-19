@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -175,3 +176,23 @@ def test_lld_migration_is_idempotent_and_preserves_raw_hashes(tmp_path: Path) ->
             (source_root / "data/source_archive/LLD/SRC-LLD-BASE/当前产品方案.md").read_bytes()
         ).hexdigest()
     )
+
+
+def test_lld_migration_maps_persisted_wiki_topic_paths(tmp_path: Path) -> None:
+    """Catches 2.2 storage-only topic JSON bypassing the SourceRecord boundary."""
+    source_root = tmp_path / "legacy"
+    _create_legacy_fixture(source_root)
+    with sqlite3.connect(source_root / "data/local_state/product_intelligence.db") as connection:
+        connection.execute(
+            "UPDATE source_records SET topic_page_paths_json = ? WHERE id = ?",
+            (json.dumps(["wiki/topics/pricing.md"]), "SRC-LLD-BASE"),
+        )
+    library_root = tmp_path / "library"
+
+    result = _migration_module().migrate_lld(source_root, library_root)
+
+    source = SqliteSourceRepository(
+        library_root / ".incubator/product_incubator.db"
+    ).get("SRC-LLD-BASE")
+    assert result.status == "MIGRATED"
+    assert source.topic_page_paths == ["wiki/topics/pricing.md"]

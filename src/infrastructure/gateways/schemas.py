@@ -3,9 +3,16 @@ from __future__ import annotations
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from src.domain.enums import AuthorityLevel, CallResultMode, EvidenceSide, IssueSeverity
+from src.domain.enums import (
+    AuthorityLevel,
+    CallResultMode,
+    EvidenceSide,
+    IssueSeverity,
+    SecurityLevel,
+)
+from src.infrastructure.files.wiki_outbound_context import SafeWikiTopicInput
 
 MAX_IDENTIFIER_CHARS = 128
 MAX_METADATA_CHARS = 256
@@ -18,6 +25,7 @@ MAX_ALLOWED_ISSUE_TYPES = 5
 MAX_DOCUMENT_MARKDOWN_CHARS = 200_000
 MAX_DOCUMENT_SUMMARY_CHARS = 2_000
 MAX_DOCUMENT_SECTIONS = 200
+MAX_WIKI_TOPICS = 20
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 IdentifierStr = Annotated[
@@ -281,6 +289,18 @@ class DocumentSourceFragmentInput(WorkflowOutput):
     authority_level: AuthorityLevel
 
 
+class WikiDocumentPageInput(WorkflowOutput):
+    """A bounded, traceable Wiki page chunk used for document incubation."""
+
+    source_id: IdentifierStr
+    page_path: ScopeStr
+    page_type: Literal["source", "topic"]
+    chunk_id: IdentifierStr
+    locator: ScopeStr
+    excerpt: MaterialFragment
+    safe_for_external: Literal[True]
+
+
 class DocumentDraftWorkflowInput(WorkflowOutput):
     schema_version: Literal["2.0"]
     task_type: Literal["document_draft"]
@@ -292,10 +312,21 @@ class DocumentDraftWorkflowInput(WorkflowOutput):
         str | None,
         StringConstraints(max_length=MAX_DOCUMENT_MARKDOWN_CHARS),
     ] = None
-    source_fragments: list[DocumentSourceFragmentInput] = Field(
+    source_fragments: list[DocumentSourceFragmentInput] | None = Field(
+        default=None,
+        max_length=MAX_DOCUMENT_SECTIONS,
+    )
+    wiki_pages: list[WikiDocumentPageInput] | None = Field(
+        default=None,
         min_length=1,
         max_length=MAX_DOCUMENT_SECTIONS,
     )
+
+    @model_validator(mode="after")
+    def require_one_context_type(self) -> DocumentDraftWorkflowInput:
+        if (self.source_fragments is None) == (self.wiki_pages is None):
+            raise ValueError("document draft requires exactly one context type")
+        return self
 
 
 class SectionCitationOutput(WorkflowOutput):
@@ -358,3 +389,82 @@ class StructureSuggestionWorkflowOutput(WorkflowOutput):
     schema_version: Literal["2.0"]
     task_type: Literal["structure_suggestion"]
     suggestions: list[StructureSuggestionOutput] = Field(max_length=20)
+
+
+class WikiSourceInput(WorkflowOutput):
+    id: IdentifierStr
+    source_type: MetadataStr
+    material_name: MetadataStr
+    document_version: MetadataStr
+    document_date: date
+    applicable_scope: ScopeStr
+    authority_level: AuthorityLevel
+    security_level: Literal[
+        SecurityLevel.L1_PUBLIC_SIMULATED,
+        SecurityLevel.L2_INTERNAL,
+    ]
+
+
+class WikiSourceChunkInput(WorkflowOutput):
+    chunk_id: IdentifierStr
+    locator: ScopeStr
+    text: MaterialFragment
+
+
+class WikiIngestWorkflowInput(WorkflowOutput):
+    schema_version: Literal["2.2"]
+    task_id: IdentifierStr
+    project_id: IdentifierStr
+    source: WikiSourceInput
+    source_chunks: list[WikiSourceChunkInput] = Field(
+        min_length=1,
+        max_length=MAX_SMALL_COLLECTION_ITEMS,
+    )
+    safe_index_projection: Annotated[str, StringConstraints(max_length=5_000)]
+    safe_related_topics: list[SafeWikiTopicInput] = Field(max_length=MAX_WIKI_TOPICS)
+    ingest_contract: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=5_000),
+    ]
+
+
+class WikiTopicChangeOutput(WorkflowOutput):
+    topic_id: IdentifierStr
+    title: MetadataStr
+    change_type: Literal["create", "update"]
+    markdown: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=1,
+            max_length=MAX_DOCUMENT_MARKDOWN_CHARS,
+        ),
+    ]
+    source_ids: list[IdentifierStr] = Field(
+        min_length=1,
+        max_length=MAX_CITATION_COLLECTION_ITEMS,
+    )
+
+
+class WikiConflictOutput(WorkflowOutput):
+    summary: MaterialFragment
+    source_ids: list[IdentifierStr] = Field(
+        min_length=2,
+        max_length=MAX_CITATION_COLLECTION_ITEMS,
+    )
+
+
+class WikiIngestWorkflowOutput(WorkflowOutput):
+    schema_version: Literal["2.2"]
+    task_id: IdentifierStr
+    source_page_markdown: Annotated[
+        str,
+        StringConstraints(
+            strip_whitespace=True,
+            min_length=1,
+            max_length=MAX_DOCUMENT_MARKDOWN_CHARS,
+        ),
+    ]
+    topic_changes: list[WikiTopicChangeOutput] = Field(max_length=MAX_WIKI_TOPICS)
+    conflicts: list[WikiConflictOutput] = Field(max_length=MAX_CITATION_COLLECTION_ITEMS)
+    evidence_gaps: list[MaterialFragment] = Field(max_length=MAX_CITATION_COLLECTION_ITEMS)

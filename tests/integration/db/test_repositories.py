@@ -13,9 +13,11 @@ from src.domain.enums import (
     ChangeReviewAction,
     ChangeStatus,
     DecisionAction,
+    DocumentGenerationMode,
     IssueSeverity,
     IssueStatus,
     KnowledgeStatus,
+    ProjectRootStatus,
     SecurityLevel,
 )
 from src.domain.models import (
@@ -28,6 +30,7 @@ from src.domain.models import (
     Project,
     SourceRecord,
 )
+from src.domain.wiki import WikiIngestRun
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
     SqliteBaselineRepository,
@@ -37,9 +40,101 @@ from src.infrastructure.db.repositories import (
     SqliteKnowledgeRepository,
     SqliteProjectRepository,
     SqliteSourceRepository,
+    SqliteWikiIngestRunRepository,
 )
 
 NOW = datetime(2026, 7, 29, 7, 0, tzinfo=UTC)
+
+
+def test_project_repository_normalizes_registered_root_on_add(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches persisted project roots retaining relative or lexical path components."""
+    db_path = tmp_path / "product_incubator.db"
+    migrate(db_path)
+    monkeypatch.chdir(tmp_path)
+    repository = SqliteProjectRepository(db_path)
+    repository.add(
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="说明 A",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+            project_root_path="registered/../PROJECT_A",
+            root_status=ProjectRootStatus.AVAILABLE,
+        )
+    )
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path == str((tmp_path / "PROJECT_A").resolve())
+
+
+def test_repository_updates_root_location_atomically(tmp_path: Path) -> None:
+    """Catches root move metadata being only partially persisted."""
+    db_path = tmp_path / "product_incubator.db"
+    migrate(db_path)
+    repository = SqliteProjectRepository(db_path)
+    repository.add(
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="说明 A",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+
+    repository.update_root_location(
+        "PROJECT_A", tmp_path / "moved/PROJECT_A", ProjectRootStatus.AVAILABLE, NOW
+    )
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path == str((tmp_path / "moved/PROJECT_A").resolve())
+    assert saved.root_status is ProjectRootStatus.AVAILABLE
+    assert saved.root_last_verified_at == NOW
+
+
+def test_repository_updates_root_status_without_resolving_registered_location(
+    tmp_path: Path,
+) -> None:
+    """Catches a status refresh rewriting a registered root through a later symlink."""
+    db_path = tmp_path / "product_incubator.db"
+    migrate(db_path)
+    repository = SqliteProjectRepository(db_path)
+    registered_root = tmp_path / "registered/PROJECT_A"
+    registered_root.mkdir(parents=True)
+    repository.add(
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="说明 A",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=NOW,
+            updated_at=NOW,
+            project_root_path=str(registered_root),
+            root_status=ProjectRootStatus.AVAILABLE,
+        )
+    )
+    registered_root.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    registered_root.symlink_to(outside, target_is_directory=True)
+
+    repository.update_root_status("PROJECT_A", ProjectRootStatus.UNAVAILABLE, NOW)
+
+    saved = repository.get("PROJECT_A")
+    assert saved.project_root_path == str(registered_root)
+    assert saved.root_status is ProjectRootStatus.UNAVAILABLE
+    assert saved.root_last_verified_at == NOW
 
 
 def test_project_repository_lists_projects_by_recent_activity_then_id(tmp_path: Path) -> None:
@@ -120,6 +215,12 @@ def test_source_repository_round_trip_and_hash_lookup(tmp_path: Path) -> None:
         is_sandbox=True,
         ingest_status="completed",
         created_at=NOW,
+        ingest_schema_version="2.2",
+        ingested_at=NOW,
+        source_page_path="wiki/sources/SRC-001-product-rules.md",
+        topic_page_paths=["wiki/topics/pricing.md"],
+        ingest_result_digest="b" * 64,
+        generation_mode=DocumentGenerationMode.EXTERNAL_AI,
     )
 
     SqliteProjectRepository(db_path).add(project)
@@ -129,6 +230,42 @@ def test_source_repository_round_trip_and_hash_lookup(tmp_path: Path) -> None:
     assert repository.get(source.id) == source
     assert repository.find_by_sha256(source.project_id, source.sha256) == source
     assert repository.list_for_project(source.project_id) == [source]
+
+
+def test_wiki_ingest_run_repository_persists_lifecycle_and_enforces_idempotency(
+    tmp_path: Path,
+) -> None:
+    """Catches a second Wiki ingest transaction bypassing its idempotency key."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    project = Project(
+        id="LLD", name="产品智策", product_line="轻量交付", stage="demo",
+        current_baseline_id=None, allow_external_model=True, created_at=NOW, updated_at=NOW,
+    )
+    source = SourceRecord(
+        id="SRC-WIKI-001", project_id="LLD", original_filename="产品规则.md",
+        archive_path="raw/SRC-WIKI-001/产品规则.md", sha256="a" * 64,
+        mime_type="text/markdown", size_bytes=42, source_type="formal_document",
+        authority_level=AuthorityLevel.FORMAL_EFFECTIVE, source_department="产品部", provider=None,
+        document_date=date(2026, 7, 29), document_version="1.0",
+        applicable_baseline_version="LLD-724_1", security_level=SecurityLevel.L1_PUBLIC_SIMULATED,
+        is_redacted=True, allow_external_model=True, is_sandbox=True,
+        ingest_status="pending_ingest", created_at=NOW,
+    )
+    wiki_run = WikiIngestRun(
+        id="RUN-1", project_id="LLD", source_id=source.id, transaction_id="TXN-1",
+        idempotency_key="b" * 64, schema_version="2.2", generation_mode="external_ai",
+        status="ingesting", started_at=NOW,
+    )
+    SqliteProjectRepository(db_path).add(project)
+    SqliteSourceRepository(db_path).add(source)
+    repository = SqliteWikiIngestRunRepository(db_path)
+
+    repository.add(wiki_run)
+
+    assert repository.get_by_transaction("TXN-1") == wiki_run
+    with pytest.raises(sqlite3.IntegrityError):
+        repository.add(wiki_run.model_copy(update={"id": "RUN-2"}))
 
 
 def test_source_repository_reads_material_series_and_rejects_duplicate_series_version(

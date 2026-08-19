@@ -1,11 +1,62 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+from src.domain.enums import ProjectRootStatus
 from src.infrastructure.db.migrations import migrate
+from src.infrastructure.db.repositories import SqliteProjectRepository
+
+
+def insert_legacy_project(db_path: Path, project_id: str) -> None:
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO projects (
+                id, name, product_line, stage, current_baseline_id,
+                allow_external_model, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                "历史项目",
+                "历史产品线",
+                "待初始化",
+                None,
+                0,
+                "2026-07-29T00:00:00+00:00",
+                "2026-07-29T00:00:00+00:00",
+            ),
+        )
+
+
+def write_project_json(project_root: Path, *, project_id: str, schema_version: str) -> None:
+    (project_root / ".incubator" / "project.json").write_text(
+        json.dumps(
+            {"project_id": project_id, "schema_version": schema_version}, ensure_ascii=False
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_migrate_adds_2_2_project_location_and_backfills_existing_project(
+    tmp_path: Path,
+) -> None:
+    """Catches 2.2 migration omitting a discoverable legacy project root."""
+    db_path = tmp_path / ".incubator/product_incubator.db"
+    migrate(db_path)
+    insert_legacy_project(db_path, "PROJECT_A")
+    (tmp_path / "PROJECT_A/.incubator").mkdir(parents=True)
+    write_project_json(tmp_path / "PROJECT_A", project_id="PROJECT_A", schema_version="2.1")
+
+    migrate(db_path)
+
+    project = SqliteProjectRepository(db_path).get("PROJECT_A")
+    assert project.project_root_path == str((tmp_path / "PROJECT_A").resolve())
+    assert project.root_status is ProjectRootStatus.AVAILABLE
 
 
 def test_migrate_creates_documented_tables_and_enables_required_pragmas(
@@ -39,6 +90,117 @@ def test_migrate_creates_documented_tables_and_enables_required_pragmas(
     assert journal_mode == "wal"
 
 
+def test_migrate_adds_wiki_ingest_fields_and_runs_table(tmp_path: Path) -> None:
+    """Catches a 2.2 bootstrap without durable Wiki ingest lifecycle state."""
+    db_path = tmp_path / "product_intelligence.db"
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        source_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_records)")}
+        table_names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    assert {
+        "ingest_schema_version",
+        "ingested_at",
+        "source_page_path",
+        "topic_page_paths_json",
+        "ingest_result_digest",
+        "ingest_error_code",
+        "generation_mode",
+    } <= source_columns
+    assert "wiki_ingest_runs" in table_names
+
+
+def test_migrate_adds_binding_version_to_existing_wiki_transaction_bindings(tmp_path: Path) -> None:
+    """Protects legacy 2.2 rows from becoming unreadable after trusted binding upgrades."""
+    db_path = tmp_path / "product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations (version TEXT PRIMARY KEY);
+            INSERT INTO schema_migrations(version) VALUES ('2.2');
+            CREATE TABLE wiki_transaction_bindings (
+                transaction_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                binding_state TEXT NOT NULL DEFAULT 'building',
+                binding_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO wiki_transaction_bindings VALUES (
+                'TXN-LEGACY', 'PROJECT_A', 'SRC-A',
+                'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                'committed',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                '2026-08-17T00:00:00+00:00'
+            );
+            """
+        )
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]: row[4]
+            for row in connection.execute("PRAGMA table_info(wiki_transaction_bindings)")
+        }
+        row = connection.execute(
+            """
+            SELECT binding_state, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = 'TXN-LEGACY'
+            """
+        ).fetchone()
+    assert columns["binding_version"] == "0"
+    assert row == ("committed", 0)
+
+
+def test_migrate_preserves_existing_trusted_binding_version_2_rows(tmp_path: Path) -> None:
+    """Protects already-committed v2 bindings from being downgraded on restart."""
+    db_path = tmp_path / "product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations (version TEXT PRIMARY KEY);
+            INSERT INTO schema_migrations(version) VALUES ('2.2');
+            CREATE TABLE wiki_transaction_bindings (
+                transaction_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                binding_state TEXT NOT NULL DEFAULT 'building',
+                binding_sha256 TEXT NOT NULL,
+                binding_version INTEGER NOT NULL DEFAULT 2,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO wiki_transaction_bindings VALUES (
+                'TXN-V2', 'PROJECT_A', 'SRC-A',
+                'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                'committed',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                2,
+                '2026-08-18T00:00:00+00:00'
+            );
+            """
+        )
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT binding_state, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = 'TXN-V2'
+            """
+        ).fetchone()
+    assert row == ("committed", 2)
+
+
 def test_migrate_is_idempotent(tmp_path: Path) -> None:
     """Protects repeatable bootstrap and application startup."""
     db_path = tmp_path / "product_intelligence.db"
@@ -50,7 +212,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",), ("2.2",)]
 
 
 def test_migrate_creates_event_level_with_safe_info_default(tmp_path: Path) -> None:
@@ -208,7 +370,7 @@ def test_migrate_repairs_null_and_blank_event_correlations_despite_1_2_marker(
         ("EVENT-NULL", "LEGACY-EVENT-NULL"),
         ("EVENT-VALID", "CORR-VALID"),
     ]
-    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",), ("2.2",)]
 
 
 def test_migrate_upgrades_legacy_issue_table_before_creating_fingerprint_index(
@@ -295,7 +457,7 @@ def test_migrate_adds_2_1_material_columns_and_default_draft_generation_mode(
 
     assert {"material_name", "material_series_id", "previous_source_id"} <= source_columns
     assert "generation_mode" in draft_columns
-    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",)]
+    assert versions == [("1.0",), ("1.1",), ("1.2",), ("2.1",), ("2.2",)]
 
 
 def test_migrate_upgrades_pre_2_1_source_table_before_creating_series_indexes(

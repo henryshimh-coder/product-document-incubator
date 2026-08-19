@@ -20,10 +20,12 @@ from src.domain.enums import (
     ChangeReviewAction,
     ChangeStatus,
     DecisionAction,
+    DocumentGenerationMode,
     EvidenceSide,
     IssueSeverity,
     IssueStatus,
     KnowledgeStatus,
+    ProjectRootStatus,
     SecurityLevel,
 )
 
@@ -53,6 +55,9 @@ class Project(DomainModel):
     allow_external_model: bool
     created_at: datetime
     updated_at: datetime
+    project_root_path: NonEmptyStr | None = None
+    root_status: ProjectRootStatus = ProjectRootStatus.UNAVAILABLE
+    root_last_verified_at: datetime | None = None
 
 
 class SourceRecord(DomainModel):
@@ -79,6 +84,13 @@ class SourceRecord(DomainModel):
     material_name: NonEmptyStr | None = None
     material_series_id: NonEmptyStr | None = None
     previous_source_id: NonEmptyStr | None = None
+    ingest_schema_version: NonEmptyStr | None = None
+    ingested_at: datetime | None = None
+    source_page_path: NonEmptyStr | None = None
+    topic_page_paths: list[NonEmptyStr] = Field(default_factory=list)
+    ingest_result_digest: Sha256Str | None = None
+    ingest_error_code: NonEmptyStr | None = None
+    generation_mode: DocumentGenerationMode | None = None
 
 
 class KnowledgeCard(DomainModel):
@@ -360,7 +372,14 @@ class BaselineManifest(DomainModel):
 class ModelCallLog(DomainModel):
     id: NonEmptyStr
     project_id: NonEmptyStr
-    task_type: Literal["ingest", "query", "lint", "document_draft", "structure_suggestion"]
+    task_type: Literal[
+        "ingest",
+        "query",
+        "lint",
+        "document_draft",
+        "structure_suggestion",
+        "wiki_ingest",
+    ]
     workflow_run_id: NonEmptyStr | None
     correlation_id: NonEmptyStr
     source_ids: list[NonEmptyStr]

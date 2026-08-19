@@ -10,9 +10,11 @@ from src.application.dto.documents import (
     PublishDocumentDraftInput,
 )
 from src.application.dto.projects import CreateProjectInput
+from src.application.dto.wiki_ingest import IngestArchivedSourceInput
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.export_current_document import ExportCurrentDocument
 from src.application.use_cases.incubate_document import IncubateDocument
+from src.application.use_cases.ingest_archived_source import IngestArchivedSource
 from src.application.use_cases.manage_projects import ManageProjects
 from src.application.use_cases.publish_document_draft import PublishDocumentDraft
 from src.domain.enums import AuthorityLevel, SecurityLevel
@@ -21,6 +23,7 @@ from src.infrastructure.db.repositories import (
     SqliteDocumentDraftRepository,
     SqliteProjectRepository,
     SqliteSourceRepository,
+    SqliteWikiIngestRunRepository,
 )
 from src.infrastructure.files.document_store import DocumentStore
 from src.infrastructure.files.manifest_store import ManifestStore
@@ -28,6 +31,8 @@ from src.infrastructure.files.project_library import JsonIncubatorSettingsStore,
 from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 from src.infrastructure.files.project_source_archive import ProjectSourceArchive
 from src.infrastructure.files.source_index_store import SourceIndexStore
+from src.infrastructure.files.wiki_context_reader import WikiContextReader
+from src.infrastructure.gateways.schemas import WikiIngestWorkflowOutput
 from src.infrastructure.observability.model_call_logger import ModelCallLogger
 from src.infrastructure.recovery.reconciliation_service import ReconciliationService
 
@@ -99,6 +104,10 @@ class IncubatorHarness:
             drafts=SqliteDocumentDraftRepository(self.db_path),
             store=DocumentStore(paths),
             gateway=_Gateway(),
+            wiki_context=WikiContextReader(
+                paths=paths,
+                sources=SqliteSourceRepository(self.db_path),
+            ),
             model_call_logger=ModelCallLogger(self.db_path),
             now=lambda: NOW,
         )
@@ -114,6 +123,28 @@ class IncubatorHarness:
             draft.id,
             (paths.project_root / draft.markdown_path).read_text(encoding="utf-8"),
         )
+
+    def ingest(self, paths: ProjectPaths, source_id: str) -> None:
+        result = IngestArchivedSource(
+            paths=paths,
+            db_path=self.db_path,
+            sources=SqliteSourceRepository(self.db_path),
+            runs=SqliteWikiIngestRunRepository(self.db_path),
+            gateway=_WikiGateway(),
+            customer_names=(),
+            strategy_terms=(),
+            financial_terms=(),
+            leader_names=(),
+            unpublished_decisions=(),
+            now=lambda: NOW,
+        ).execute(
+            IngestArchivedSourceInput(
+                project_id=paths.project_id,
+                source_id=source_id,
+                requested_by="Owner",
+            )
+        )
+        assert result.status.value == "ingested"
 
     def publish(self, paths: ProjectPaths, draft_id: str):
         manifest = ManifestStore(paths.manifest_path, project_root=paths.project_root)
@@ -149,36 +180,51 @@ class IncubatorHarness:
 
 class _Gateway:
     def generate_draft(self, inputs: dict) -> dict:
-        fragment = inputs["source_fragments"][0]
+        page = inputs["wiki_pages"][0]
         return {
             "workflow_run_id": f"WF-{inputs['project_id']}",
             "result": {
                 "document_markdown": (
-                    f"# {inputs['project_name']} 产品方案\n\n## 产品概述\n\n{fragment['excerpt']}"
+                    f"# {inputs['project_name']} 产品方案\n\n## 产品概述\n\n"
+                    "基于已 Ingest 的 Wiki 来源生成候选。"
                 ),
                 "summary": "由 Owner 材料生成的候选。",
                 "missing_sections": [],
                 "evidence_gaps": [],
-                "source_ids": [fragment["source_id"]],
+                "source_ids": [page["source_id"]],
                 "section_citations": [
                     {
                         "heading": "产品概述",
-                        "source_id": fragment["source_id"],
-                        "chunk_id": fragment["chunk_id"],
-                        "locator": fragment["locator"],
-                        "excerpt": fragment["excerpt"],
+                        "source_id": page["source_id"],
+                        "chunk_id": page["chunk_id"],
+                        "locator": page["locator"],
+                        "excerpt": page["excerpt"],
                     }
                 ],
             },
         }
 
 
+class _WikiGateway:
+    def generate(self, inputs, **kwargs):
+        return WikiIngestWorkflowOutput(
+            schema_version="2.2",
+            task_id=inputs["task_id"],
+            source_page_markdown="# 来源摘要\n\n已脱敏的产品需求。",
+            topic_changes=[],
+            conflicts=[],
+            evidence_gaps=[],
+        )
+
+
 def test_two_projects_complete_isolated_incubation_flows(tmp_path: Path) -> None:
     harness = IncubatorHarness(tmp_path)
     project_a = harness.create_project("PROJECT_A", "产品 A")
     project_b = harness.create_project("PROJECT_B", "产品 B")
-    source_a = harness.archive(project_a, "A需求.md", "A需求\n\nA内容".encode())
-    source_b = harness.archive(project_b, "B需求.md", "B需求\n\nB内容".encode())
+    source_a = harness.archive(project_a, "A需求.md", ("A需求\n\nA内容\n" * 10_000).encode())
+    source_b = harness.archive(project_b, "B需求.md", ("B需求\n\nB内容\n" * 10_000).encode())
+    harness.ingest(project_a, source_a.source_id)
+    harness.ingest(project_b, source_b.source_id)
 
     draft_a = harness.incubate(project_a, source_a.source_id)
     draft_b = harness.incubate(project_b, source_b.source_id)

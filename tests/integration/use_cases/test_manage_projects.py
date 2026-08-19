@@ -17,6 +17,16 @@ NOW = datetime(2026, 8, 12, 8, 0, tzinfo=UTC)
 
 
 @pytest.fixture
+def schema_assets() -> Path:
+    return Path("assets/incubator_schema")
+
+
+@pytest.fixture
+def now() -> datetime:
+    return NOW
+
+
+@pytest.fixture
 def project_environment(tmp_path: Path):
     from src.application.use_cases.manage_projects import ManageProjects
     from src.infrastructure.files.project_scaffolder import ProjectScaffolder
@@ -48,7 +58,12 @@ def project_environment(tmp_path: Path):
     return manager, library_root, projects, settings
 
 
-def new_project_command(project_id: str):
+@pytest.fixture
+def manager(project_environment):
+    return project_environment[0]
+
+
+def new_project_command(project_id: str, parent_root: Path | None = None):
     from src.application.dto.projects import CreateProjectInput
 
     return CreateProjectInput(
@@ -57,7 +72,62 @@ def new_project_command(project_id: str):
         description="验证产品方案孵化",
         initial_display_version=None,
         allow_external_model=False,
+        parent_root=parent_root,
     )
+
+
+def create_managed_project(manager, project_id: str, parent_root: Path) -> Path:
+    parent_root.mkdir()
+    manager.create(new_project_command(project_id, parent_root=parent_root))
+    return parent_root / project_id
+
+
+def test_scaffolder_builds_complete_2_2_wiki_llm_tree(
+    tmp_path: Path, schema_assets: Path, now: datetime
+) -> None:
+    """Catches a scaffold missing the 2.2 Wiki-LLM entry points or work areas."""
+    from src.infrastructure.files.project_scaffolder import ProjectScaffolder
+
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    scaffolder = ProjectScaffolder(
+        library_root=tmp_path / "control", schema_source=schema_assets, now=lambda: now
+    )
+
+    prepared = scaffolder.prepare(new_project_command("PROJECT_A"), parent_root=parent)
+
+    required = {
+        "README.md",
+        "AGENTS.md",
+        "wiki/sources",
+        "wiki/drafts/local-ingest",
+        "schema/ingest-contract.md",
+        "schema/source-page-template.md",
+        "schema/topic-page-template.md",
+        ".incubator/transactions",
+        ".incubator/locks",
+    }
+    assert all((prepared.temp_root / item).exists() for item in required)
+    assert (
+        json.loads((prepared.temp_root / ".incubator/project.json").read_text(encoding="utf-8"))
+        ["schema_version"]
+        == "2.2"
+    )
+    scaffolder.abort(prepared)
+
+
+def test_scaffolder_requires_an_explicit_parent_root(
+    tmp_path: Path, schema_assets: Path, now: datetime
+) -> None:
+    """Catches a scaffold silently falling back to the control-plane directory."""
+    from src.infrastructure.files.project_scaffolder import ProjectScaffolder
+
+    scaffolder = ProjectScaffolder(
+        library_root=tmp_path / "control", schema_source=schema_assets, now=lambda: now
+    )
+
+    with pytest.raises(TypeError, match="parent_root"):
+        scaffolder.prepare(new_project_command("PROJECT_A"))
 
 
 def test_create_project_scaffolds_complete_wiki_atomically(project_environment) -> None:
@@ -79,11 +149,44 @@ def test_create_project_scaffolds_complete_wiki_atomically(project_environment) 
     assert (root / "exports").is_dir()
     assert (root / ".incubator/project.json").is_file()
     assert (root / ".incubator/source-index.json").is_file()
+    assert (
+        json.loads((root / ".incubator/source-index.json").read_text(encoding="utf-8"))[
+            "schema_version"
+        ]
+        == "2.2"
+    )
     assert not list(library_root.glob(".NEW_PRODUCT.tmp-*"))
     assert (
         json.loads((root / ".incubator/project.json").read_text(encoding="utf-8"))["project_id"]
         == "NEW_PRODUCT"
     )
+
+
+def test_create_registers_owner_selected_root(manager, tmp_path):
+    """Catches external project roots being scaffolded without durable registration."""
+    parent = tmp_path / "customer-projects"
+    parent.mkdir()
+
+    created = manager.create(new_project_command("PROJECT_A", parent_root=parent))
+
+    assert Path(created.project_root_path) == (parent / "PROJECT_A").resolve()
+    assert (parent / "PROJECT_A/README.md").is_file()
+
+
+def test_relocate_updates_only_registry(project_environment, tmp_path):
+    """Catches relocation rebuilding or mutating a project directory instead of registering it."""
+    from src.application.dto.projects import RelocateProjectInput
+
+    manager, _, _, _ = project_environment
+    original = create_managed_project(manager, "PROJECT_A", tmp_path / "one")
+    moved = tmp_path / "two/PROJECT_A"
+    moved.parent.mkdir()
+    original.rename(moved)
+
+    manager.relocate(RelocateProjectInput(project_id="PROJECT_A", project_root=moved))
+
+    assert manager.projects.get("PROJECT_A").project_root_path == str(moved.resolve())
+    assert (moved / "wiki/index.md").is_file()
 
 
 def test_create_project_rejects_duplicate_id_without_touching_existing_files(
@@ -135,7 +238,7 @@ def test_database_failure_quarantines_committed_directory(
         manager.create(new_project_command("QUARANTINE"))
 
     assert not (library_root / "QUARANTINE").exists()
-    quarantined = list((library_root / ".incubator/quarantine").glob("QUARANTINE-*"))
+    quarantined = list(library_root.glob(".QUARANTINE.quarantine-*"))
     assert len(quarantined) == 1
     assert (quarantined[0] / "schema/AGENTS.md").is_file()
 
@@ -195,7 +298,9 @@ def test_scaffolder_commit_never_replaces_directory_created_during_race(
     from src.infrastructure.files import project_scaffolder as scaffolder_module
 
     manager, library_root, _, _ = project_environment
-    prepared = manager.scaffolder.prepare(new_project_command("RACE"))
+    prepared = manager.scaffolder.prepare(
+        new_project_command("RACE"), parent_root=library_root
+    )
     manager.scaffolder.validate(prepared)
     native_rename = scaffolder_module._rename_directory_without_replace
     marker = library_root / "RACE/owner-file.txt"
@@ -248,6 +353,7 @@ def test_project_list_summarizes_local_counts(project_environment) -> None:
     """Catches project cards showing counts from another project or stale placeholders."""
     manager, library_root, _, _ = project_environment
     manager.create(new_project_command("PROJECT_A"))
+    assert manager.list()[0].draft_count == 0
     source_index = library_root / "PROJECT_A/.incubator/source-index.json"
     source_index.write_text(
         json.dumps({"sources": [{"source_id": "SRC-1"}, {"source_id": "SRC-2"}]}),

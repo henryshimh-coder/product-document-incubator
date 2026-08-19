@@ -20,7 +20,7 @@ class SourceIndexStore:
             raise ValueError("source index project_id mismatch")
         current = self._read()
         entries = {
-            str(item["source_id"]): item
+            str(item["source_id"]): self._normalize_entry(item)
             for item in current["sources"]
             if isinstance(item, dict) and isinstance(item.get("source_id"), str)
         }
@@ -37,18 +37,44 @@ class SourceIndexStore:
             "authority_level": source.authority_level.value,
             "security_level": source.security_level.value,
             "ingest_status": source.ingest_status,
+            "ingest_schema_version": source.ingest_schema_version,
+            "ingested_at": (
+                source.ingested_at.isoformat() if source.ingested_at is not None else None
+            ),
+            "source_page_path": source.source_page_path,
+            "topic_page_paths": source.topic_page_paths,
+            "ingest_result_digest": source.ingest_result_digest,
+            "ingest_error_code": source.ingest_error_code,
+            "generation_mode": (
+                source.generation_mode.value if source.generation_mode is not None else None
+            ),
             "created_at": source.created_at.isoformat(),
         }
         payload = {
-            "schema_version": "2.1",
+            "schema_version": "2.2",
             "project_id": self.paths.project_id,
             "sources": [entries[key] for key in sorted(entries)],
         }
         self._atomic_write(payload)
 
+    @staticmethod
+    def _normalize_entry(entry: dict) -> dict:
+        normalized = dict(entry)
+        for field, default in (
+            ("ingest_schema_version", None),
+            ("ingested_at", None),
+            ("source_page_path", None),
+            ("topic_page_paths", []),
+            ("ingest_result_digest", None),
+            ("ingest_error_code", None),
+            ("generation_mode", None),
+        ):
+            normalized.setdefault(field, default)
+        return normalized
+
     def _read(self) -> dict:
         if not self.path.is_file():
-            return {"schema_version": "2.1", "project_id": self.paths.project_id, "sources": []}
+            return {"schema_version": "2.2", "project_id": self.paths.project_id, "sources": []}
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         if (
             not isinstance(payload, dict)

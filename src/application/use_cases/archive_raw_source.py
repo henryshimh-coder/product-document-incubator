@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from src.application.dto.materials import ArchivedSourceView, ArchiveRawSourceInput
 from src.application.ports.repositories import ProjectRepository, SourceRepository
+from src.application.project_context import read_wiki_schema_version
 from src.domain.enums import SecurityLevel
 from src.domain.models import SourceRecord
 from src.domain.services.file_safety import detect_mime_type
@@ -21,6 +22,7 @@ class ArchiveRawSource:
         sources: SourceRepository,
         archive_factory,
         index,
+        wiki_schema_version: str | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.paths = paths
@@ -28,6 +30,7 @@ class ArchiveRawSource:
         self.sources = sources
         self.archive_factory = archive_factory
         self.index = index
+        self.wiki_schema_version = wiki_schema_version or read_wiki_schema_version(paths)
         self.now = now or (lambda: datetime.now(UTC))
 
     def execute(self, command: ArchiveRawSourceInput) -> ArchivedSourceView:
@@ -109,7 +112,9 @@ class ArchiveRawSource:
             is_redacted=command.is_redacted_confirmed,
             allow_external_model=command.allow_external_model,
             is_sandbox=False,
-            ingest_status="archived",
+            ingest_status=(
+                "pending_ingest" if self.wiki_schema_version == "2.2" else "archived"
+            ),
             created_at=self.now(),
             material_name=material_name,
             material_series_id=series_id,

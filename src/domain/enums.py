@@ -98,3 +98,8 @@ class StructureSuggestionStatus(StrEnum):
     OPEN = "open"
     ACCEPTED = "accepted"
     IGNORED = "ignored"
+
+
+class ProjectRootStatus(StrEnum):
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"

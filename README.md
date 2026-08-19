@@ -1,8 +1,8 @@
-# 产品文档孵化器 2.0
+# 产品文档孵化器 2.2
 
-面向 Owner 产品经理的本地优先产品文档工作台：一个项目一套 Wiki-LLM 目录，支持原始材料不可变归档、候选方案孵化、Owner 发布、当前 Markdown 下载和跨项目标题结构建议。1.x 的“产品智策”比赛材料及演示快照作为历史资产保留。
+面向 Owner 产品经理的本地优先产品文档工作台：一个项目一套 Wiki-LLM 目录，支持原始材料不可变归档、Raw 到 Wiki Ingest、Wiki 驱动候选方案孵化、Owner 发布和当前 Markdown 下载。每个项目可选择独立父目录；1.x 的“产品智策”比赛材料及演示快照作为历史资产保留。
 
-- 版本：`v2.0`（多项目产品文档孵化首期）
+- 版本：`v2.2`（独立项目目录与 Wiki Ingest）
 - Python：`>=3.11, <3.13`
 - 依赖管理：`uv`（锁文件 `uv.lock`）
 
@@ -38,12 +38,13 @@ uv run streamlit run streamlit_app.py --server.headless true
 .venv/bin/python -m pytest -q
 ```
 
-详细操作手册见 [docs/runbook/](docs/runbook/)：
+新 Owner 请先阅读 [2.2 使用说明](docs/runbook/owner-user-guide.md)。详细操作手册见 [docs/runbook/](docs/runbook/)：
 
 - [local-development.md](docs/runbook/local-development.md) — 本地开发、测试与静态检查
 - [demo-operation.md](docs/runbook/demo-operation.md) — 演示流程操作（重置、快照、页面动线）
 - [recovery.md](docs/runbook/recovery.md) — 故障恢复与常见问题
 - [dify-import.md](docs/runbook/dify-import.md) — 三个 Dify Workflow 的创建 / 导入与联通性验证
+- [owner-user-guide-2.1.md](docs/runbook/owner-user-guide-2.1.md) — 2.1 历史版本使用说明
 
 ## 目录结构
 
@@ -67,4 +68,4 @@ docs/qa/              测试报告与 UI 验收证据
 
 ## 首期限制
 
-只支持单 Owner、UTF-8 Markdown 下载和手动触发结构建议；不提供项目删除、多人协作、DOCX/PDF 导出或自动文件监听。
+只支持单 Owner、UTF-8 Markdown 下载和手动触发结构建议；L3/L4 仅支持本地 Markdown/Obsidian 编辑后确认 Ingest。暂不提供跨电脑直接迁移、项目删除、多人协作、DOCX/PDF 导出或自动文件监听。

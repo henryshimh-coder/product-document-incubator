@@ -11,6 +11,16 @@ from uuid import uuid4
 from src.domain.incubator import IncubatorSettings
 
 PROJECT_ID_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,63}$")
+_ROLE_DIRECTORIES = ("raw", "wiki", "schema", "exports", ".incubator")
+_WIKI_STRUCTURAL_DIRECTORIES = (
+    "wiki/sources",
+    "wiki/topics",
+    "wiki/drafts",
+    "wiki/current",
+    "wiki/versions",
+    ".incubator/locks",
+    ".incubator/transactions",
+)
 
 
 @dataclass(frozen=True)
@@ -27,9 +37,7 @@ class ProjectPaths:
 
     @classmethod
     def for_project(cls, library_root: Path, project_id: str) -> ProjectPaths:
-        if PROJECT_ID_PATTERN.fullmatch(project_id) is None:
-            raise ValueError("project_id must match ^[A-Z0-9][A-Z0-9_-]{0,63}$")
-
+        cls._validate_project_id(project_id)
         resolved_library = library_root.expanduser().resolve()
         lexical_project = resolved_library / project_id
         if lexical_project.is_symlink():
@@ -39,21 +47,43 @@ class ProjectPaths:
             raise ValueError("project root must resolve to its declared project_id")
         if not resolved_project.is_relative_to(resolved_library):
             raise ValueError("project path resolves outside library_root")
+        return cls._build(resolved_library, project_id, resolved_project)
 
+    @classmethod
+    def for_registered_root(
+        cls, library_root: Path, project_id: str, project_root: Path
+    ) -> ProjectPaths:
+        cls._validate_project_id(project_id)
+        lexical_root = project_root.expanduser().absolute()
+        if lexical_root.is_symlink():
+            raise ValueError("project root must not be a symlink")
+        return cls._build(library_root.expanduser().resolve(), project_id, lexical_root.resolve())
+
+    @staticmethod
+    def _validate_project_id(project_id: str) -> None:
+        if PROJECT_ID_PATTERN.fullmatch(project_id) is None:
+            raise ValueError("project_id must match ^[A-Z0-9][A-Z0-9_-]{0,63}$")
+
+    @classmethod
+    def _build(cls, library_root: Path, project_id: str, project_root: Path) -> ProjectPaths:
         def inside_project(relative_path: str) -> Path:
-            candidate = (resolved_project / relative_path).resolve()
-            if not candidate.is_relative_to(resolved_project):
+            lexical = project_root / relative_path
+            candidate = lexical.resolve()
+            # Role directories are trust boundaries.  A path merely resolving below
+            # the project is insufficient: raw -> wiki/current would otherwise let
+            # archival writes reach a protected release asset.
+            if candidate != lexical or not candidate.is_relative_to(project_root):
                 raise ValueError("derived project path resolves outside library_root")
             return candidate
 
         system_root = inside_project(".incubator")
         manifest_path = (system_root / "current-baseline.json").resolve()
-        if not manifest_path.is_relative_to(resolved_project):
+        if not manifest_path.is_relative_to(project_root):
             raise ValueError("derived project path resolves outside library_root")
         return cls(
-            library_root=resolved_library,
+            library_root=library_root,
             project_id=project_id,
-            project_root=resolved_project,
+            project_root=project_root,
             raw_root=inside_project("raw"),
             wiki_root=inside_project("wiki"),
             schema_root=inside_project("schema"),
@@ -61,6 +91,73 @@ class ProjectPaths:
             system_root=system_root,
             manifest_path=manifest_path,
         )
+
+
+def require_safe_project_roles(paths: ProjectPaths) -> None:
+    """Reject a root or any role directory redirected through a symlink.
+
+    This is deliberately re-run at write and transaction boundaries.  Validation
+    during project selection alone cannot protect against a later symlink swap.
+    """
+
+    root = paths.project_root
+    if root.is_symlink() or root.resolve() != root or not root.is_dir():
+        raise ValueError("project root is not a canonical directory")
+    for role in (*_ROLE_DIRECTORIES, *_WIKI_STRUCTURAL_DIRECTORIES):
+        _require_canonical_path(paths, role, require_directory=True)
+
+
+def require_canonical_project_path(
+    paths: ProjectPaths,
+    relative_path: str,
+    *,
+    require_file: bool = False,
+    require_directory: bool = False,
+) -> Path:
+    """Return a project path only if each lexical component is canonical.
+
+    Checking the final `resolve()` result alone accepts `wiki/topics` redirected
+    to `wiki/current`: both targets remain inside the project but have different
+    authority.  This walks every component so role aliases cannot cross a
+    read, outbound, or write boundary.
+    """
+
+    if not isinstance(relative_path, str) or not relative_path or "\\" in relative_path:
+        raise ValueError("project path must be a canonical relative path")
+    relative = Path(relative_path)
+    if (
+        relative.is_absolute()
+        or relative.as_posix() != relative_path
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError("project path must be a canonical relative path")
+    root = paths.project_root
+    if root.is_symlink() or root.resolve() != root or not root.is_dir():
+        raise ValueError("project root is not a canonical directory")
+    cursor = root
+    for part in relative.parts:
+        cursor = cursor / part
+        resolved = cursor.resolve()
+        if cursor.is_symlink() or resolved != cursor or not resolved.is_relative_to(root):
+            raise ValueError(f"project path component is not canonical: {relative_path}")
+    if require_directory and cursor.exists() and not cursor.is_dir():
+        raise ValueError(f"project path is not a directory: {relative_path}")
+    if require_file and (not cursor.is_file() or cursor.is_symlink()):
+        raise ValueError(f"project path is not a file: {relative_path}")
+    return cursor
+
+
+def _require_canonical_path(
+    paths: ProjectPaths,
+    relative_path: str,
+    *,
+    require_directory: bool,
+) -> Path:
+    return require_canonical_project_path(
+        paths,
+        relative_path,
+        require_directory=require_directory,
+    )
 
 
 class ProjectLibraryLocator:

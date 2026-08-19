@@ -174,6 +174,38 @@ def test_projects_page_creates_card_with_local_path_and_project_scoped_key(
     assert str((library_root / "NEW_PRODUCT").resolve()) in rendered
 
 
+def _create_from_page(page: AppTest, project_id: str, parent_root: Path) -> None:
+    parent_root.mkdir()
+    page.text_input(key="projects_create_id").input(project_id)
+    page.text_input(key="projects_create_name").input(f"{project_id} 产品")
+    page.text_area(key="projects_create_description").input("独立目录项目文档孵化")
+    page.text_input(key="projects_create_parent_root").input(str(parent_root))
+    page.button(key="projects_create_submit").click().run()
+
+
+def test_owner_creates_projects_in_two_independent_parents(tmp_path: Path) -> None:
+    """Catches the page ignoring an Owner-selected parent directory."""
+    page = AppTest.from_function(_render_projects_page, args=(str(tmp_path / "library"),)).run()
+
+    _create_from_page(page, "PROJECT_A", tmp_path / "one")
+    _create_from_page(page, "PROJECT_B", tmp_path / "two")
+
+    assert (tmp_path / "one/PROJECT_A/README.md").is_file()
+    assert (tmp_path / "two/PROJECT_B/README.md").is_file()
+
+
+def test_unavailable_project_offers_relocation_instead_of_open(tmp_path: Path) -> None:
+    """Catches a missing registered root still exposing the unsafe open action."""
+    library_root = tmp_path / "library"
+    _seed_project(library_root, "PROJECT_A")
+    (library_root / "PROJECT_A").rename(library_root / "PROJECT_A_MOVED")
+
+    page = AppTest.from_function(_render_projects_page, args=(str(library_root),)).run()
+
+    assert page.button(key="project_relocate_PROJECT_A")
+    assert "project_open_PROJECT_A" not in {button.key for button in page.button}
+
+
 def test_switch_project_clears_query_release_and_upload_session_state(tmp_path: Path) -> None:
     """Catches one project's decisions, uploads, or query result leaking into another."""
     library_root = tmp_path / "library"

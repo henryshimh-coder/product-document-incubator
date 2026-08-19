@@ -85,6 +85,8 @@ timeouts:
         settings=settings,
         now=lambda: datetime(2026, 8, 12, tzinfo=UTC),
     )
+    external_parent = tmp_path / "customer-projects"
+    external_parent.mkdir()
     manager.create(
         CreateProjectInput(
             project_id="PROJECT_A",
@@ -92,6 +94,7 @@ timeouts:
             description="隔离测试",
             initial_display_version=None,
             allow_external_model=False,
+            parent_root=external_parent,
         )
     )
     manager.switch("PROJECT_A")
@@ -104,4 +107,4 @@ timeouts:
 
     assert container.require_project_id() == "PROJECT_A"
     assert container.active_project is not None
-    assert container.active_project.paths.project_root == (library / "PROJECT_A").resolve()
+    assert container.active_project.paths.project_root == (external_parent / "PROJECT_A").resolve()

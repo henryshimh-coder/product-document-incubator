@@ -23,12 +23,13 @@ def _render_incubate_page(library_root: str) -> None:
     )
     from src.infrastructure.files.document_store import DocumentStore
     from src.infrastructure.files.project_library import ProjectPaths
+    from src.infrastructure.files.wiki_context_reader import WikiContextReader
     from src.infrastructure.observability.model_call_logger import ModelCallLogger
     from src.ui.pages.incubate import render
 
     class Gateway:
         def generate_draft(self, inputs):
-            fragment = inputs["source_fragments"][0]
+            page = inputs["wiki_pages"][0]
             return {
                 "workflow_run_id": "WF-UI",
                 "result": {
@@ -36,14 +37,14 @@ def _render_incubate_page(library_root: str) -> None:
                     "summary": "候选摘要",
                     "missing_sections": [],
                     "evidence_gaps": [],
-                    "source_ids": [fragment["source_id"]],
+                    "source_ids": [page["source_id"]],
                     "section_citations": [
                         {
                             "heading": "产品概述",
-                            "source_id": fragment["source_id"],
-                            "chunk_id": fragment["chunk_id"],
-                            "locator": fragment["locator"],
-                            "excerpt": fragment["excerpt"],
+                            "source_id": page["source_id"],
+                            "chunk_id": page["chunk_id"],
+                            "locator": page["locator"],
+                            "excerpt": page["excerpt"],
                         }
                     ],
                 },
@@ -103,12 +104,22 @@ def _render_incubate_page(library_root: str) -> None:
                 is_redacted=True,
                 allow_external_model=True,
                 is_sandbox=False,
-                ingest_status="archived",
+                ingest_status="ingested",
+                source_page_path="wiki/sources/SRC-001-需求.md",
                 created_at=now,
             )
         )
     except Exception:
         pass
+    source_page = paths.wiki_root / "sources/SRC-001-需求.md"
+    source_page.parent.mkdir(parents=True, exist_ok=True)
+    source_page.write_text(
+        "---\nproject_id: PROJECT_A\nsource_id: SRC-001\nraw_sha256: "
+        + hashlib.sha256(payload).hexdigest()
+        + "\n---\n# 来源：需求\n\n支持候选文档。\n\n"
+        "来源定位【SRC-001：heading:需求; line:1】",
+        encoding="utf-8",
+    )
     service = IncubateDocument(
         paths=paths,
         projects=projects,
@@ -116,6 +127,10 @@ def _render_incubate_page(library_root: str) -> None:
         drafts=SqliteDocumentDraftRepository(db_path),
         store=DocumentStore(paths),
         gateway=Gateway(),
+        wiki_context=WikiContextReader(
+            paths=paths,
+            sources=SqliteSourceRepository(db_path),
+        ),
         model_call_logger=ModelCallLogger(db_path),
         now=lambda: now,
     )

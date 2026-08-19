@@ -6,10 +6,75 @@ from copy import deepcopy
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from src.domain.enums import SecurityLevel
 from src.domain.errors import GatewayError, OutputValidationError
 from src.infrastructure.files.redactor import RedactionResult
+
+
+def _wiki_ingest_schema_input() -> dict[str, Any]:
+    return {
+        "schema_version": "2.2",
+        "task_id": "TASK-WIKI-001",
+        "project_id": "PROJECT_A",
+        "source": {
+            "id": "SRC-A",
+            "source_type": "formal_document",
+            "material_name": "Pricing policy",
+            "document_version": "1.0",
+            "document_date": "2026-08-17",
+            "applicable_scope": "Project A",
+            "authority_level": "formal_effective",
+            "security_level": "L2",
+        },
+        "source_chunks": [
+            {"chunk_id": "SRC-A-0001", "locator": "Section 1", "text": "Redacted text"}
+        ],
+        "safe_index_projection": "- channels [SRC-L1]",
+        "safe_related_topics": [
+            {"title": "channels", "markdown": "Safe channel", "source_ids": ["SRC-L1"]}
+        ],
+        "ingest_contract": "Produce traceable Wiki statements.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("raw", "unredacted bytes"),
+        ("current_index", "# Whole index"),
+        ("topic_files", [{"path": "wiki/topics/channels.md", "markdown": "whole page"}]),
+        ("target_paths", ["wiki/topics/model-selected.md"]),
+    ],
+)
+def test_wiki_ingest_input_schema_forbids_raw_full_wiki_and_target_paths(
+    field: str, value: Any
+) -> None:
+    """Catches forbidden local files or model-writable paths entering the 2.2 payload."""
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
+    inputs = _wiki_ingest_schema_input()
+    inputs[field] = value
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        schemas.WikiIngestWorkflowInput.model_validate(inputs)
+
+
+def test_wiki_ingest_output_schema_has_no_target_path_or_raw_file_escape_hatch() -> None:
+    """Catches the dedicated 2.2 output regaining arbitrary filesystem authority."""
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
+    output = {
+        "schema_version": "2.2",
+        "task_id": "TASK-WIKI-001",
+        "source_page_markdown": "# Source\n\nTraceable statement.",
+        "topic_changes": [],
+        "conflicts": [],
+        "evidence_gaps": [],
+        "source_page_path": "wiki/sources/model-selected.md",
+    }
+
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        schemas.WikiIngestWorkflowOutput.model_validate(output)
 
 
 def _gateway(name: str, client: Any):

@@ -20,6 +20,13 @@ from src.application.dto.lint import ListLintIssuesInput, RunLintInput
 from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
+from src.application.dto.wiki_ingest import (
+    ConfirmLocalWikiIngestInput,
+    IngestArchivedSourceInput,
+    LocalWikiIngestDraftView,
+    PrepareLocalWikiIngestInput,
+    WikiIngestResultView,
+)
 from src.application.ports.incubator import (
     CurrentDocumentExporter,
     DocumentDraftPublisher,
@@ -31,16 +38,20 @@ from src.application.project_context import ProjectContext
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.build_trace import BuildTrace
 from src.application.use_cases.compare_sensitive_source import CompareSensitiveSource
+from src.application.use_cases.confirm_local_wiki_ingest import ConfirmLocalWikiIngest
 from src.application.use_cases.create_local_document_draft import CreateLocalDocumentDraft
 from src.application.use_cases.export_current_document import ExportCurrentDocument
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
 from src.application.use_cases.incubate_document import IncubateDocument
+from src.application.use_cases.ingest_archived_source import IngestArchivedSource
 from src.application.use_cases.manage_projects import ManageProjects
+from src.application.use_cases.prepare_local_wiki_ingest import PrepareLocalWikiIngest
 from src.application.use_cases.publish_baseline import PublishBaseline
 from src.application.use_cases.publish_document_draft import PublishDocumentDraft
 from src.application.use_cases.reclassify_source import ReclassifySource
 from src.application.use_cases.record_decision import RecordDecision
+from src.application.use_cases.recover_wiki_transaction import RecoverWikiTransaction
 from src.application.use_cases.review_change_request import ReviewChangeRequest
 from src.application.use_cases.run_lint import (
     DeterministicLintRunner,
@@ -49,6 +60,7 @@ from src.application.use_cases.run_lint import (
 )
 from src.application.use_cases.run_query import RunQuery
 from src.application.use_cases.suggest_document_structure import SuggestDocumentStructure
+from src.domain.errors import DomainError
 from src.domain.models import (
     Baseline,
     ChangeRequest,
@@ -88,6 +100,7 @@ from src.infrastructure.db.repositories import (
     SqliteReviewUnitOfWork,
     SqliteSourceRepository,
     SqliteStructureSuggestionRepository,
+    SqliteWikiIngestRunRepository,
 )
 from src.infrastructure.db.state_lock import acquire_shared, release
 from src.infrastructure.files.archive import SourceArchive
@@ -100,17 +113,21 @@ from src.infrastructure.files.markdown_store import MarkdownStore
 from src.infrastructure.files.project_library import (
     JsonIncubatorSettingsStore,
     ProjectLibraryLocator,
-    ProjectPaths,
 )
+from src.infrastructure.files.project_path_resolver import ProjectPathResolver
 from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 from src.infrastructure.files.project_source_archive import ProjectSourceArchive
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.files.source_index_store import SourceIndexStore
+from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
+from src.infrastructure.files.wiki_context_reader import WikiContextReader
 from src.infrastructure.gateways.composition import (
     DifyDocumentGatewaySettings,
     DifyGatewaySettings,
+    DifyWikiIngestGatewaySettings,
     WorkflowTimeouts,
     build_document_gateway,
+    build_wiki_ingest_gateway,
     build_workflow_gateways,
     default_workflow_timeouts,
 )
@@ -142,6 +159,18 @@ class SensitiveComparisonService(Protocol):
 
 class LocalDraftService(Protocol):
     def execute(self, command): ...
+
+
+class WikiIngestService(Protocol):
+    def execute(self, command: IngestArchivedSourceInput) -> WikiIngestResultView: ...
+
+
+class PrepareLocalWikiIngestService(Protocol):
+    def execute(self, command: PrepareLocalWikiIngestInput) -> LocalWikiIngestDraftView: ...
+
+
+class ConfirmLocalWikiIngestService(Protocol):
+    def execute(self, command: ConfirmLocalWikiIngestInput) -> WikiIngestResultView: ...
 
 
 class QueryService(Protocol):
@@ -231,6 +260,9 @@ class AppContainer:
     reclassify_source: SourceReclassificationService | None = None
     compare_sensitive_source: SensitiveComparisonService | None = None
     create_local_document_draft: LocalDraftService | None = None
+    wiki_ingest: WikiIngestService | None = None
+    prepare_local_wiki_ingest: PrepareLocalWikiIngestService | None = None
+    confirm_local_wiki_ingest: ConfirmLocalWikiIngestService | None = None
     incubate_document: DocumentIncubation | None = None
     publish_document_draft: DocumentDraftPublisher | None = None
     export_current_document: CurrentDocumentExporter | None = None
@@ -313,10 +345,13 @@ def build_container(
     if incubator_settings is not None:
         if incubator_settings.current_project_id is None:
             return AppContainer(settings=settings, manage_projects=project_management)
-        active_project = _build_project_context(
-            project_management=project_management,
-            project_id=incubator_settings.current_project_id,
-        )
+        try:
+            active_project = _build_project_context(
+                project_management=project_management,
+                project_id=incubator_settings.current_project_id,
+            )
+        except DomainError:
+            return AppContainer(settings=settings, manage_projects=project_management)
         if not active_project.paths.manifest_path.is_file():
             return AppContainer(
                 settings=settings,
@@ -326,6 +361,14 @@ def build_container(
                 reclassify_source=_build_reclassify_source(active_project),
                 compare_sensitive_source=_build_sensitive_comparison(active_project),
                 create_local_document_draft=_build_local_document_draft(active_project),
+                wiki_ingest=_build_wiki_ingest(
+                    settings=settings,
+                    active_project=active_project,
+                    environ=environ,
+                    http_factory=http_factory,
+                ),
+                prepare_local_wiki_ingest=_build_prepare_local_wiki_ingest(active_project),
+                confirm_local_wiki_ingest=_build_confirm_local_wiki_ingest(active_project),
                 incubate_document=_build_document_incubation(
                     settings=settings,
                     active_project=active_project,
@@ -475,6 +518,22 @@ def _build_stateful_container(
         ),
         "create_local_document_draft": (
             None if active_project is None else _build_local_document_draft(active_project)
+        ),
+        "wiki_ingest": (
+            None
+            if active_project is None
+            else _build_wiki_ingest(
+                settings=settings,
+                active_project=active_project,
+                environ=environ,
+                http_factory=http_factory,
+            )
+        ),
+        "prepare_local_wiki_ingest": (
+            None if active_project is None else _build_prepare_local_wiki_ingest(active_project)
+        ),
+        "confirm_local_wiki_ingest": (
+            None if active_project is None else _build_confirm_local_wiki_ingest(active_project)
         ),
         "incubate_document": (
             None
@@ -678,21 +737,32 @@ def _build_project_management(
         now=now,
         locator=locator,
         schema_source=schema_source,
+        path_resolver=ProjectPathResolver(
+            library_root,
+            SqliteProjectRepository(database_path),
+            now=now,
+        ),
     )
 
 
 def _build_project_context(
     *, project_management: ProjectManagement, project_id: str
 ) -> ProjectContext:
-    paths = ProjectPaths.for_project(project_management.library_root, project_id)
-    project_management.projects.get(project_id)
-    if not paths.project_root.is_dir():
-        raise FileNotFoundError(f"project directory not found: {project_id}")
-    return ProjectContext(
+    paths = project_management.path_resolver.resolve(project_id)
+    context = ProjectContext(
         project_id=project_id,
         paths=paths,
-        db_path=paths.library_root / ".incubator/product_incubator.db",
+        db_path=project_management.library_root / ".incubator/product_incubator.db",
     )
+    RecoverWikiTransaction(
+        project_id=project_id,
+        coordinator=WikiTransactionCoordinator(
+            paths=paths,
+            db_path=context.db_path,
+            validator=None,
+        ),
+    )
+    return context
 
 
 def _build_raw_source_archive(active_project: ProjectContext) -> ArchiveRawSource:
@@ -735,31 +805,109 @@ def _build_local_document_draft(active_project: ProjectContext) -> CreateLocalDo
     )
 
 
+def _build_wiki_ingest(
+    *,
+    settings: AppSettings,
+    active_project: ProjectContext,
+    environ: Mapping[str, str] | None,
+    http_factory,
+) -> IngestArchivedSource | None:
+    """Compose the optional 2.2 Wiki path only with its dedicated credential."""
+    if active_project.wiki_schema_version != "2.2":
+        return None
+    if environ is None:
+        load_dotenv(active_project.paths.project_root / ".env")
+    runtime = os.environ if environ is None else environ
+    base_url = runtime.get("DIFY_BASE_URL", "").strip()
+    wiki_key = runtime.get("DIFY_WIKI_INGEST_API_KEY", "").strip()
+    if not base_url or not wiki_key:
+        return None
+    try:
+        wiki_settings = DifyWikiIngestGatewaySettings(
+            base_url=base_url,
+            wiki_ingest_api_key=wiki_key,
+        )
+    except ValidationError as error:
+        message = "; ".join(entry["msg"] for entry in error.errors())
+        raise ConfigurationError(
+            f"Invalid Dify Wiki Ingest gateway configuration: {message}"
+        ) from None
+
+    def dictionary(name: str) -> tuple[str, ...]:
+        return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
+
+    return IngestArchivedSource(
+        paths=active_project.paths,
+        db_path=active_project.db_path,
+        sources=SqliteSourceRepository(active_project.db_path),
+        runs=SqliteWikiIngestRunRepository(active_project.db_path),
+        gateway=build_wiki_ingest_gateway(
+            wiki_settings,
+            timeouts=settings.timeouts,
+            http_factory=http_factory or httpx.Client,
+        ),
+        customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
+        strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
+        financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
+        leader_names=dictionary("REDACTION_LEADER_NAMES"),
+        unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
+    )
+
+
+def _build_prepare_local_wiki_ingest(
+    active_project: ProjectContext,
+) -> PrepareLocalWikiIngest | None:
+    if active_project.wiki_schema_version != "2.2":
+        return None
+    return PrepareLocalWikiIngest(
+        paths=active_project.paths,
+        sources=SqliteSourceRepository(active_project.db_path),
+    )
+
+
+def _build_confirm_local_wiki_ingest(
+    active_project: ProjectContext,
+) -> ConfirmLocalWikiIngest | None:
+    if active_project.wiki_schema_version != "2.2":
+        return None
+    return ConfirmLocalWikiIngest(
+        paths=active_project.paths,
+        db_path=active_project.db_path,
+        sources=SqliteSourceRepository(active_project.db_path),
+        runs=SqliteWikiIngestRunRepository(active_project.db_path),
+    )
+
+
 def _build_document_incubation(
     *,
     settings: AppSettings,
     active_project: ProjectContext,
     environ: Mapping[str, str] | None,
     http_factory,
-) -> IncubateDocument | None:
+) -> IncubateDocument:
     """Compose the optional 2.0 drafting path without enabling legacy workflows."""
     if environ is None:
         load_dotenv(active_project.paths.project_root / ".env")
     runtime = os.environ if environ is None else environ
     base_url = runtime.get("DIFY_BASE_URL", "").strip()
     document_key = runtime.get("DIFY_DOCUMENT_API_KEY", "").strip()
-    if not base_url or not document_key:
-        return None
-    try:
-        document_settings = DifyDocumentGatewaySettings(
-            base_url=base_url,
-            document_api_key=document_key,
+    gateway = None
+    if base_url and document_key:
+        try:
+            document_settings = DifyDocumentGatewaySettings(
+                base_url=base_url,
+                document_api_key=document_key,
+            )
+        except ValidationError as error:
+            message = "; ".join(entry["msg"] for entry in error.errors())
+            raise ConfigurationError(
+                f"Invalid Dify document gateway configuration: {message}"
+            ) from None
+        gateway = build_document_gateway(
+            document_settings,
+            timeouts=settings.timeouts,
+            http_factory=http_factory or httpx.Client,
         )
-    except ValidationError as error:
-        message = "; ".join(entry["msg"] for entry in error.errors())
-        raise ConfigurationError(
-            f"Invalid Dify document gateway configuration: {message}"
-        ) from None
 
     def dictionary(name: str) -> tuple[str, ...]:
         return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
@@ -770,12 +918,19 @@ def _build_document_incubation(
         sources=SqliteSourceRepository(active_project.db_path),
         drafts=SqliteDocumentDraftRepository(active_project.db_path),
         store=DocumentStore(active_project.paths),
-        gateway=build_document_gateway(
-            document_settings,
-            timeouts=settings.timeouts,
-            http_factory=http_factory or httpx.Client,
+        gateway=gateway,
+        wiki_context=WikiContextReader(
+            paths=active_project.paths,
+            sources=SqliteSourceRepository(active_project.db_path),
+            db_path=active_project.db_path,
+            customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
+            strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
+            financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
+            leader_names=dictionary("REDACTION_LEADER_NAMES"),
+            unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
         ),
         model_call_logger=ModelCallLogger(active_project.db_path),
+        local_draft_creator=_build_local_document_draft(active_project),
         accepted_suggestions=SqliteStructureSuggestionRepository(active_project.db_path),
         customer_names=dictionary("REDACTION_CUSTOMER_NAMES"),
         strategy_terms=dictionary("REDACTION_STRATEGY_TERMS"),
