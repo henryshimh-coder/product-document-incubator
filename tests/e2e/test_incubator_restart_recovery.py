@@ -163,6 +163,7 @@ ingested_at: '2026-08-12T12:00:00Z'
         validator=validator,
         clock=lambda: NOW,
     )
+    crashed._persist_recovery_binding(change_set)
     store = WikiChangeSetStore(paths, change_set.transaction_id)
     store.prepare(change_set, crashed.wiki, NOW)
     for change in change_set.page_changes:

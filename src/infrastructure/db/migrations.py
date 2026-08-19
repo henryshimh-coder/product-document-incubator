@@ -393,6 +393,18 @@ def migrate(db_path: Path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wiki_transaction_bindings (
+                transaction_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                binding_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         control_root = db_path.parent.parent
         legacy_projects = connection.execute(
             "SELECT id FROM projects WHERE project_root_path IS NULL"

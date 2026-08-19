@@ -12,6 +12,14 @@ from src.domain.incubator import IncubatorSettings
 
 PROJECT_ID_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,63}$")
 _ROLE_DIRECTORIES = ("raw", "wiki", "schema", "exports", ".incubator")
+_WIKI_STRUCTURAL_DIRECTORIES = (
+    "wiki/sources",
+    "wiki/topics",
+    "wiki/drafts",
+    "wiki/current",
+    "wiki/versions",
+    ".incubator/transactions",
+)
 
 
 @dataclass(frozen=True)
@@ -94,11 +102,65 @@ def require_safe_project_roles(paths: ProjectPaths) -> None:
     root = paths.project_root
     if root.is_symlink() or root.resolve() != root or not root.is_dir():
         raise ValueError("project root is not a canonical directory")
-    for role in _ROLE_DIRECTORIES:
-        lexical = root / role
-        resolved = lexical.resolve()
-        if lexical.is_symlink() or resolved != lexical or not resolved.is_relative_to(root):
-            raise ValueError(f"project role is not a canonical directory: {role}")
+    for role in (*_ROLE_DIRECTORIES, *_WIKI_STRUCTURAL_DIRECTORIES):
+        _require_canonical_path(paths, role, require_directory=True)
+
+
+def require_canonical_project_path(
+    paths: ProjectPaths,
+    relative_path: str,
+    *,
+    require_file: bool = False,
+    require_directory: bool = False,
+) -> Path:
+    """Return a project path only if each lexical component is canonical.
+
+    Checking the final `resolve()` result alone accepts `wiki/topics` redirected
+    to `wiki/current`: both targets remain inside the project but have different
+    authority.  This walks every component so role aliases cannot cross a
+    read, outbound, or write boundary.
+    """
+
+    if (
+        not isinstance(relative_path, str)
+        or not relative_path
+        or "\\" in relative_path
+    ):
+        raise ValueError("project path must be a canonical relative path")
+    relative = Path(relative_path)
+    if (
+        relative.is_absolute()
+        or relative.as_posix() != relative_path
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError("project path must be a canonical relative path")
+    root = paths.project_root
+    if root.is_symlink() or root.resolve() != root or not root.is_dir():
+        raise ValueError("project root is not a canonical directory")
+    cursor = root
+    for part in relative.parts:
+        cursor = cursor / part
+        resolved = cursor.resolve()
+        if cursor.is_symlink() or resolved != cursor or not resolved.is_relative_to(root):
+            raise ValueError(f"project path component is not canonical: {relative_path}")
+    if require_directory and cursor.exists() and not cursor.is_dir():
+        raise ValueError(f"project path is not a directory: {relative_path}")
+    if require_file and (not cursor.is_file() or cursor.is_symlink()):
+        raise ValueError(f"project path is not a file: {relative_path}")
+    return cursor
+
+
+def _require_canonical_path(
+    paths: ProjectPaths,
+    relative_path: str,
+    *,
+    require_directory: bool,
+) -> Path:
+    return require_canonical_project_path(
+        paths,
+        relative_path,
+        require_directory=require_directory,
+    )
 
 
 class ProjectLibraryLocator:

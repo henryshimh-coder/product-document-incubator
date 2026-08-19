@@ -48,6 +48,15 @@ class _JournalRawEvidence:
     size_bytes: int
 
 
+@dataclass(frozen=True)
+class _TrustedRecoveryBinding:
+    transaction_id: str
+    project_id: str
+    source_id: str
+    idempotency_key: str
+    binding_sha256: str
+
+
 class WikiChangeSetStore:
     """Persist one content-free transaction journal and its staged file tree."""
 
@@ -253,6 +262,7 @@ class WikiTransactionCoordinator:
         self.validator.validate_change_set(change_set)
         for change in change_set.page_changes:
             self.wiki.verify_before(change)
+        self._persist_recovery_binding(change_set)
 
         store = WikiChangeSetStore(self.paths, change_set.transaction_id)
         try:
@@ -353,9 +363,25 @@ class WikiTransactionCoordinator:
         journal: dict[str, object],
     ) -> WikiTransactionResult:
         try:
-            transaction_id, idempotency_key, state, targets, raw = self._validate_journal(
-                store, journal
+            transaction_id, project_id, source_id, idempotency_key, state, targets, raw = (
+                self._validate_journal(store, journal)
             )
+            trusted = self._load_recovery_binding(transaction_id)
+            if trusted is None or not self._journal_matches_binding(
+                trusted,
+                project_id=project_id,
+                source_id=source_id,
+                idempotency_key=idempotency_key,
+                raw=raw,
+                targets=targets,
+            ):
+                return self._require_recovery(
+                    store,
+                    journal,
+                    transaction_id,
+                    trusted.idempotency_key if trusted is not None else idempotency_key,
+                )
+            idempotency_key = trusted.idempotency_key
         except Exception as error:
             with_context = store.journal_path.is_file()
             if with_context:
@@ -371,7 +397,12 @@ class WikiTransactionCoordinator:
         except Exception:
             return self._require_recovery(store, journal, transaction_id, idempotency_key)
 
-        db_succeeded = self._database_succeeded(journal)
+        db_succeeded = self._database_succeeded(
+            transaction_id,
+            trusted.project_id,
+            trusted.source_id,
+            trusted.idempotency_key,
+        )
         if state == RECOVERY_REQUIRED:
             return self._result(transaction_id, idempotency_key, RECOVERY_REQUIRED)
         if state == ROLLED_BACK:
@@ -417,7 +448,11 @@ class WikiTransactionCoordinator:
                 for target in reversed(targets):
                     self.wiki.restore(target, store.backup_root)
                 self._verify_raw_evidence(raw)
-                self._record_recovery_failure(journal)
+                self._record_recovery_failure(
+                    transaction_id,
+                    trusted.project_id,
+                    trusted.source_id,
+                )
                 store.set_state(
                     ROLLED_BACK,
                     self.clock(),
@@ -452,9 +487,10 @@ class WikiTransactionCoordinator:
         self,
         store: WikiChangeSetStore,
         journal: dict[str, object],
-    ) -> tuple[str, str, str, list[_JournalTarget], _JournalRawEvidence]:
+    ) -> tuple[str, str, str, str, str, list[_JournalTarget], _JournalRawEvidence]:
         transaction_id = journal.get("transaction_id")
         project_id = journal.get("project_id")
+        source_id = journal.get("source_id")
         idempotency_key = journal.get("idempotency_key")
         state = journal.get("state")
         raw_targets = journal.get("targets")
@@ -462,7 +498,8 @@ class WikiTransactionCoordinator:
         if (
             not isinstance(transaction_id, str)
             or transaction_id != store.transaction_root.name
-            or project_id != self.paths.project_id
+            or not isinstance(project_id, str)
+            or not isinstance(source_id, str)
             or not isinstance(idempotency_key, str)
             or len(idempotency_key) != 64
             or not isinstance(state, str)
@@ -498,6 +535,8 @@ class WikiTransactionCoordinator:
             targets.append(_JournalTarget(relative_path, before_sha256, after_sha256))
         return (
             transaction_id,
+            project_id,
+            source_id,
             idempotency_key,
             state,
             targets,
@@ -547,7 +586,13 @@ class WikiTransactionCoordinator:
             and all(character in "0123456789abcdef" for character in value)
         )
 
-    def _database_succeeded(self, journal: dict[str, object]) -> bool:
+    def _database_succeeded(
+        self,
+        transaction_id: str,
+        project_id: str,
+        source_id: str,
+        idempotency_key: str,
+    ) -> bool:
         with connect(self.db_path) as connection:
             row = connection.execute(
                 """
@@ -555,19 +600,20 @@ class WikiTransactionCoordinator:
                 FROM wiki_ingest_runs AS run
                 WHERE run.transaction_id = ? AND run.project_id = ? AND run.source_id = ?
                 """,
-                (
-                    journal.get("transaction_id"),
-                    journal.get("project_id"),
-                    journal.get("source_id"),
-                ),
+                (transaction_id, project_id, source_id),
             ).fetchone()
         return bool(
             row is not None
             and row["status"] == "ingested"
-            and row["idempotency_key"] == journal.get("idempotency_key")
+            and row["idempotency_key"] == idempotency_key
         )
 
-    def _record_recovery_failure(self, journal: dict[str, object]) -> None:
+    def _record_recovery_failure(
+        self,
+        transaction_id: str,
+        project_id: str,
+        source_id: str,
+    ) -> None:
         with connect(self.db_path) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -576,7 +622,7 @@ class WikiTransactionCoordinator:
                 SET ingest_status = 'ingest_failed', ingest_error_code = 'WIKI_INGEST_INTERRUPTED'
                 WHERE id = ? AND project_id = ?
                 """,
-                (journal.get("source_id"), journal.get("project_id")),
+                (source_id, project_id),
             )
             connection.execute(
                 """
@@ -585,8 +631,138 @@ class WikiTransactionCoordinator:
                     finished_at = ?
                 WHERE transaction_id = ?
                 """,
-                (self.clock().isoformat(), journal.get("transaction_id")),
+                (self.clock().isoformat(), transaction_id),
             )
+
+    def _persist_recovery_binding(self, change_set: WikiChangeSet) -> None:
+        payload = self._recovery_binding_payload(
+            transaction_id=change_set.transaction_id,
+            project_id=change_set.project_id,
+            source_id=change_set.source_id,
+            idempotency_key=change_set.idempotency_key,
+            raw=_JournalRawEvidence(
+                change_set.raw_path,
+                change_set.raw_sha256,
+                change_set.raw_size_bytes,
+            ),
+            targets=[
+                _JournalTarget(
+                    change.relative_path,
+                    change.before_sha256,
+                    change.after_sha256,
+                )
+                for change in change_set.page_changes
+            ],
+        )
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO wiki_transaction_bindings (
+                    transaction_id, project_id, source_id, idempotency_key,
+                    binding_sha256, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(transaction_id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    source_id = excluded.source_id,
+                    idempotency_key = excluded.idempotency_key,
+                    binding_sha256 = excluded.binding_sha256
+                """,
+                (
+                    change_set.transaction_id,
+                    change_set.project_id,
+                    change_set.source_id,
+                    change_set.idempotency_key,
+                    self._binding_sha256(payload),
+                    self.clock().isoformat(),
+                ),
+            )
+
+    def _load_recovery_binding(self, transaction_id: str) -> _TrustedRecoveryBinding | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT transaction_id, project_id, source_id, idempotency_key, binding_sha256
+                FROM wiki_transaction_bindings
+                WHERE transaction_id = ?
+                """,
+                (transaction_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _TrustedRecoveryBinding(
+            transaction_id=str(row["transaction_id"]),
+            project_id=str(row["project_id"]),
+            source_id=str(row["source_id"]),
+            idempotency_key=str(row["idempotency_key"]),
+            binding_sha256=str(row["binding_sha256"]),
+        )
+
+    def _journal_matches_binding(
+        self,
+        binding: _TrustedRecoveryBinding,
+        *,
+        project_id: str,
+        source_id: str,
+        idempotency_key: str,
+        raw: _JournalRawEvidence,
+        targets: list[_JournalTarget],
+    ) -> bool:
+        if (
+            project_id != binding.project_id
+            or source_id != binding.source_id
+            or idempotency_key != binding.idempotency_key
+        ):
+            return False
+        payload = self._recovery_binding_payload(
+            transaction_id=binding.transaction_id,
+            project_id=project_id,
+            source_id=source_id,
+            idempotency_key=idempotency_key,
+            raw=raw,
+            targets=targets,
+        )
+        return self._binding_sha256(payload) == binding.binding_sha256
+
+    @staticmethod
+    def _recovery_binding_payload(
+        *,
+        transaction_id: str,
+        project_id: str,
+        source_id: str,
+        idempotency_key: str,
+        raw: _JournalRawEvidence,
+        targets: list[_JournalTarget],
+    ) -> dict[str, object]:
+        return {
+            "transaction_id": transaction_id,
+            "project_id": project_id,
+            "source_id": source_id,
+            "idempotency_key": idempotency_key,
+            "raw": {
+                "relative_path": raw.relative_path,
+                "sha256": raw.sha256,
+                "size_bytes": raw.size_bytes,
+            },
+            "targets": [
+                {
+                    "relative_path": target.relative_path,
+                    "before_sha256": target.before_sha256,
+                    "after_sha256": target.after_sha256,
+                }
+                for target in targets
+            ],
+        }
+
+    @staticmethod
+    def _binding_sha256(payload: dict[str, object]) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
 
     def _mark_interrupted_runs_locked(self) -> None:
         cutoff = self.clock() - self.interrupted_after

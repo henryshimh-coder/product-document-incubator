@@ -38,6 +38,7 @@ def _source(
     project_id: str = "PROJECT_A",
     is_redacted: bool = True,
     allow_external_model: bool = True,
+    ingest_status: str = "ingested",
 ) -> SourceRecord:
     return SourceRecord(
         id=source_id,
@@ -58,7 +59,7 @@ def _source(
         is_redacted=is_redacted,
         allow_external_model=allow_external_model,
         is_sandbox=False,
-        ingest_status="ingested",
+        ingest_status=ingest_status,
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
     )
 
@@ -302,6 +303,39 @@ def test_projection_excludes_unapproved_or_unresolvable_topic_without_metadata_l
     assert projection.excluded_topic_count == 1
 
 
+@pytest.mark.parametrize("ingest_status", ["pending_ingest", "ingest_failed"])
+def test_projection_excludes_topic_when_any_cited_source_is_not_ingested(
+    project_wiki: _ProjectWiki,
+    tmp_path: Path,
+    ingest_status: str,
+) -> None:
+    paths = project_wiki.paths
+    repository = _SourceRepository(
+        [
+            _source("SRC-L1", security_level=SecurityLevel.L1_PUBLIC_SIMULATED),
+            _source(
+                "SRC-PENDING",
+                security_level=SecurityLevel.L2_INTERNAL,
+                ingest_status=ingest_status,
+            ),
+        ]
+    )
+    path = project_wiki.write_topic(
+        "stale-topic",
+        citations=["SRC-L1", "SRC-PENDING"],
+        body="Pending source should block the full topic",
+    )
+
+    projection = WikiOutboundContextBuilder(paths, repository).build(
+        project_id="PROJECT_A",
+        related_topic_paths=[path],
+    )
+
+    assert projection.safe_related_topics == []
+    assert projection.local_sensitive_comparison_required is True
+    assert projection.excluded_topic_count == 1
+
+
 def test_projection_excludes_every_topic_when_project_disallows_external_model(
     project_wiki: _ProjectWiki,
     source_repository: _SourceRepository,
@@ -332,4 +366,26 @@ def test_projection_rejects_cross_project_or_non_topic_paths(
     with pytest.raises(ValueError, match="WIKI_OUTBOUND_TOPIC_PATH_INVALID"):
         WikiOutboundContextBuilder(project_wiki.paths, source_repository).build(
             project_id="PROJECT_A", related_topic_paths=["wiki/index.md"]
+        )
+
+
+def test_projection_rejects_structural_topic_symlink_before_reading_body(
+    project_wiki: _ProjectWiki,
+    source_repository: _SourceRepository,
+) -> None:
+    target = project_wiki.paths.wiki_root / "topics"
+    current = project_wiki.paths.wiki_root / "current"
+    current.mkdir(parents=True, exist_ok=True)
+    (current / "leak.md").write_text(
+        "---\npage_type: topic\ntopic_id: leak\nproject_id: PROJECT_A\n---\n- leaked",
+        encoding="utf-8",
+    )
+    if target.exists():
+        target.rmdir()
+    target.symlink_to("current")
+
+    with pytest.raises(ValueError, match="WIKI_OUTBOUND_TOPIC_PATH_INVALID"):
+        WikiOutboundContextBuilder(project_wiki.paths, source_repository).build(
+            project_id="PROJECT_A",
+            related_topic_paths=["wiki/topics/leak.md"],
         )

@@ -15,9 +15,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from src.domain.enums import SecurityLevel
 from src.domain.errors import DomainError, GatewayError
 from src.domain.models import SourceRecord
+from src.domain.wiki import WikiIngestStatus
 from src.infrastructure.db.connection import connect
 from src.infrastructure.files.extractor import extract_document_bytes
-from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.project_library import (
+    ProjectPaths,
+    require_canonical_project_path,
+    require_safe_project_roles,
+)
 from src.infrastructure.files.redactor import redact_text
 
 _CITATION_TOKEN = re.compile(r"【(?P<content>[^【】\r\n]*)】")
@@ -177,6 +182,10 @@ class WikiOutboundContextBuilder:
         paths = tuple(related_topic_paths)
         if len(paths) != len(set(paths)) or len(paths) > 20:
             raise ValueError("WIKI_OUTBOUND_TOPIC_PATH_INVALID")
+        try:
+            require_safe_project_roles(self.paths)
+        except ValueError:
+            raise ValueError("WIKI_OUTBOUND_TOPIC_PATH_INVALID") from None
 
         project_allowed = self._project_allows_external_model(project_id)
         safe_topics: list[SafeWikiTopicInput] = []
@@ -232,7 +241,10 @@ class WikiOutboundContextBuilder:
         ):
             raise _authorization_invalid()
 
-        expected_projection = self.build(project_id, related_topic_paths)
+        try:
+            expected_projection = self.build(project_id, related_topic_paths)
+        except ValueError:
+            raise _authorization_invalid() from None
         expected_topics = [
             topic.model_dump(mode="json") for topic in expected_projection.safe_related_topics
         ]
@@ -248,7 +260,11 @@ class WikiOutboundContextBuilder:
             source = self.sources.get(source_input["id"])
         except (KeyError, TypeError, ValueError):
             raise _authorization_invalid() from None
-        if not self._source_record_is_exportable(source, project_id):
+        if not self._source_record_is_exportable(
+            source,
+            project_id,
+            require_ingested=False,
+        ):
             raise _authorization_invalid()
         expected_source = {
             "id": source.id,
@@ -281,32 +297,30 @@ class WikiOutboundContextBuilder:
             or any(part in {"", ".", ".."} for part in archive_path.parts)
         ):
             raise _authorization_invalid()
-        project_root = self.paths.project_root
-        raw_root = self.paths.raw_root
-        if (
-            project_root.is_symlink()
-            or project_root.resolve() != project_root
-            or raw_root.is_symlink()
-            or raw_root.resolve() != raw_root
-            or not raw_root.is_relative_to(project_root)
-        ):
-            raise _authorization_invalid()
         if archive_path.is_absolute():
-            lexical_path = archive_path
+            try:
+                relative_path = archive_path.relative_to(self.paths.project_root)
+                lexical_path = require_canonical_project_path(
+                    self.paths,
+                    relative_path.as_posix(),
+                    require_file=True,
+                )
+            except ValueError:
+                raise _authorization_invalid() from None
         else:
-            if not source.archive_path.startswith("raw/"):
-                raise _authorization_invalid()
-            lexical_path = project_root / archive_path
-        resolved_path = lexical_path.resolve()
-        if (
-            lexical_path.is_symlink()
-            or resolved_path != lexical_path
-            or not resolved_path.is_relative_to(raw_root)
-            or not resolved_path.is_file()
-        ):
+            try:
+                lexical_path = require_canonical_project_path(
+                    self.paths,
+                    source.archive_path,
+                    require_file=True,
+                )
+            except ValueError:
+                raise _authorization_invalid() from None
+        raw_root = self.paths.raw_root
+        if not lexical_path.is_relative_to(raw_root):
             raise _authorization_invalid()
         try:
-            payload = resolved_path.read_bytes()
+            payload = lexical_path.read_bytes()
         except OSError:
             raise _authorization_invalid() from None
         if hashlib.sha256(payload).hexdigest() != source.sha256:
@@ -329,24 +343,16 @@ class WikiOutboundContextBuilder:
         }
 
     def _trusted_ingest_contract(self) -> str:
-        project_root = self.paths.project_root
-        lexical_schema_root = project_root / "schema"
-        lexical_path = lexical_schema_root / "ingest-contract.md"
-        resolved_path = lexical_path.resolve()
-        if (
-            project_root.is_symlink()
-            or project_root.resolve() != project_root
-            or self.paths.schema_root != lexical_schema_root
-            or lexical_schema_root.is_symlink()
-            or lexical_schema_root.resolve() != lexical_schema_root
-            or lexical_path.is_symlink()
-            or resolved_path != lexical_path
-            or not resolved_path.is_relative_to(project_root)
-            or not resolved_path.is_file()
-        ):
-            raise _authorization_invalid()
         try:
-            return resolved_path.read_text(encoding="utf-8").strip()
+            lexical_path = require_canonical_project_path(
+                self.paths,
+                "schema/ingest-contract.md",
+                require_file=True,
+            )
+        except ValueError:
+            raise _authorization_invalid() from None
+        try:
+            return lexical_path.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeError):
             raise _authorization_invalid() from None
 
@@ -388,14 +394,20 @@ class WikiOutboundContextBuilder:
             or any(part in {"", ".", ".."} for part in path.parts)
         ):
             raise ValueError("WIKI_OUTBOUND_TOPIC_PATH_INVALID")
-        lexical_target = self.paths.project_root / relative_path
-        target = lexical_target.resolve()
-        if (
-            lexical_target.is_symlink()
-            or not target.is_relative_to(self.project_root)
-            or not target.is_relative_to(self.topics_root)
-            or not target.is_file()
-        ):
+        try:
+            topics_root = require_canonical_project_path(
+                self.paths,
+                "wiki/topics",
+                require_directory=True,
+            )
+            target = require_canonical_project_path(
+                self.paths,
+                relative_path,
+                require_file=True,
+            )
+        except ValueError:
+            raise ValueError("WIKI_OUTBOUND_TOPIC_PATH_INVALID") from None
+        if not target.is_relative_to(self.project_root) or not target.is_relative_to(topics_root):
             raise ValueError("WIKI_OUTBOUND_TOPIC_PATH_INVALID")
         return target
 
@@ -527,12 +539,19 @@ class WikiOutboundContextBuilder:
         return sources
 
     @staticmethod
-    def _source_record_is_exportable(source: SourceRecord, project_id: str) -> bool:
+    def _source_record_is_exportable(
+        source: SourceRecord,
+        project_id: str,
+        *,
+        require_ingested: bool = True,
+    ) -> bool:
         return all(
             (
                 source.project_id == project_id,
                 source.security_level
                 in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL},
+                (not require_ingested)
+                or source.ingest_status == WikiIngestStatus.INGESTED.value,
                 source.is_redacted,
                 source.allow_external_model,
                 not source.is_sandbox

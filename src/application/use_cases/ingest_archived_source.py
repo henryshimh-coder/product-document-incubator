@@ -31,7 +31,11 @@ from src.domain.wiki import (
 from src.infrastructure.db.connection import connect
 from src.infrastructure.files.extractor import extract_document_bytes
 from src.infrastructure.files.project_audit_log import ProjectAuditLog
-from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.project_library import (
+    ProjectPaths,
+    require_canonical_project_path,
+    require_safe_project_roles,
+)
 from src.infrastructure.files.redactor import redact_text
 from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
@@ -108,6 +112,13 @@ class IngestArchivedSource:
     def _execute_locked(self, command: IngestArchivedSourceInput) -> WikiIngestResultView:
         source: SourceRecord | None = None
         run: WikiIngestRun | None = None
+        audit_started: datetime | None = None
+        audit_source_ids: list[str] = []
+        audit_outbound_chars = 0
+        audit_authorized = False
+        audit_redacted = False
+        audit_invoked = False
+        audit_recorded = False
         try:
             # Project resolution/ID checks and the lifecycle lock precede this fixed order.
             source = self._owned_source(command)
@@ -118,6 +129,8 @@ class IngestArchivedSource:
                 return self._duplicate_view(duplicate)
             self._validate_starting_status(source)
             run = self._begin_run(source, idempotency_key)
+            audit_started = self.now()
+            audit_source_ids = [source.id]
 
             # Authorization precedes extraction. No L3/L4 or unapproved source can
             # reach extraction, projection, proof creation, or the Gateway.
@@ -137,6 +150,24 @@ class IngestArchivedSource:
                 projection.safe_index_projection,
                 [item.model_dump(mode="json") for item in projection.safe_related_topics],
             )
+            audit_source_ids = sorted(
+                {
+                    source.id,
+                    *(
+                        source_id
+                        for topic in projection.safe_related_topics
+                        for source_id in topic.source_ids
+                    ),
+                }
+            )
+            audit_outbound_chars = len(
+                json.dumps(
+                    workflow_inputs,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
             safety_proof = create_outbound_safety_proof(
                 WikiIngestWorkflowInput,
                 workflow_inputs,
@@ -148,30 +179,14 @@ class IngestArchivedSource:
                 unpublished_decisions=self.unpublished_decisions,
                 source_total_chars=len(extracted.text),
             )
+            audit_redacted = True
             wiki_authorization = self.context.authorize(
                 workflow_inputs,
                 related_topic_paths=related_topic_paths,
             )
-            call_started = self.now()
-            outbound_source_ids = sorted(
-                {
-                    source.id,
-                    *(
-                        source_id
-                        for topic in projection.safe_related_topics
-                        for source_id in topic.source_ids
-                    ),
-                }
-            )
-            outbound_chars = len(
-                json.dumps(
-                    workflow_inputs,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-            )
+            audit_authorized = True
             try:
+                audit_invoked = True
                 output = self.gateway.generate(
                     workflow_inputs,
                     safety_proof=safety_proof,
@@ -179,20 +194,29 @@ class IngestArchivedSource:
                     user=command.project_id,
                 )
             except BaseException as error:
+                audit_recorded = True
                 self._record_external_model_call(
                     project_id=command.project_id,
-                    source_ids=outbound_source_ids,
-                    started=call_started,
-                    outbound_chars=outbound_chars,
+                    source_ids=audit_source_ids,
+                    started=audit_started or self.now(),
+                    outbound_chars=audit_outbound_chars,
+                    authorized=audit_authorized,
+                    redacted=audit_redacted,
+                    invoked=audit_invoked,
                     status="failed",
                     error_code=getattr(error, "code", ErrorCode.WIKI_CHANGESET_INVALID.value),
                 )
                 raise
+            self._validate_model_output_citations(source, output)
+            audit_recorded = True
             self._record_external_model_call(
                 project_id=command.project_id,
-                source_ids=outbound_source_ids,
-                started=call_started,
-                outbound_chars=outbound_chars,
+                source_ids=audit_source_ids,
+                started=audit_started or self.now(),
+                outbound_chars=audit_outbound_chars,
+                authorized=audit_authorized,
+                redacted=audit_redacted,
+                invoked=audit_invoked,
                 status="succeeded",
                 error_code=None,
             )
@@ -230,6 +254,23 @@ class IngestArchivedSource:
             )
         except Exception as error:
             error_code = self._safe_error_code(error)
+            if (
+                source is not None
+                and run is not None
+                and not audit_recorded
+                and audit_started is not None
+            ):
+                self._record_external_model_call(
+                    project_id=command.project_id,
+                    source_ids=audit_source_ids or [source.id],
+                    started=audit_started,
+                    outbound_chars=audit_outbound_chars,
+                    authorized=audit_authorized,
+                    redacted=audit_redacted,
+                    invoked=audit_invoked,
+                    status="failed",
+                    error_code=error_code,
+                )
             if source is not None and source.project_id == command.project_id:
                 self._record_failure(source, run, error_code)
             if isinstance(error, AppError):
@@ -265,21 +306,27 @@ class IngestArchivedSource:
             or any(part in {"", ".", ".."} for part in archive.parts)
         ):
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "RAW_PATH_INVALID")
-        lexical = archive if archive.is_absolute() else self.paths.project_root / archive
         raw_root = self.paths.raw_root
-        resolved = lexical.resolve()
-        if (
-            self.paths.project_root.is_symlink()
-            or raw_root.is_symlink()
-            or raw_root.resolve() != raw_root
-            or lexical.is_symlink()
-            or resolved != lexical
-            or not resolved.is_relative_to(raw_root)
-            or not resolved.is_file()
-        ):
+        try:
+            if archive.is_absolute():
+                relative_archive = archive.relative_to(self.paths.project_root)
+                lexical = require_canonical_project_path(
+                    self.paths,
+                    relative_archive.as_posix(),
+                    require_file=True,
+                )
+            else:
+                lexical = require_canonical_project_path(
+                    self.paths,
+                    source.archive_path,
+                    require_file=True,
+                )
+        except ValueError:
+            raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "RAW_PATH_INVALID") from None
+        if not lexical.is_relative_to(raw_root):
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "RAW_PATH_INVALID")
         try:
-            payload = resolved.read_bytes()
+            payload = lexical.read_bytes()
         except OSError:
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "RAW_READ_FAILED") from None
         if (
@@ -287,7 +334,7 @@ class IngestArchivedSource:
             or hashlib.sha256(payload).hexdigest() != source.sha256
         ):
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "RAW_SHA256_MISMATCH")
-        return resolved, payload
+        return lexical, payload
 
     @staticmethod
     def _idempotency_key(source: SourceRecord) -> str:
@@ -417,14 +464,30 @@ class IngestArchivedSource:
         return safe_chunks
 
     def _related_topic_paths(self) -> list[str]:
-        topic_root = self.paths.wiki_root / "topics"
-        if not topic_root.is_dir():
+        try:
+            require_safe_project_roles(self.paths)
+            topic_root = require_canonical_project_path(
+                self.paths,
+                "wiki/topics",
+                require_directory=True,
+            )
+        except ValueError:
+            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_PATH_INVALID") from None
+        if not topic_root.exists():
             return []
-        return [
-            path.relative_to(self.paths.project_root).as_posix()
-            for path in sorted(topic_root.glob("*.md"))
-            if path.is_file() and not path.is_symlink()
-        ]
+        related_paths: list[str] = []
+        for path in sorted(topic_root.glob("*.md")):
+            relative_path = path.relative_to(self.paths.project_root).as_posix()
+            try:
+                require_canonical_project_path(
+                    self.paths,
+                    relative_path,
+                    require_file=True,
+                )
+            except ValueError:
+                raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_PATH_INVALID") from None
+            related_paths.append(relative_path)
+        return related_paths
 
     def _workflow_inputs(
         self,
@@ -752,7 +815,10 @@ class IngestArchivedSource:
 
     def _page_change(self, relative_path: str, markdown: str) -> WikiPageChange:
         normalized = markdown.strip()
-        target = self.paths.project_root / relative_path
+        try:
+            target = require_canonical_project_path(self.paths, relative_path)
+        except ValueError:
+            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "WIKI_FILE_MISSING") from None
         before = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
         return WikiPageChange(
             relative_path=relative_path,
@@ -764,8 +830,15 @@ class IngestArchivedSource:
 
     def _read_required(self, relative_path: str) -> str:
         try:
-            return (self.paths.project_root / relative_path).read_text(encoding="utf-8")
+            path = require_canonical_project_path(
+                self.paths,
+                relative_path,
+                require_file=True,
+            )
+            return path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
+            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "WIKI_FILE_MISSING") from None
+        except ValueError:
             raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "WIKI_FILE_MISSING") from None
 
     def _relative_raw_path(self, source: SourceRecord) -> str:
@@ -816,6 +889,51 @@ class IngestArchivedSource:
             raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "TOPIC_SOURCE_LOCATOR_REQUIRED")
         return match.group(1).strip()
 
+    def _validate_model_output_citations(
+        self,
+        source: SourceRecord,
+        output: WikiIngestWorkflowOutput,
+    ) -> None:
+        self._validate_model_markdown(
+            source,
+            output.source_page_markdown,
+            allowed_source_ids={source.id},
+        )
+        for topic in output.topic_changes:
+            self._validate_model_markdown(
+                source,
+                topic.markdown,
+                allowed_source_ids=set(topic.source_ids),
+            )
+
+    def _validate_model_markdown(
+        self,
+        source: SourceRecord,
+        markdown: str,
+        *,
+        allowed_source_ids: set[str],
+    ) -> None:
+        try:
+            cited_sources = self.context.citation_sources(markdown)
+        except ValueError:
+            raise DomainError(
+                ErrorCode.WIKI_CHANGESET_INVALID,
+                "MODEL_MARKDOWN_CITATION_INVALID",
+            ) from None
+        for cited in cited_sources:
+            if cited.id not in allowed_source_ids or cited.project_id != source.project_id:
+                raise DomainError(
+                    ErrorCode.WIKI_CHANGESET_INVALID,
+                    "MODEL_MARKDOWN_CITATION_INVALID",
+                )
+            if cited.id != source.id and not self.context._source_record_is_exportable(
+                cited, source.project_id
+            ):
+                raise DomainError(
+                    ErrorCode.WIKI_CHANGESET_INVALID,
+                    "MODEL_MARKDOWN_CITATION_INVALID",
+                )
+
     def _record_external_model_call(
         self,
         *,
@@ -823,34 +941,42 @@ class IngestArchivedSource:
         source_ids: list[str],
         started: datetime,
         outbound_chars: int,
+        authorized: bool,
+        redacted: bool,
+        invoked: bool,
         status: str,
         error_code: str | None,
     ) -> None:
         finished = self.now()
-        self.model_call_logger.record(
-            ModelCallLog(
-                id=f"MODEL-WIKI-{new_workflow_task_id('CALL')}",
-                project_id=project_id,
-                task_type="wiki_ingest",
-                workflow_run_id=None,
-                correlation_id=f"WIKI-{new_workflow_task_id('CORR')}",
-                source_ids=source_ids,
-                baseline_version="WIKI-2.2",
-                model_label="dify-wiki-ingest",
-                prompt_version="wiki-ingest-v2.2",
-                schema_version=WIKI_SCHEMA_VERSION,
-                authorized=True,
-                redacted=True,
-                outbound_chars=outbound_chars,
-                outbound_coverage=1.0,
-                result_mode=CallResultMode.REALTIME,
-                status=status,  # type: ignore[arg-type]
-                started_at=started,
-                finished_at=finished,
-                elapsed_ms=max(0, int((finished - started).total_seconds() * 1000)),
-                error_code=error_code,
+        try:
+            self.model_call_logger.record(
+                ModelCallLog(
+                    id=f"MODEL-WIKI-{new_workflow_task_id('CALL')}",
+                    project_id=project_id,
+                    task_type="wiki_ingest",
+                    workflow_run_id=None,
+                    correlation_id=f"WIKI-{new_workflow_task_id('CORR')}",
+                    source_ids=source_ids,
+                    baseline_version="WIKI-2.2",
+                    model_label="dify-wiki-ingest",
+                    prompt_version="wiki-ingest-v2.2",
+                    schema_version=WIKI_SCHEMA_VERSION,
+                    authorized=authorized,
+                    redacted=redacted,
+                    outbound_chars=outbound_chars,
+                    outbound_coverage=(1.0 if outbound_chars else 0.0),
+                    result_mode=(
+                        CallResultMode.REALTIME if invoked else CallResultMode.LOCAL_ONLY
+                    ),
+                    status=status,  # type: ignore[arg-type]
+                    started_at=started,
+                    finished_at=finished,
+                    elapsed_ms=max(0, int((finished - started).total_seconds() * 1000)),
+                    error_code=error_code,
+                )
             )
-        )
+        except Exception:
+            pass
 
     def _record_failure(
         self,

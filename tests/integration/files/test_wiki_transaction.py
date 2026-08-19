@@ -13,6 +13,7 @@ from src.domain.enums import AuthorityLevel, DocumentGenerationMode, SecurityLev
 from src.domain.errors import DomainError
 from src.domain.models import Project, SourceRecord
 from src.domain.wiki import WikiChangeSet, WikiIngestRun, WikiPageChange
+from src.infrastructure.db.connection import connect
 from src.infrastructure.db.migrations import migrate
 from src.infrastructure.db.repositories import (
     SqliteProjectRepository,
@@ -165,6 +166,7 @@ class _TransactionFixture:
     def seed_interrupted(
         self, journal_state: str, *, db_succeeded: bool
     ) -> WikiChangeSetStore:
+        self.coordinator._persist_recovery_binding(self.change_set)
         store = WikiChangeSetStore(self.paths, self.change_set.transaction_id)
         store.prepare(self.change_set, self.coordinator.wiki, NOW)
         if journal_state in {FILES_COMMITTED, DATABASE_COMMITTED, COMMITTED}:
@@ -458,6 +460,39 @@ def test_recovery_matrix(
         assert store.backup_root.is_dir()
         with pytest.raises(RuntimeError, match="WIKI_RECOVERY_REQUIRED"):
             transaction_fixture.coordinator.commit(transaction_fixture.change_set)
+
+
+@pytest.mark.parametrize("field", ["source_id", "raw_sha256", "raw_size_bytes", "targets"])
+def test_tampered_journal_requires_recovery_before_restore_or_db_update(
+    transaction_fixture: _TransactionFixture,
+    field: str,
+) -> None:
+    before = transaction_fixture.snapshot()
+    store = transaction_fixture.seed_interrupted(PREPARED, db_succeeded=False)
+    journal = json.loads(store.journal_path.read_text(encoding="utf-8"))
+    if field == "source_id":
+        journal["source_id"] = "SRC-TAMPERED"
+    elif field == "raw_sha256":
+        journal["raw"]["sha256"] = "0" * 64
+    elif field == "raw_size_bytes":
+        journal["raw"]["size_bytes"] = 1
+    else:
+        journal["targets"][0]["after_sha256"] = "0" * 64
+    store.write_journal(journal)
+
+    result = transaction_fixture.coordinator.recover()
+
+    assert result is not None
+    assert result.status == "recovery_required"
+    assert transaction_fixture.snapshot().wiki_hashes == before.wiki_hashes
+    assert transaction_fixture.raw_sha256() == before.raw_sha256
+    assert transaction_fixture.source().ingest_status == "ingesting"
+    with connect(transaction_fixture.db_path) as connection:
+        run = connection.execute(
+            "SELECT status FROM wiki_ingest_runs WHERE transaction_id = ?",
+            (transaction_fixture.change_set.transaction_id,),
+        ).fetchone()
+    assert run is None
 
 
 @pytest.mark.parametrize(
