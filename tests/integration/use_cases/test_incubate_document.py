@@ -304,8 +304,7 @@ def test_owner_edited_source_page_with_sensitive_citation_never_reaches_gateway(
     restricted = _add_source(service, "SRC-L3", security_level=SecurityLevel.L3_CONFIDENTIAL)
     source_page = paths.wiki_root / "sources/SRC-001-需求.md"
     source_page.write_text(
-        source_page.read_text(encoding="utf-8")
-        + "\n泄露内容【SRC-L3：secret section】\n",
+        source_page.read_text(encoding="utf-8") + "\n泄露内容【SRC-L3：secret section】\n",
         encoding="utf-8",
     )
 

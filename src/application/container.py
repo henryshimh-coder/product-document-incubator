@@ -530,14 +530,10 @@ def _build_stateful_container(
             )
         ),
         "prepare_local_wiki_ingest": (
-            None
-            if active_project is None
-            else _build_prepare_local_wiki_ingest(active_project)
+            None if active_project is None else _build_prepare_local_wiki_ingest(active_project)
         ),
         "confirm_local_wiki_ingest": (
-            None
-            if active_project is None
-            else _build_confirm_local_wiki_ingest(active_project)
+            None if active_project is None else _build_confirm_local_wiki_ingest(active_project)
         ),
         "incubate_document": (
             None

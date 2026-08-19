@@ -269,18 +269,12 @@ def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
             st.markdown(f"[已 Ingest · 查看 Wiki 结果]({result.source_page_path})")
 
 
-def _render_local_wiki_ingest(
-    container: AppContainer, source_id: str, status: object
-) -> None:
+def _render_local_wiki_ingest(container: AppContainer, source_id: str, status: object) -> None:
     if status == "ingested":
         st.markdown("查看 Wiki 结果")
         return
-    draft_root = (
-        container.active_project.paths.wiki_root / "drafts" / "local-ingest" / source_id
-    )
-    if status == "local_review_required" or (
-        status == "ingest_failed" and draft_root.is_dir()
-    ):
+    draft_root = container.active_project.paths.wiki_root / "drafts" / "local-ingest" / source_id
+    if status == "local_review_required" or (status == "ingest_failed" and draft_root.is_dir()):
         if status == "ingest_failed":
             st.caption("上次本地 Ingest 未提交，草稿已保留，可修正后重新校验。")
         st.code(str(draft_root), language=None)

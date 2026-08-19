@@ -95,8 +95,7 @@ class WikiChangeSet(DomainModel):
         if relative_path in {_INDEX_PATH, _LOG_PATH, _SOURCE_INDEX_PATH}:
             return
         if (
-            relative_path.startswith("wiki/sources/")
-            or relative_path.startswith("wiki/topics/")
+            relative_path.startswith("wiki/sources/") or relative_path.startswith("wiki/topics/")
         ) and relative_path.endswith(".md"):
             return
         raise ValueError("WIKI_CHANGESET_TARGET_FORBIDDEN")

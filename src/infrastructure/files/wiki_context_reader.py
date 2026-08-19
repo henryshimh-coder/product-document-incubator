@@ -96,9 +96,7 @@ class WikiContextReader:
             for topic_path_text in source.topic_page_paths:
                 topic_path = self._owned_wiki_path(topic_path_text, "topics")
                 topic_markdown = self._read_page(topic_path)
-                safe_topic, excluded = self._safe_topic_for_source(
-                    project_id, source, topic_path
-                )
+                safe_topic, excluded = self._safe_topic_for_source(project_id, source, topic_path)
                 if excluded:
                     evidence_gaps.append("存在仅可本地核验的相关主题，未外发给文档模型。")
                 if safe_topic is None:
@@ -235,8 +233,7 @@ class WikiContextReader:
     ) -> list[WikiContextPage]:
         relative = path.relative_to(self.paths.project_root).as_posix()
         chunks = [
-            markdown[index : index + _PAGE_CHARS]
-            for index in range(0, len(markdown), _PAGE_CHARS)
+            markdown[index : index + _PAGE_CHARS] for index in range(0, len(markdown), _PAGE_CHARS)
         ]
         if not chunks:
             raise DomainError(ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED, "WIKI_PAGE_EMPTY")

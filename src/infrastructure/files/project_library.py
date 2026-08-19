@@ -122,11 +122,7 @@ def require_canonical_project_path(
     read, outbound, or write boundary.
     """
 
-    if (
-        not isinstance(relative_path, str)
-        or not relative_path
-        or "\\" in relative_path
-    ):
+    if not isinstance(relative_path, str) or not relative_path or "\\" in relative_path:
         raise ValueError("project path must be a canonical relative path")
     relative = Path(relative_path)
     if (

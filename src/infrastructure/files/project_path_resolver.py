@@ -31,16 +31,12 @@ class ProjectPathResolver:
     def resolve(self, project_id: str) -> ProjectPaths:
         project = self.projects.get(project_id)
         if project.project_root_path is None:
-            self.projects.update_root_status(
-                project_id, ProjectRootStatus.UNAVAILABLE, self.now()
-            )
+            self.projects.update_root_status(project_id, ProjectRootStatus.UNAVAILABLE, self.now())
             raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE)
 
         registered_root = Path(project.project_root_path)
         if registered_root.expanduser().absolute().is_symlink():
-            self.projects.update_root_status(
-                project_id, ProjectRootStatus.UNAVAILABLE, self.now()
-            )
+            self.projects.update_root_status(project_id, ProjectRootStatus.UNAVAILABLE, self.now())
             raise DomainError(ErrorCode.PROJECT_ROOT_UNAVAILABLE)
         try:
             paths = self.validate_relocation(project_id, registered_root)

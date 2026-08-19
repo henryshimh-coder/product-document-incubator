@@ -40,6 +40,7 @@ class WikiContextReading(Protocol):
 
     def read_context(self, project_id: str, source_ids: list[str]) -> WikiIncubationContext: ...
 
+
 if TYPE_CHECKING:
     from src.infrastructure.files.wiki_outbound_context import WikiOutboundAuthorization
     from src.infrastructure.gateways._common import OutboundSafetyProof

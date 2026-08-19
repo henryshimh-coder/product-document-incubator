@@ -153,9 +153,7 @@ class IncubateDocument:
             "schema_headings": self._schema_headings(command.project_id),
             "current_document_markdown": self._safe_current(baseline),
             "wiki_pages": [
-                page.model_dump(mode="json")
-                for page in context.pages
-                if page.safe_for_external
+                page.model_dump(mode="json") for page in context.pages if page.safe_for_external
             ],
         }
         outbound_chars = len(
