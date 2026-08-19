@@ -24,11 +24,11 @@ from src.infrastructure.files.project_library import (
     require_safe_project_roles,
 )
 from src.infrastructure.files.redactor import redact_text
+from src.infrastructure.files.wiki_citations import parse_canonical_source_locator
 from src.infrastructure.files.wiki_topic_metadata import validate_topic_id
 
 _CITATION_TOKEN = re.compile(r"【(?P<content>[^【】\r\n]*)】")
 _BULLET = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
-_CANONICAL_SOURCE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 _AUTHORIZATION_KEY = secrets.token_bytes(32)
 _AUTHORIZATION_ISSUER = object()
 _AUTHORIZATION_DETAIL = "WIKI_OUTBOUND_AUTHORIZATION_INVALID"
@@ -473,25 +473,10 @@ class WikiOutboundContextBuilder:
         )
 
     def _resolve_citation(self, content: str) -> SourceRecord | None:
-        separators = [index for index, character in enumerate(content) if character in {":", "："}]
-        if not separators:
+        parsed = parse_canonical_source_locator(content)
+        if parsed is None:
             return None
-        # Source IDs are canonical ASCII identifiers.  Splitting at the first
-        # separator preserves normal locators such as "heading:目标; line:1"
-        # while refusing an old/forged colon-bearing ID as an external citation.
-        index = separators[0]
-        source_id = content[:index].strip()
-        locator = content[index + 1 :].strip()
-        if (
-            not _CANONICAL_SOURCE_ID.fullmatch(source_id)
-            or not locator
-            # `SRC:L3:section` is ambiguous under legacy colon-bearing IDs.
-            # A normal Chinese locator may itself contain `:` (for line/page),
-            # but an ASCII source separator followed by another ASCII separator
-            # is never an unambiguous canonical citation.
-            or (content[index] == ":" and ":" in locator)
-        ):
-            return None
+        source_id, _ = parsed
         try:
             return self.sources.get(source_id)
         except (KeyError, TypeError, ValueError):

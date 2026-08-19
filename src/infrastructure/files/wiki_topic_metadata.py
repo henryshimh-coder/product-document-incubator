@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import re
 
+from src.infrastructure.files.wiki_citations import contains_citation_like_source_token
+
 _TOPIC_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_SOURCE_ID_LIKE_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_-])"
-    r"(?P<source>(?:[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+|SRC[A-Za-z0-9_-]{0,124}))"
-    r"\s*[：:]"
-)
 
 
 def validate_topic_id(value: str) -> str:
@@ -34,6 +31,6 @@ def _normalize_metadata(value: str) -> str:
         raise ValueError("TOPIC_METADATA_CITATION_INVALID")
     if "\r" in normalized or "\n" in normalized:
         raise ValueError("TOPIC_METADATA_MULTILINE_INVALID")
-    if _SOURCE_ID_LIKE_PATTERN.search(normalized):
+    if contains_citation_like_source_token(normalized):
         raise ValueError("TOPIC_METADATA_CITATION_INVALID")
     return normalized

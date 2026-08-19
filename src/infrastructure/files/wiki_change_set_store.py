@@ -40,9 +40,13 @@ _TRANSACTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # 0 = migrated pre-binding_state identity rows whose binding_state was backfilled
 #     with a placeholder default during migrate(); only terminal journals can be
 #     trusted enough to reopen these rows.
-# 1 = current identity-only binding written by this coordinator.
+# 1 = legacy identity-only binding written by the short-lived round4 coordinator;
+#     recovery semantics are the same as v2 and remain accepted to avoid
+#     bricking already-persisted journals.
+# 2 = current identity-only binding written by this coordinator.
 _BINDING_VERSION_MIGRATED_IDENTITY = 0
-_BINDING_VERSION_TRUSTED_IDENTITY = 1
+_BINDING_VERSION_LEGACY_TRUSTED_IDENTITY = 1
+_BINDING_VERSION_TRUSTED_IDENTITY = 2
 _MIGRATED_BINDING_ALLOWED_TERMINAL_STATES = {
     COMMITTED,
     ROLLED_BACK,
@@ -787,7 +791,11 @@ class WikiTransactionCoordinator:
         store.set_state(state, self.clock(), error_code=error_code)
         next_binding_version = (
             _BINDING_VERSION_TRUSTED_IDENTITY
-            if trusted.binding_version == _BINDING_VERSION_MIGRATED_IDENTITY
+            if trusted.binding_version
+            in {
+                _BINDING_VERSION_MIGRATED_IDENTITY,
+                _BINDING_VERSION_LEGACY_TRUSTED_IDENTITY,
+            }
             else trusted.binding_version
         )
         with connect(self.db_path) as connection:
@@ -871,7 +879,10 @@ class WikiTransactionCoordinator:
     def _allowed_journal_states(binding: _TrustedRecoveryBinding) -> set[str]:
         if binding.binding_version == _BINDING_VERSION_MIGRATED_IDENTITY:
             return set(_MIGRATED_BINDING_ALLOWED_TERMINAL_STATES)
-        if binding.binding_version == _BINDING_VERSION_TRUSTED_IDENTITY:
+        if binding.binding_version in {
+            _BINDING_VERSION_LEGACY_TRUSTED_IDENTITY,
+            _BINDING_VERSION_TRUSTED_IDENTITY,
+        }:
             return set(_ALLOWED_JOURNAL_STATES_BY_BINDING.get(binding.binding_state, set()))
         return set()
 

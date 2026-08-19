@@ -159,6 +159,48 @@ def test_migrate_adds_binding_version_to_existing_wiki_transaction_bindings(tmp_
     assert row == ("committed", 0)
 
 
+def test_migrate_preserves_existing_trusted_binding_version_2_rows(tmp_path: Path) -> None:
+    """Protects already-committed v2 bindings from being downgraded on restart."""
+    db_path = tmp_path / "product_intelligence.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations (version TEXT PRIMARY KEY);
+            INSERT INTO schema_migrations(version) VALUES ('2.2');
+            CREATE TABLE wiki_transaction_bindings (
+                transaction_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                binding_state TEXT NOT NULL DEFAULT 'building',
+                binding_sha256 TEXT NOT NULL,
+                binding_version INTEGER NOT NULL DEFAULT 2,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO wiki_transaction_bindings VALUES (
+                'TXN-V2', 'PROJECT_A', 'SRC-A',
+                'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+                'committed',
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                2,
+                '2026-08-18T00:00:00+00:00'
+            );
+            """
+        )
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT binding_state, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = 'TXN-V2'
+            """
+        ).fetchone()
+    assert row == ("committed", 2)
+
+
 def test_migrate_is_idempotent(tmp_path: Path) -> None:
     """Protects repeatable bootstrap and application startup."""
     db_path = tmp_path / "product_intelligence.db"

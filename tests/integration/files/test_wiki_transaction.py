@@ -878,7 +878,7 @@ def test_migrated_legacy_identity_binding_recovers_committed_journal_and_allows_
             (transaction_fixture.change_set.transaction_id,),
         ).fetchone()
     assert rebound is not None
-    assert tuple(rebound) == ("committed", 1)
+    assert tuple(rebound) == ("committed", 2)
     second = transaction_fixture.rebase_change_set("TXN-B", "b")
     assert transaction_fixture.restarted_coordinator().commit(second).status == "committed"
 
@@ -918,6 +918,40 @@ def test_legacy_stateful_binding_for_running_journal_requires_manual_recovery(
     assert result is not None
     assert result.status == "recovery_required"
     assert store.read_journal()["state"] == "recovery_required"
+
+
+def test_trusted_v2_binding_recovers_committed_journal_without_downgrade(
+    transaction_fixture: _TransactionFixture,
+) -> None:
+    store = transaction_fixture.seed_interrupted(COMMITTED, db_succeeded=True)
+    with connect(transaction_fixture.db_path) as connection:
+        persisted = connection.execute(
+            """
+            SELECT binding_state, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = ?
+            """,
+            (transaction_fixture.change_set.transaction_id,),
+        ).fetchone()
+    assert persisted is not None
+    assert tuple(persisted) == (COMMITTED, 2)
+
+    recovered = transaction_fixture.restarted_coordinator().recover()
+
+    assert recovered is not None
+    assert recovered.status == "committed"
+    assert store.read_journal()["state"] == "committed"
+    with connect(transaction_fixture.db_path) as connection:
+        rebound = connection.execute(
+            """
+            SELECT binding_state, binding_version
+            FROM wiki_transaction_bindings
+            WHERE transaction_id = ?
+            """,
+            (transaction_fixture.change_set.transaction_id,),
+        ).fetchone()
+    assert rebound is not None
+    assert tuple(rebound) == (COMMITTED, 2)
 
 
 def test_fixed_wiki_symlink_cannot_redirect_commit_into_current(
