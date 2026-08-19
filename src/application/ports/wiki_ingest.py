@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -53,6 +53,7 @@ class WikiIngestGenerating(Protocol):
         *,
         safety_proof: OutboundSafetyProof,
         wiki_authorization: WikiOutboundAuthorization,
+        on_external_invoke: Callable[[], None] | None = None,
         user: str | None = None,
         timeout_seconds: int | None = None,
     ) -> WikiIngestWorkflowOutput: ...

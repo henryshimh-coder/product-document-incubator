@@ -102,7 +102,16 @@ class IngestArchivedSource:
     def execute(self, command: IngestArchivedSourceInput) -> WikiIngestResultView:
         self._resolve_project(command.project_id)
         self._validate_ids(command)
-        self.lifecycle_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            require_safe_project_roles(self.paths)
+            lock_root = require_canonical_project_path(
+                self.paths,
+                ".incubator/locks",
+                require_directory=True,
+            )
+        except ValueError:
+            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "LOCK_PATH_INVALID") from None
+        lock_root.mkdir(parents=True, exist_ok=True)
         try:
             with FileLock(self.lifecycle_lock_path, timeout=0):
                 return self._execute_locked(command)
@@ -185,12 +194,17 @@ class IngestArchivedSource:
                 related_topic_paths=related_topic_paths,
             )
             audit_authorized = True
-            try:
+
+            def mark_audit_invoked() -> None:
+                nonlocal audit_invoked
                 audit_invoked = True
+
+            try:
                 output = self.gateway.generate(
                     workflow_inputs,
                     safety_proof=safety_proof,
                     wiki_authorization=wiki_authorization,
+                    on_external_invoke=mark_audit_invoked,
                     user=command.project_id,
                 )
             except BaseException as error:
@@ -894,44 +908,62 @@ class IngestArchivedSource:
         source: SourceRecord,
         output: WikiIngestWorkflowOutput,
     ) -> None:
-        self._validate_model_markdown(
+        allowed_output_source_ids = {source.id}
+        for topic in output.topic_changes:
+            allowed_output_source_ids.update(topic.source_ids)
+        for conflict in output.conflicts:
+            allowed_output_source_ids.update(conflict.source_ids)
+
+        self._validate_model_text(
             source,
             output.source_page_markdown,
             allowed_source_ids={source.id},
         )
         for topic in output.topic_changes:
-            self._validate_model_markdown(
+            self._validate_model_text(
                 source,
                 topic.markdown,
                 allowed_source_ids=set(topic.source_ids),
             )
+        for conflict in output.conflicts:
+            self._validate_model_text(
+                source,
+                conflict.summary,
+                allowed_source_ids=set(conflict.source_ids),
+            )
+        for gap in output.evidence_gaps:
+            self._validate_model_text(
+                source,
+                gap,
+                allowed_source_ids=allowed_output_source_ids,
+            )
 
-    def _validate_model_markdown(
+    def _validate_model_text(
         self,
         source: SourceRecord,
-        markdown: str,
+        text: str,
         *,
         allowed_source_ids: set[str],
     ) -> None:
         try:
-            cited_sources = self.context.citation_sources(markdown)
+            cited_sources = self.context.citation_sources(text)
         except ValueError:
             raise DomainError(
                 ErrorCode.WIKI_CHANGESET_INVALID,
-                "MODEL_MARKDOWN_CITATION_INVALID",
+                "MODEL_OUTPUT_CITATION_INVALID",
             ) from None
         for cited in cited_sources:
             if cited.id not in allowed_source_ids or cited.project_id != source.project_id:
                 raise DomainError(
                     ErrorCode.WIKI_CHANGESET_INVALID,
-                    "MODEL_MARKDOWN_CITATION_INVALID",
+                    "MODEL_OUTPUT_CITATION_INVALID",
                 )
             if cited.id != source.id and not self.context._source_record_is_exportable(
                 cited, source.project_id
             ):
                 raise DomainError(
                     ErrorCode.WIKI_CHANGESET_INVALID,
-                    "MODEL_MARKDOWN_CITATION_INVALID",
+                    "MODEL_OUTPUT_CITATION_INVALID",
                 )
 
     def _record_external_model_call(

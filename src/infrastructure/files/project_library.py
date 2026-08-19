@@ -18,6 +18,7 @@ _WIKI_STRUCTURAL_DIRECTORIES = (
     "wiki/drafts",
     "wiki/current",
     "wiki/versions",
+    ".incubator/locks",
     ".incubator/transactions",
 )
 

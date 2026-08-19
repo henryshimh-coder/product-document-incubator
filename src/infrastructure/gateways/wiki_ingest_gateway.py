@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from pydantic import ValidationError
@@ -31,6 +31,7 @@ class WikiIngestGateway:
         *,
         safety_proof: OutboundSafetyProof,
         wiki_authorization: WikiOutboundAuthorization,
+        on_external_invoke: Callable[[], None] | None = None,
         user: str | None = None,
         timeout_seconds: int | None = None,
     ) -> WikiIngestWorkflowOutput:
@@ -42,6 +43,8 @@ class WikiIngestGateway:
         )
         validate_wiki_outbound_authorization(validated_inputs, wiki_authorization)
         effective_timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        if on_external_invoke is not None:
+            on_external_invoke()
         _, raw_output = invoke(
             self.client,
             validated_inputs,

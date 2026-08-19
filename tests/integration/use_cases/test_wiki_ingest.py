@@ -26,6 +26,7 @@ from src.infrastructure.db.repositories import (
 )
 from src.infrastructure.files.project_library import ProjectPaths
 from src.infrastructure.gateways.schemas import WikiIngestWorkflowOutput
+from src.infrastructure.gateways.wiki_ingest_gateway import WikiIngestGateway
 
 NOW = datetime(2026, 8, 17, 12, tzinfo=UTC)
 
@@ -66,6 +67,26 @@ class RecordingWikiGateway:
             conflicts=self.conflicts,
             evidence_gaps=self.evidence_gaps,
         )
+
+
+class RecordingClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def run(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(deepcopy(kwargs))
+        return {"workflow_run_id": "WF-WIKI-001", "result": {}}
+
+
+class PreInvokeRevalidationGateway:
+    def __init__(self) -> None:
+        self.client = RecordingClient()
+        self._gateway = WikiIngestGateway(self.client, timeout_seconds=60)
+
+    def generate(self, inputs, **kwargs):
+        tampered = deepcopy(inputs)
+        tampered["safe_index_projection"] = "# tampered"
+        return self._gateway.generate(tampered, **kwargs)
 
 
 @dataclass
@@ -375,6 +396,23 @@ def test_structural_topic_symlink_fails_closed_before_gateway(ingest_fixture) ->
     assert ingest_fixture.gateway.calls == []
 
 
+def test_lock_symlink_fails_closed_before_lock_write_or_gateway(ingest_fixture) -> None:
+    lock_root = ingest_fixture.paths.system_root / "locks"
+    protected = ingest_fixture.paths.wiki_root / "current"
+    protected.mkdir(parents=True, exist_ok=True)
+    if lock_root.exists():
+        lock_root.rmdir()
+    lock_root.symlink_to(protected, target_is_directory=True)
+    before = ingest_fixture.protected_hashes()
+
+    with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
+        ingest_fixture.execute()
+
+    assert ingest_fixture.gateway.calls == []
+    assert ingest_fixture.protected_hashes() == before
+    assert not any(protected.glob("*.lock"))
+
+
 @pytest.mark.parametrize("field", ["source_page_markdown", "topic_markdown"])
 def test_model_output_with_injected_citation_body_fails_before_wiki_commit(
     ingest_fixture,
@@ -469,6 +507,142 @@ def test_model_output_with_injected_citation_body_fails_before_wiki_commit(
     assert not any(ingest_fixture.paths.wiki_root.joinpath("sources").glob("*.md"))
 
 
+@pytest.mark.parametrize(
+    ("field", "text", "extra_source"),
+    [
+        ("conflict_summary", "跨项目注入【SRC-PROJECT-B-001：section】", None),
+        ("evidence_gap", "未知来源【SRC-UNKNOWN-001：section】", None),
+        ("evidence_gap", "坏引用【SRC-PROJECT-A-001：section", None),
+        (
+            "conflict_summary",
+            "高敏来源【SRC-L3-001：section】",
+            SourceRecord(
+                id="SRC-L3-001",
+                project_id="PROJECT_A",
+                original_filename="l3.md",
+                archive_path="raw/2026/SRC-L3-001/l3.md",
+                sha256="c" * 64,
+                mime_type="text/plain",
+                size_bytes=7,
+                source_type="product_requirement",
+                authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+                source_department="Product",
+                provider=None,
+                document_date=date(2026, 8, 17),
+                document_version="1.0",
+                applicable_baseline_version="BASE-1",
+                security_level=SecurityLevel.L3_CONFIDENTIAL,
+                is_redacted=True,
+                allow_external_model=False,
+                is_sandbox=False,
+                ingest_status="ingested",
+                created_at=NOW,
+                material_name="L3 secret",
+                material_series_id="MAT-L3-001",
+            ),
+        ),
+    ],
+    ids=["conflict-cross-project", "gap-unknown", "gap-malformed", "conflict-l3"],
+)
+def test_model_output_with_injected_conflict_or_gap_citation_fails_before_wiki_commit(
+    ingest_fixture,
+    field: str,
+    text: str,
+    extra_source: SourceRecord | None,
+) -> None:
+    project_b_root = ingest_fixture.paths.library_root / "PROJECT_B"
+    project_b_root.mkdir(parents=True, exist_ok=True)
+    SqliteProjectRepository(ingest_fixture.db_path).add(
+        Project(
+            id="PROJECT_B",
+            name="Project B",
+            product_line="Test",
+            stage="incubating",
+            current_baseline_id=None,
+            allow_external_model=True,
+            created_at=NOW,
+            updated_at=NOW,
+            project_root_path=str(project_b_root),
+        )
+    )
+    raw_path = project_b_root / "raw" / "2026" / "SRC-PROJECT-B-001" / "secret.md"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_text("PROJECT-B-SECRET", encoding="utf-8")
+    SqliteSourceRepository(ingest_fixture.db_path).add(
+        SourceRecord(
+            id="SRC-PROJECT-B-001",
+            project_id="PROJECT_B",
+            original_filename="secret.md",
+            archive_path=str(raw_path),
+            sha256=hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+            mime_type="text/plain",
+            size_bytes=raw_path.stat().st_size,
+            source_type="product_requirement",
+            authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+            source_department="Product",
+            provider=None,
+            document_date=date(2026, 8, 17),
+            document_version="1.0",
+            applicable_baseline_version="BASE-1",
+            security_level=SecurityLevel.L2_INTERNAL,
+            is_redacted=True,
+            allow_external_model=True,
+            is_sandbox=False,
+            ingest_status="ingested",
+            created_at=NOW,
+            material_name="Project B secret",
+            material_series_id="MAT-B-001",
+        )
+    )
+    if extra_source is not None:
+        SqliteSourceRepository(ingest_fixture.db_path).add(extra_source)
+
+    if field == "conflict_summary":
+        source_ids = [ingest_fixture.source_id]
+        if extra_source is not None:
+            source_ids.append(extra_source.id)
+        ingest_fixture.gateway.generate = lambda inputs, **kwargs: WikiIngestWorkflowOutput(
+            schema_version="2.2",
+            task_id=inputs["task_id"],
+            source_page_markdown="# 来源摘要\n\n该材料明确了已脱敏的产品原则。",
+            topic_changes=[
+                {
+                    "topic_id": "product-principles",
+                    "title": "产品原则",
+                    "change_type": "create",
+                    "markdown": "该产品原则已由归档来源支持。",
+                    "source_ids": [inputs["source"]["id"]],
+                }
+            ],
+            conflicts=[{"summary": text, "source_ids": source_ids}],
+            evidence_gaps=[],
+        )
+    else:
+        ingest_fixture.gateway.generate = lambda inputs, **kwargs: WikiIngestWorkflowOutput(
+            schema_version="2.2",
+            task_id=inputs["task_id"],
+            source_page_markdown="# 来源摘要\n\n该材料明确了已脱敏的产品原则。",
+            topic_changes=[
+                {
+                    "topic_id": "product-principles",
+                    "title": "产品原则",
+                    "change_type": "create",
+                    "markdown": "该产品原则已由归档来源支持。",
+                    "source_ids": [inputs["source"]["id"]],
+                }
+            ],
+            conflicts=[],
+            evidence_gaps=[text],
+        )
+
+    wiki_before = ingest_fixture.page("wiki/index.md").read_text(encoding="utf-8")
+    with pytest.raises(DomainError, match="WIKI_CHANGESET_INVALID"):
+        ingest_fixture.execute()
+
+    assert ingest_fixture.page("wiki/index.md").read_text(encoding="utf-8") == wiki_before
+    assert not any(ingest_fixture.paths.wiki_root.joinpath("sources").glob("*.md"))
+
+
 def test_permission_revocation_records_truthful_content_free_audit_without_gateway(
     ingest_fixture,
 ) -> None:
@@ -525,6 +699,35 @@ def test_safety_proof_failure_records_truthful_audit_and_skips_gateway(
     assert audit is not None
     assert audit["authorized"] == 0
     assert audit["redacted"] == 0
+    assert audit["result_mode"] == "local_only"
+    assert audit["status"] == "failed"
+    assert audit["outbound_chars"] > 0
+    assert audit["error_code"] == "REDACTION_REQUIRED"
+
+
+def test_gateway_preinvoke_revalidation_failure_records_local_only_audit(
+    ingest_fixture,
+) -> None:
+    gateway = PreInvokeRevalidationGateway()
+    ingest_fixture.service.gateway = gateway
+
+    with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        ingest_fixture.execute()
+
+    assert gateway.client.calls == []
+    with connect(ingest_fixture.db_path) as connection:
+        audit = connection.execute(
+            """
+            SELECT authorized, redacted, result_mode, status, outbound_chars, error_code
+            FROM model_call_logs
+            WHERE task_type = 'wiki_ingest'
+            ORDER BY started_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert audit is not None
+    assert audit["authorized"] == 1
+    assert audit["redacted"] == 1
     assert audit["result_mode"] == "local_only"
     assert audit["status"] == "failed"
     assert audit["outbound_chars"] > 0

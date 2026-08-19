@@ -17,7 +17,11 @@ from src.application.ports.wiki_ingest import WikiChangeSetValidating
 from src.domain.errors import DomainError, ErrorCode
 from src.domain.wiki import WikiChangeSet, WikiTransactionResult
 from src.infrastructure.db.connection import connect
-from src.infrastructure.files.project_library import ProjectPaths, require_safe_project_roles
+from src.infrastructure.files.project_library import (
+    ProjectPaths,
+    require_canonical_project_path,
+    require_safe_project_roles,
+)
 from src.infrastructure.files.wiki_store import WikiStore
 
 BUILDING = "building"
@@ -54,6 +58,7 @@ class _TrustedRecoveryBinding:
     project_id: str
     source_id: str
     idempotency_key: str
+    binding_state: str
     binding_sha256: str
 
 
@@ -228,7 +233,7 @@ class WikiTransactionCoordinator:
         self.lock_path = paths.system_root / "locks" / "wiki-ingest.lock"
 
     def commit(self, change_set: WikiChangeSet) -> WikiTransactionResult:
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_lock_root()
         try:
             with FileLock(self.lock_path, timeout=0):
                 return self._commit_locked(change_set)
@@ -236,7 +241,7 @@ class WikiTransactionCoordinator:
             raise DomainError(ErrorCode.WIKI_INGEST_ALREADY_RUNNING) from error
 
     def recover(self) -> WikiTransactionResult | None:
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_lock_root()
         try:
             with FileLock(self.lock_path, timeout=0):
                 result = self._recover_all_locked()
@@ -245,6 +250,18 @@ class WikiTransactionCoordinator:
                 return result
         except Timeout as error:
             raise DomainError(ErrorCode.WIKI_INGEST_ALREADY_RUNNING) from error
+
+    def _ensure_lock_root(self) -> None:
+        try:
+            require_safe_project_roles(self.paths)
+            lock_root = require_canonical_project_path(
+                self.paths,
+                ".incubator/locks",
+                require_directory=True,
+            )
+        except ValueError:
+            raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "LOCK_PATH_INVALID") from None
+        lock_root.mkdir(parents=True, exist_ok=True)
 
     def _commit_locked(self, change_set: WikiChangeSet) -> WikiTransactionResult:
         recovered = self._recover_all_locked()
@@ -262,17 +279,18 @@ class WikiTransactionCoordinator:
         self.validator.validate_change_set(change_set)
         for change in change_set.page_changes:
             self.wiki.verify_before(change)
-        self._persist_recovery_binding(change_set)
+        self._persist_recovery_binding(change_set, state=BUILDING)
 
         store = WikiChangeSetStore(self.paths, change_set.transaction_id)
         try:
             store.prepare(change_set, self.wiki, self.clock())
+            self._persist_recovery_binding_from_journal(store)
             self.failure_injector("after_prepare")
             for index, change in enumerate(change_set.page_changes):
                 self.wiki.commit_staged(change, store.staged_root)
                 if index == 0:
                     self.failure_injector("after_first_file")
-            store.set_state(FILES_COMMITTED, self.clock())
+            self._set_transaction_state(store, FILES_COMMITTED)
             self.failure_injector("after_files")
             self.failure_injector("before_database_commit")
             self._verify_raw_evidence(
@@ -283,7 +301,7 @@ class WikiTransactionCoordinator:
                 )
             )
             self._commit_database(change_set)
-            store.set_state(DATABASE_COMMITTED, self.clock())
+            self._set_transaction_state(store, DATABASE_COMMITTED)
             self._verify_raw_evidence(
                 _JournalRawEvidence(
                     change_set.raw_path,
@@ -293,7 +311,7 @@ class WikiTransactionCoordinator:
             )
             for change in change_set.page_changes:
                 self.wiki.verify_after(change)
-            store.set_state(COMMITTED, self.clock())
+            self._set_transaction_state(store, COMMITTED)
             store.write_result(change_set, self.clock())
             store.cleanup_payloads()
             return WikiTransactionResult(
@@ -309,12 +327,20 @@ class WikiTransactionCoordinator:
                     change_set.raw_size_bytes,
                 )
                 self._verify_raw_evidence(raw)
-                store.set_state(ROLLING_BACK, self.clock(), error_code="WIKI_TRANSACTION_FAILED")
+                self._set_transaction_state(
+                    store,
+                    ROLLING_BACK,
+                    error_code="WIKI_TRANSACTION_FAILED",
+                )
                 for change in reversed(change_set.page_changes):
                     self.wiki.restore(change, store.backup_root)
                 self._verify_raw_evidence(raw)
                 self._record_failure(change_set, "WIKI_TRANSACTION_FAILED")
-                store.set_state(ROLLED_BACK, self.clock(), error_code="WIKI_TRANSACTION_FAILED")
+                self._set_transaction_state(
+                    store,
+                    ROLLED_BACK,
+                    error_code="WIKI_TRANSACTION_FAILED",
+                )
                 store.write_recovery_result(
                     store.read_journal(),
                     ROLLED_BACK,
@@ -322,9 +348,9 @@ class WikiTransactionCoordinator:
                 )
                 store.cleanup_payloads()
             except Exception as rollback_error:
-                store.set_state(
+                self._set_transaction_state(
+                    store,
                     RECOVERY_REQUIRED,
-                    self.clock(),
                     error_code="WIKI_RECOVERY_REQUIRED",
                 )
                 raise RuntimeError("WIKI_RECOVERY_REQUIRED") from rollback_error
@@ -369,6 +395,7 @@ class WikiTransactionCoordinator:
             trusted = self._load_recovery_binding(transaction_id)
             if trusted is None or not self._journal_matches_binding(
                 trusted,
+                state=state,
                 project_id=project_id,
                 source_id=source_id,
                 idempotency_key=idempotency_key,
@@ -440,9 +467,9 @@ class WikiTransactionCoordinator:
             state == FILES_COMMITTED and not db_succeeded
         ):
             try:
-                store.set_state(
+                self._set_transaction_state(
+                    store,
                     ROLLING_BACK,
-                    self.clock(),
                     error_code="WIKI_INGEST_INTERRUPTED",
                 )
                 for target in reversed(targets):
@@ -453,9 +480,9 @@ class WikiTransactionCoordinator:
                     trusted.project_id,
                     trusted.source_id,
                 )
-                store.set_state(
+                self._set_transaction_state(
+                    store,
                     ROLLED_BACK,
-                    self.clock(),
                     error_code="WIKI_INGEST_INTERRUPTED",
                 )
                 store.write_recovery_result(journal, ROLLED_BACK, self.clock())
@@ -473,8 +500,8 @@ class WikiTransactionCoordinator:
                     self.wiki.verify_after(target)
                 self._verify_raw_evidence(raw)
                 if state == FILES_COMMITTED:
-                    store.set_state(DATABASE_COMMITTED, self.clock())
-                store.set_state(COMMITTED, self.clock())
+                    self._set_transaction_state(store, DATABASE_COMMITTED)
+                self._set_transaction_state(store, COMMITTED)
                 store.write_recovery_result(journal, COMMITTED, self.clock())
                 store.cleanup_payloads()
                 return self._result(transaction_id, idempotency_key, COMMITTED)
@@ -634,12 +661,13 @@ class WikiTransactionCoordinator:
                 (self.clock().isoformat(), transaction_id),
             )
 
-    def _persist_recovery_binding(self, change_set: WikiChangeSet) -> None:
-        payload = self._recovery_binding_payload(
+    def _persist_recovery_binding(self, change_set: WikiChangeSet, *, state: str) -> None:
+        self._write_recovery_binding(
             transaction_id=change_set.transaction_id,
             project_id=change_set.project_id,
             source_id=change_set.source_id,
             idempotency_key=change_set.idempotency_key,
+            state=state,
             raw=_JournalRawEvidence(
                 change_set.raw_path,
                 change_set.raw_sha256,
@@ -654,34 +682,83 @@ class WikiTransactionCoordinator:
                 for change in change_set.page_changes
             ],
         )
+
+    def _persist_recovery_binding_from_journal(self, store: WikiChangeSetStore) -> None:
+        journal = store.read_journal()
+        transaction_id, project_id, source_id, idempotency_key, state, targets, raw = (
+            self._validate_journal(store, journal)
+        )
+        self._write_recovery_binding(
+            transaction_id=transaction_id,
+            project_id=project_id,
+            source_id=source_id,
+            idempotency_key=idempotency_key,
+            state=state,
+            raw=raw,
+            targets=targets,
+        )
+
+    def _write_recovery_binding(
+        self,
+        *,
+        transaction_id: str,
+        project_id: str,
+        source_id: str,
+        idempotency_key: str,
+        state: str,
+        raw: _JournalRawEvidence,
+        targets: list[_JournalTarget],
+    ) -> None:
+        payload = self._recovery_binding_payload(
+            transaction_id=transaction_id,
+            project_id=project_id,
+            source_id=source_id,
+            idempotency_key=idempotency_key,
+            state=state,
+            raw=raw,
+            targets=targets,
+        )
         with connect(self.db_path) as connection:
             connection.execute(
                 """
                 INSERT INTO wiki_transaction_bindings (
                     transaction_id, project_id, source_id, idempotency_key,
-                    binding_sha256, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    binding_state, binding_sha256, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(transaction_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     source_id = excluded.source_id,
                     idempotency_key = excluded.idempotency_key,
+                    binding_state = excluded.binding_state,
                     binding_sha256 = excluded.binding_sha256
                 """,
                 (
-                    change_set.transaction_id,
-                    change_set.project_id,
-                    change_set.source_id,
-                    change_set.idempotency_key,
+                    transaction_id,
+                    project_id,
+                    source_id,
+                    idempotency_key,
+                    state,
                     self._binding_sha256(payload),
                     self.clock().isoformat(),
                 ),
             )
 
+    def _set_transaction_state(
+        self,
+        store: WikiChangeSetStore,
+        state: str,
+        *,
+        error_code: str | None = None,
+    ) -> None:
+        store.set_state(state, self.clock(), error_code=error_code)
+        self._persist_recovery_binding_from_journal(store)
+
     def _load_recovery_binding(self, transaction_id: str) -> _TrustedRecoveryBinding | None:
         with connect(self.db_path) as connection:
             row = connection.execute(
                 """
-                SELECT transaction_id, project_id, source_id, idempotency_key, binding_sha256
+                SELECT transaction_id, project_id, source_id, idempotency_key,
+                       binding_state, binding_sha256
                 FROM wiki_transaction_bindings
                 WHERE transaction_id = ?
                 """,
@@ -694,6 +771,7 @@ class WikiTransactionCoordinator:
             project_id=str(row["project_id"]),
             source_id=str(row["source_id"]),
             idempotency_key=str(row["idempotency_key"]),
+            binding_state=str(row["binding_state"]),
             binding_sha256=str(row["binding_sha256"]),
         )
 
@@ -701,6 +779,7 @@ class WikiTransactionCoordinator:
         self,
         binding: _TrustedRecoveryBinding,
         *,
+        state: str,
         project_id: str,
         source_id: str,
         idempotency_key: str,
@@ -711,6 +790,7 @@ class WikiTransactionCoordinator:
             project_id != binding.project_id
             or source_id != binding.source_id
             or idempotency_key != binding.idempotency_key
+            or state != binding.binding_state
         ):
             return False
         payload = self._recovery_binding_payload(
@@ -718,6 +798,7 @@ class WikiTransactionCoordinator:
             project_id=project_id,
             source_id=source_id,
             idempotency_key=idempotency_key,
+            state=state,
             raw=raw,
             targets=targets,
         )
@@ -730,6 +811,7 @@ class WikiTransactionCoordinator:
         project_id: str,
         source_id: str,
         idempotency_key: str,
+        state: str,
         raw: _JournalRawEvidence,
         targets: list[_JournalTarget],
     ) -> dict[str, object]:
@@ -738,6 +820,7 @@ class WikiTransactionCoordinator:
             "project_id": project_id,
             "source_id": source_id,
             "idempotency_key": idempotency_key,
+            "state": state,
             "raw": {
                 "relative_path": raw.relative_path,
                 "sha256": raw.sha256,

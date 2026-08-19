@@ -166,13 +166,14 @@ class _TransactionFixture:
     def seed_interrupted(
         self, journal_state: str, *, db_succeeded: bool
     ) -> WikiChangeSetStore:
-        self.coordinator._persist_recovery_binding(self.change_set)
+        self.coordinator._persist_recovery_binding(self.change_set, state="building")
         store = WikiChangeSetStore(self.paths, self.change_set.transaction_id)
         store.prepare(self.change_set, self.coordinator.wiki, NOW)
+        self.coordinator._persist_recovery_binding_from_journal(store)
         if journal_state in {FILES_COMMITTED, DATABASE_COMMITTED, COMMITTED}:
             for change in self.change_set.page_changes:
                 self.coordinator.wiki.commit_staged(change, store.staged_root)
-            store.set_state(FILES_COMMITTED, NOW)
+            self.coordinator._set_transaction_state(store, FILES_COMMITTED)
         if db_succeeded:
             source = self.source().model_copy(
                 update={
@@ -225,7 +226,7 @@ class _TransactionFixture:
                     finished_at=NOW,
                 )
             )
-        store.set_state(journal_state, NOW)
+        self.coordinator._set_transaction_state(store, journal_state)
         return store
 
     def snapshot(self) -> _Snapshot:
@@ -462,7 +463,10 @@ def test_recovery_matrix(
             transaction_fixture.coordinator.commit(transaction_fixture.change_set)
 
 
-@pytest.mark.parametrize("field", ["source_id", "raw_sha256", "raw_size_bytes", "targets"])
+@pytest.mark.parametrize(
+    "field",
+    ["source_id", "raw_sha256", "raw_size_bytes", "targets", "state"],
+)
 def test_tampered_journal_requires_recovery_before_restore_or_db_update(
     transaction_fixture: _TransactionFixture,
     field: str,
@@ -476,6 +480,8 @@ def test_tampered_journal_requires_recovery_before_restore_or_db_update(
         journal["raw"]["sha256"] = "0" * 64
     elif field == "raw_size_bytes":
         journal["raw"]["size_bytes"] = 1
+    elif field == "state":
+        journal["state"] = "prepared" if journal["state"] != "prepared" else "rolled_back"
     else:
         journal["targets"][0]["after_sha256"] = "0" * 64
     store.write_journal(journal)

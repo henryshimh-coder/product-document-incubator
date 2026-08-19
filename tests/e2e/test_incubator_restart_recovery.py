@@ -163,12 +163,13 @@ ingested_at: '2026-08-12T12:00:00Z'
         validator=validator,
         clock=lambda: NOW,
     )
-    crashed._persist_recovery_binding(change_set)
+    crashed._persist_recovery_binding(change_set, state="building")
     store = WikiChangeSetStore(paths, change_set.transaction_id)
     store.prepare(change_set, crashed.wiki, NOW)
+    crashed._persist_recovery_binding_from_journal(store)
     for change in change_set.page_changes:
         crashed.wiki.commit_staged(change, store.staged_root)
-    store.set_state(FILES_COMMITTED, NOW)
+    crashed._set_transaction_state(store, FILES_COMMITTED)
 
     harness.manager.switch(paths.project_id)
 
