@@ -337,7 +337,7 @@ class WikiOutboundContextBuilder:
         return {
             chunk.chunk_id: {
                 "chunk_id": chunk.chunk_id,
-                "locator": chunk.locator,
+                "locator": self._redact_for_outbound(source, chunk.locator),
                 "text": self._redact_for_outbound(source, chunk.text),
             }
             for chunk in document.chunks[:3]
@@ -516,6 +516,8 @@ class WikiOutboundContextBuilder:
             self.redaction_mode is RedactionMode.STRICT and redaction.redacted_text != text
         ):
             raise ValueError("WIKI_OUTBOUND_REDACTION_REQUIRED")
+        if self.redaction_mode is RedactionMode.STRICT:
+            return text
         return redaction.redacted_text.strip()
 
     def citation_sources(self, markdown: str) -> list[SourceRecord]:

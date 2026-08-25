@@ -472,28 +472,31 @@ class IngestArchivedSource:
     def _redacted_chunks(self, source: SourceRecord, chunks: Sequence) -> list[dict[str, str]]:
         safe_chunks: list[dict[str, str]] = []
         for chunk in chunks[:MAX_OUTBOUND_SOURCE_CHUNKS]:
-            redaction = redact_text(
-                chunk.text,
-                mode=RedactionMode.OWNER_CONFIRMED,
-                security_level=source.security_level,
-                customer_names=self.customer_names,
-                strategy_terms=self.strategy_terms,
-                financial_terms=self.financial_terms,
-                leader_names=self.leader_names,
-                unpublished_decisions=self.unpublished_decisions,
-            )
-            if not redaction.safe_for_external_model:
-                raise DomainError(ErrorCode.WIKI_EXTERNAL_CALL_DENIED, "REDACTION_REQUIRED")
             safe_chunks.append(
                 {
                     "chunk_id": chunk.chunk_id,
-                    "locator": chunk.locator,
-                    "text": redaction.redacted_text.strip(),
+                    "locator": self._owner_confirmed_redaction(source, chunk.locator),
+                    "text": self._owner_confirmed_redaction(source, chunk.text),
                 }
             )
         if not safe_chunks:
             raise DomainError(ErrorCode.WIKI_CHANGESET_INVALID, "SOURCE_CHUNKS_REQUIRED")
         return safe_chunks
+
+    def _owner_confirmed_redaction(self, source: SourceRecord, text: str) -> str:
+        redaction = redact_text(
+            text,
+            mode=RedactionMode.OWNER_CONFIRMED,
+            security_level=source.security_level,
+            customer_names=self.customer_names,
+            strategy_terms=self.strategy_terms,
+            financial_terms=self.financial_terms,
+            leader_names=self.leader_names,
+            unpublished_decisions=self.unpublished_decisions,
+        )
+        if not redaction.safe_for_external_model:
+            raise DomainError(ErrorCode.WIKI_EXTERNAL_CALL_DENIED, "REDACTION_REQUIRED")
+        return redaction.redacted_text.strip()
 
     def _related_topic_paths(self) -> list[str]:
         try:

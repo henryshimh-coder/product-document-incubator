@@ -307,6 +307,20 @@ def test_owner_confirmed_projection_keeps_business_terms_and_masks_hard_identifi
     assert "[已脱敏:email]" in markdown
 
 
+def test_strict_safe_source_page_preserves_accepted_markdown_whitespace(
+    project_wiki: _ProjectWiki,
+    source_repository: _SourceRepository,
+) -> None:
+    """Catches strict-default source-page projection trimming accepted content."""
+    markdown = "\n\n- Accepted statement 【SRC-L2：section】\n\n"
+
+    safe_markdown = WikiOutboundContextBuilder(
+        project_wiki.paths, source_repository
+    ).safe_source_page(source_repository.get("SRC-L2"), markdown)
+
+    assert safe_markdown == markdown
+
+
 @pytest.mark.parametrize(
     "source_id",
     ["SRC-UNREDACTED", "SRC-DENIED", "SRC-OTHER", "SRC-UNKNOWN"],

@@ -37,6 +37,27 @@ def test_owner_confirmed_l2_business_terms_reach_gateway_with_hard_ids_masked(
     assert hashlib.sha256(fixture.raw_path.read_bytes()).hexdigest() == before_sha
 
 
+def test_owner_confirmed_masks_hard_identifiers_in_content_derived_locator(
+    tmp_path,
+) -> None:
+    """Catches a sensitive Markdown heading leaking through a source-chunk locator."""
+    fixture = make_ingest_fixture(
+        tmp_path,
+        raw_text=("# 联系人 13812345678\n" + ("Approved supporting evidence.\n" * 1_200)),
+    )
+    before_raw = fixture.raw_path.read_bytes()
+    before_sha = hashlib.sha256(before_raw).hexdigest()
+
+    result = fixture.execute(requested_by="Owner")
+
+    assert result.status.value == "ingested"
+    locator = fixture.gateway.calls[0]["inputs"]["source_chunks"][0]["locator"]
+    assert "13812345678" not in locator
+    assert "[已脱敏:phone]" in locator
+    assert fixture.raw_path.read_bytes() == before_raw
+    assert hashlib.sha256(fixture.raw_path.read_bytes()).hexdigest() == before_sha
+
+
 @pytest.mark.parametrize(
     ("requested_by", "is_redacted", "allow_external", "level"),
     [
