@@ -24,6 +24,7 @@ from src.infrastructure.db.repositories import (
     SqliteSourceRepository,
     SqliteWikiIngestRunRepository,
 )
+from src.infrastructure.files.extractor import extract_document_bytes
 from src.infrastructure.files.project_library import ProjectPaths
 from src.infrastructure.gateways.schemas import WikiIngestWorkflowOutput
 from src.infrastructure.gateways.wiki_ingest_gateway import WikiIngestGateway
@@ -47,6 +48,9 @@ class RecordingWikiGateway:
         self.calls.append({"inputs": deepcopy(inputs), **kwargs})
         if self.error is not None:
             raise self.error
+        on_external_invoke = kwargs.get("on_external_invoke")
+        if on_external_invoke is not None:
+            on_external_invoke()
         self.before_return()
         return WikiIngestWorkflowOutput(
             schema_version="2.2",
@@ -307,16 +311,33 @@ def test_ingest_archived_l2_source_updates_complete_wiki(ingest_fixture) -> None
     assert hashlib.sha256(ingest_fixture.raw_path.read_bytes()).hexdigest() == before_raw
     with connect(ingest_fixture.db_path) as connection:
         audit = connection.execute(
-            "SELECT task_type, source_ids_json, outbound_chars, outbound_coverage, "
-            "status, error_code "
+            "SELECT task_type, source_ids_json, authorized, redacted, outbound_chars, "
+            "outbound_coverage, result_mode, status, error_code "
             "FROM model_call_logs WHERE task_type = 'wiki_ingest'"
         ).fetchone()
     assert audit is not None
     assert audit["source_ids_json"] == json.dumps([ingest_fixture.source_id], separators=(",", ":"))
-    assert audit["outbound_chars"] > 0
-    source_line = "Approved redacted product principle and supporting evidence."
-    source_chars = (len(source_line) * 1200) + 1199
-    assert audit["outbound_coverage"] == pytest.approx((3 * len(source_line)) / source_chars)
+    canonical_payload = json.dumps(
+        ingest_fixture.gateway.calls[0]["inputs"],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    source_chunk_chars = sum(
+        len(chunk["text"]) for chunk in ingest_fixture.gateway.calls[0]["inputs"]["source_chunks"]
+    )
+    source_total_chars = len(
+        extract_document_bytes(
+            ingest_fixture.raw_path.read_bytes(),
+            filename=ingest_fixture.raw_path.name,
+            source_id=ingest_fixture.source_id,
+        ).text
+    )
+    assert audit["authorized"] == 1
+    assert audit["redacted"] == 1
+    assert audit["result_mode"] == "realtime"
+    assert audit["outbound_chars"] == len(canonical_payload)
+    assert audit["outbound_coverage"] == pytest.approx(source_chunk_chars / source_total_chars)
     assert audit["status"] == "succeeded"
     assert audit["error_code"] is None
 
@@ -752,6 +773,20 @@ def test_model_output_with_injected_conflict_or_gap_citation_fails_before_wiki_c
 def test_permission_revocation_records_truthful_content_free_audit_without_gateway(
     ingest_fixture,
 ) -> None:
+    sensitive_source = (
+        "不应写入审计日志的正文。电话 13800138000；身份证 11010519491231002X；"
+        "银行卡 6222020202020202020；邮箱 owner@example.com"
+    )
+    ingest_fixture.raw_path.write_text(sensitive_source, encoding="utf-8")
+    with connect(ingest_fixture.db_path) as connection:
+        connection.execute(
+            "UPDATE source_records SET sha256 = ?, size_bytes = ? WHERE id = ?",
+            (
+                hashlib.sha256(sensitive_source.encode("utf-8")).hexdigest(),
+                len(sensitive_source.encode("utf-8")),
+                ingest_fixture.source_id,
+            ),
+        )
     with connect(ingest_fixture.db_path) as connection:
         connection.execute(
             "UPDATE projects SET allow_external_model = 0 WHERE id = ?",
@@ -765,7 +800,7 @@ def test_permission_revocation_records_truthful_content_free_audit_without_gatew
     with connect(ingest_fixture.db_path) as connection:
         audit = connection.execute(
             """
-            SELECT authorized, redacted, result_mode, status, outbound_chars, error_code
+            SELECT *
             FROM model_call_logs
             WHERE task_type = 'wiki_ingest'
             ORDER BY started_at DESC
@@ -773,7 +808,21 @@ def test_permission_revocation_records_truthful_content_free_audit_without_gatew
             """
         ).fetchone()
     assert audit is not None
-    assert tuple(audit) == (0, 0, "local_only", "failed", 0, "WIKI_EXTERNAL_CALL_DENIED")
+    assert audit["authorized"] == 0
+    assert audit["redacted"] == 0
+    assert audit["result_mode"] == "local_only"
+    assert audit["status"] == "failed"
+    assert audit["outbound_chars"] == 0
+    assert audit["error_code"] == "WIKI_EXTERNAL_CALL_DENIED"
+    audit_text = "\n".join(str(value) for value in audit)
+    for forbidden in (
+        "不应写入审计日志的正文",
+        "13800138000",
+        "11010519491231002X",
+        "6222020202020202020",
+        "owner@example.com",
+    ):
+        assert forbidden not in audit_text
 
 
 def test_safety_proof_failure_records_truthful_audit_and_skips_gateway(

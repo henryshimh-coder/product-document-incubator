@@ -153,6 +153,10 @@ def _render_materials_ingest_page(
         ),
         encoding="utf-8",
     )
+    source_index_path = paths.system_root / "source-index.json"
+    source_index = json.loads(source_index_path.read_text(encoding="utf-8"))
+    source_index["sources"][0].update(is_redacted=True, allow_external_model=True)
+    source_index_path.write_text(json.dumps(source_index), encoding="utf-8")
     render(
         AppContainer(
             settings=AppSettings(
@@ -231,6 +235,30 @@ def test_materials_page_uses_confirmed_browser_upload_instead_of_local_path(tmp_
     with pytest.raises(KeyError):
         page.text_input(key="materials_local_path")
     assert page.file_uploader(key="materials_upload")
+
+
+def test_materials_page_explains_owner_outbound_authorization(tmp_path) -> None:
+    """Catches an Owner confirmation form omitting its outbound-data boundary."""
+    page = AppTest.from_function(
+        _render_materials_page,
+        args=(str(tmp_path / "library"), str(tmp_path / "需求.md")),
+    ).run()
+
+    rendered = "\n".join(item.value for item in (*page.caption, *page.info, *page.markdown))
+    assert "手机号、身份证号、银行卡号和邮箱会在本地自动遮盖" in rendered
+    assert "业务名称和策略术语在 Owner 授权后可外发" in rendered
+
+
+def test_authorized_archived_material_shows_owner_outbound_notice(tmp_path) -> None:
+    """Catches a permitted L1/L2 ingest offering its action without Owner context."""
+    page = AppTest.from_function(
+        _render_materials_ingest_page,
+        args=(str(tmp_path / "library"), "pending_ingest", "L2"),
+    ).run()
+
+    rendered = "\n".join(item.value for item in (*page.caption, *page.info, *page.markdown))
+    assert "Owner 已确认并授权必要内容外发" in rendered
+    assert page.button(key="material_ingest_SRC-PROJECT-A-001")
 
 
 def test_material_page_runs_ingest_after_owner_click(tmp_path) -> None:

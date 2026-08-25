@@ -79,12 +79,16 @@ def render(container: AppContainer) -> None:
             format_func=lambda item: item.value,
             key="materials_security",
         )
-        redacted = st.checkbox("已确认脱敏", value=True, key="materials_redacted")
+        redacted = st.checkbox("已确认内容可外发", value=True, key="materials_redacted")
         external = st.checkbox(
             "允许外部模型调用",
             value=False,
             disabled=security in (SecurityLevel.L3_CONFIDENTIAL, SecurityLevel.L4_RESTRICTED),
             key="materials_external",
+        )
+        st.caption(
+            "L1/L2 仅外发必要内容分段；手机号、身份证号、银行卡号和邮箱会在本地自动遮盖。"
+            "业务名称和策略术语在 Owner 授权后可外发。"
         )
         submitted = st.form_submit_button("确认归档", type="primary", key="materials_archive")
     if submitted:
@@ -249,6 +253,8 @@ def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
         key = f"material_ingest_{source_id}"
     else:
         return
+    if item.get("is_redacted") is True and item.get("allow_external_model") is True:
+        st.caption("Owner 已确认并授权必要内容外发")
     if not st.button(label, key=key, type="primary"):
         return
     try:
