@@ -49,6 +49,20 @@ def test_owner_confirmed_mode_allows_business_terms_but_masks_hard_identifiers()
     assert result.safe_for_external_model is True
 
 
+def test_invalid_runtime_mode_cannot_bypass_business_dictionary_redaction() -> None:
+    with pytest.raises(ValueError, match="Unsupported redaction mode"):
+        redactor_module().redact_text(
+            "某银行采用灰度策略",
+            mode="owner_confirmed",  # type: ignore[arg-type]
+            security_level=SecurityLevel.L2_INTERNAL,
+            customer_names=("某银行",),
+            strategy_terms=("灰度策略",),
+            financial_terms=(),
+            leader_names=(),
+            unpublished_decisions=(),
+        )
+
+
 def test_redacts_supported_identifiers_deterministically() -> None:
     """Catches nondeterministic or incomplete replacement of standard sensitive identifiers."""
     text = "手机13800138000，身份证11010519491231002X，卡6222021234567890123，a.user@example.com"

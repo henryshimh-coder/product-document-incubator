@@ -51,6 +51,9 @@ def redact_text(
     unpublished_decisions: Iterable[str] | object = _UNSET,
 ) -> RedactionResult:
     """Apply deterministic local redaction without allowing L3/L4 material to leave."""
+    if not isinstance(mode, RedactionMode):
+        raise ValueError(f"Unsupported redaction mode: {mode!r}")
+
     redacted = text
     findings: list[dict[str, str]] = []
     patterns: list[tuple[str, re.Pattern[str]]] = list(REDACTION_PATTERNS.items())
