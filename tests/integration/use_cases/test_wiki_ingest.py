@@ -313,7 +313,8 @@ def test_ingest_archived_l2_source_updates_complete_wiki(ingest_fixture) -> None
         audit = connection.execute(
             "SELECT task_type, source_ids_json, authorized, redacted, outbound_chars, "
             "outbound_coverage, result_mode, status, error_code "
-            "FROM model_call_logs WHERE task_type = 'wiki_ingest'"
+            "FROM model_call_logs WHERE task_type = 'wiki_ingest' "
+            "ORDER BY started_at DESC, id DESC LIMIT 1"
         ).fetchone()
     assert audit is not None
     assert audit["source_ids_json"] == json.dumps([ingest_fixture.source_id], separators=(",", ":"))
