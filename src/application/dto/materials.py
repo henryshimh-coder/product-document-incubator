@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -96,6 +97,23 @@ class ArchivedSourceView(BaseModel):
     material_name: str | None = None
     material_series_id: str | None = None
     previous_source_id: str | None = None
+
+
+class DeleteArchivedSourceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    project_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    requested_by: Literal["Owner"] = "Owner"
+    confirmed: Literal[True]
+
+
+class DeletedArchivedSourceView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_id: str
+    trash_path: Path
+    sha256: str
 
 
 class ReclassifySourceInput(BaseModel):

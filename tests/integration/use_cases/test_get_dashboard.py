@@ -375,7 +375,11 @@ timeouts:
     schema_yaml.write_text("schema_version: '1.0'\n", encoding="utf-8")
     bootstrap(tmp_path)
 
-    container = build_container(app_yaml, schema_yaml, environ={})
+    container = build_container(
+        app_yaml,
+        schema_yaml,
+        environ={"INCUBATOR_LIBRARY_ROOT": str(tmp_path)},
+    )
 
     assert container.dashboard is not None
     assert container.import_source is None

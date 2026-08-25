@@ -58,6 +58,7 @@ def test_outbound_payload_and_model_call_log_carry_no_raw_terms(
     record: list[dict] = []
     environ = {
         **MOCK_ENVIRON,
+        "INCUBATOR_LIBRARY_ROOT": str(demo_root),
         "REDACTION_CUSTOMER_NAMES": CUSTOMER,
         "REDACTION_STRATEGY_TERMS": STRATEGY,
     }

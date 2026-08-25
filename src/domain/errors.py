@@ -66,6 +66,7 @@ class ErrorCode(StrEnum):
     WIKI_TRANSACTION_FAILED = "WIKI_TRANSACTION_FAILED"
     WIKI_RECOVERY_REQUIRED = "WIKI_RECOVERY_REQUIRED"
     WIKI_INGEST_ALREADY_RUNNING = "WIKI_INGEST_ALREADY_RUNNING"
+    MATERIAL_DELETE_NOT_ALLOWED = "MATERIAL_DELETE_NOT_ALLOWED"
     BASELINE_NOT_FOUND = "BASELINE_NOT_FOUND"
     NOT_FOUND = "NOT_FOUND"
 
@@ -171,6 +172,7 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
     ErrorCode.WIKI_INGEST_ALREADY_RUNNING: ErrorDefinition(
         "当前项目已有 Wiki Ingest 正在执行", retryable=True
     ),
+    ErrorCode.MATERIAL_DELETE_NOT_ALLOWED: ErrorDefinition("当前材料状态不允许删除"),
     ErrorCode.BASELINE_NOT_FOUND: ErrorDefinition("当前没有已生效产品方案"),
     ErrorCode.NOT_FOUND: ErrorDefinition("未找到目标记录"),
 }

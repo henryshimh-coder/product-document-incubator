@@ -368,6 +368,7 @@ def test_offline_ingest_from_frozen_cache(tmp_path: Path, monkeypatch: pytest.Mo
         "DIFY_INGEST_API_KEY": "ingest-key",
         "DIFY_QUERY_API_KEY": "query-key",
         "DIFY_LINT_API_KEY": "lint-key",
+        "INCUBATOR_LIBRARY_ROOT": str(root),
     }
     container = build_container(
         root / "config" / "app.yaml",

@@ -214,6 +214,175 @@ def _render_existing_materials_index(
     )
 
 
+def _render_materials_manager(library_root: str, db_path: str) -> None:
+    from pathlib import Path as path_type
+
+    from src.application.container import AppContainer, AppSettings
+    from src.application.project_context import ProjectContext
+    from src.application.use_cases.delete_archived_source import DeleteArchivedSource
+    from src.infrastructure.db.repositories import SqliteSourceRepository
+    from src.infrastructure.files.project_library import ProjectPaths
+    from src.infrastructure.files.source_index_store import SourceIndexStore
+    from src.infrastructure.files.source_trash import SourceTrash
+    from src.ui.pages.materials import render
+
+    root = path_type(library_root)
+    paths = ProjectPaths.for_project(root, "PROJECT_A")
+    sources = SqliteSourceRepository(path_type(db_path))
+    index = SourceIndexStore(paths)
+    render(
+        AppContainer(
+            settings=AppSettings(
+                name="产品文档孵化器",
+                project_id="LLD",
+                default_query_scope="effective",
+                max_upload_mb=20,
+                accepted_extensions=("md",),
+                demo_mode=True,
+                schema_version="1.0",
+            ),
+            active_project=ProjectContext("PROJECT_A", paths, path_type(db_path)),
+            archive_raw_source=object(),
+            source_repository=sources,
+            delete_archived_source=DeleteArchivedSource(
+                paths=paths,
+                sources=sources,
+                index=index,
+                trash=SourceTrash(paths),
+            ),
+        )
+    )
+
+
+def _seed_material_versions(tmp_path):
+    import hashlib
+    from datetime import UTC, date, datetime
+
+    from src.domain.enums import AuthorityLevel, SecurityLevel
+    from src.domain.models import Project, SourceRecord
+    from src.infrastructure.db.migrations import migrate
+    from src.infrastructure.db.repositories import SqliteProjectRepository, SqliteSourceRepository
+    from src.infrastructure.files.project_library import ProjectPaths
+    from src.infrastructure.files.source_index_store import SourceIndexStore
+
+    root = tmp_path / "library"
+    paths = ProjectPaths.for_project(root, "PROJECT_A")
+    for directory in (
+        paths.raw_root,
+        paths.wiki_root,
+        paths.schema_root,
+        paths.exports_root,
+        paths.system_root,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    db_path = root / ".incubator/product_incubator.db"
+    migrate(db_path)
+    now = datetime(2026, 8, 24, tzinfo=UTC)
+    SqliteProjectRepository(db_path).add(
+        Project(
+            id="PROJECT_A",
+            name="项目 A",
+            product_line="测试",
+            stage="待初始化",
+            current_baseline_id=None,
+            allow_external_model=False,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    repository = SqliteSourceRepository(db_path)
+    index = SourceIndexStore(paths)
+    definitions = (
+        (
+            "SRC-PROJECT-A-101",
+            "MAT-ROADMAP",
+            "路线图",
+            "v1.0",
+            "pending_ingest",
+            "product_requirement",
+            datetime(2026, 6, 1, tzinfo=UTC),
+            None,
+        ),
+        (
+            "SRC-PROJECT-A-102",
+            "MAT-ROADMAP",
+            "路线图",
+            "v2.0",
+            "ingest_failed",
+            "product_requirement",
+            datetime(2026, 7, 1, tzinfo=UTC),
+            "SRC-PROJECT-A-101",
+        ),
+        (
+            "SRC-PROJECT-A-103",
+            "MAT-ROADMAP",
+            "路线图",
+            "v3.0",
+            "pending_ingest",
+            "product_requirement",
+            datetime(2026, 8, 1, tzinfo=UTC),
+            "SRC-PROJECT-A-102",
+        ),
+        (
+            "SRC-PROJECT-A-201",
+            None,
+            "用户调研",
+            "v1.0",
+            "ingested",
+            "customer_market_material",
+            datetime(2026, 8, 2, tzinfo=UTC),
+            None,
+        ),
+    )
+    for (
+        source_id,
+        series_id,
+        name,
+        version,
+        status,
+        source_type,
+        created_at,
+        previous,
+    ) in definitions:
+        payload = f"# {name} {version}\n".encode()
+        archive_path = paths.raw_root / "2026" / source_id / f"{source_id}.md"
+        archive_path.parent.mkdir(parents=True)
+        archive_path.write_bytes(payload)
+        source = SourceRecord(
+            id=source_id,
+            project_id="PROJECT_A",
+            original_filename=archive_path.name,
+            archive_path=str(archive_path),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            mime_type="text/markdown",
+            size_bytes=len(payload),
+            source_type=source_type,
+            authority_level=AuthorityLevel.FORMAL_EFFECTIVE,
+            source_department="产品部",
+            provider=None,
+            document_date=date(2026, created_at.month, 1),
+            document_version=version,
+            applicable_baseline_version="未关联基线",
+            security_level=SecurityLevel.L2_INTERNAL,
+            is_redacted=True,
+            allow_external_model=False,
+            is_sandbox=False,
+            ingest_status=status,
+            created_at=created_at,
+            material_name=name,
+            material_series_id=series_id,
+            previous_source_id=previous,
+            ingest_error_code="MODEL_TIMEOUT" if status == "ingest_failed" else None,
+            ingest_schema_version="2.2",
+            source_page_path=(
+                "wiki/sources/SRC-PROJECT-A-201-material.md" if status == "ingested" else None
+            ),
+        )
+        repository.add(source)
+        index.upsert(source)
+    return root, db_path
+
+
 def test_materials_page_renders_a_nonwriting_confirmation_form(tmp_path) -> None:
     """Catches a page visit creating a material archive before Owner confirmation."""
     page = AppTest.from_function(
@@ -325,6 +494,7 @@ def test_material_page_reads_real_failed_lifecycle_without_writing_index(tmp_pat
         ),
     ).run()
 
+    page.button(key=f"material_error_code_{fixture.source_id}").click().run()
     rendered = "\n".join(item.value for item in (*page.markdown, *page.caption, *page.info))
     assert "MODEL_TIMEOUT" in rendered
     assert page.button(key=f"material_reingest_{fixture.source_id}")
@@ -355,8 +525,128 @@ def test_material_page_renders_wiki_ingest_lifecycle(
     ).run()
 
     assert not page.exception
+    if status == "ingest_failed":
+        page.button(key="material_error_code_SRC-PROJECT-A-001").click().run()
     rendered = "\n".join(item.value for item in (*page.markdown, *page.caption, *page.info))
     rendered += "\n" + "\n".join(item.label for item in page.button)
     assert expected_text in rendered
     if button_key is not None:
         assert page.button(key=button_key).disabled is disabled
+
+def test_materials_manager_groups_versions_and_keeps_newest_outside_history(tmp_path) -> None:
+    """Catches a flat archive list obscuring series and current-version precedence."""
+    root, db_path = _seed_material_versions(tmp_path)
+
+    page = AppTest.from_function(_render_materials_manager, args=(str(root), str(db_path))).run()
+
+    assert not page.exception
+    headings = [item.value for item in page.markdown if item.value.startswith("#### ")]
+    assert headings == ["#### 用户调研", "#### 路线图"]
+    history = next(item for item in page.expander if item.label == "历史版本（2）")
+    assert any("当前版本 · v3.0" in item.value for item in page.caption)
+    history_text = "\n".join(item.value for item in (*history.markdown, *history.caption))
+    assert "v2.0" in history_text
+    assert "v1.0" in history_text
+    assert "v3.0" not in history_text
+
+
+@pytest.mark.parametrize(
+    ("widget_key", "selection", "expected_heading"),
+    [
+        ("materials_filter_keyword", "调研", "#### 用户调研"),
+        ("materials_filter_status", "Ingest 失败", "#### 路线图"),
+        ("materials_filter_type", "用户与市场研究", "#### 用户调研"),
+    ],
+)
+def test_materials_manager_filters_by_keyword_status_and_type(
+    tmp_path, widget_key, selection, expected_heading
+) -> None:
+    """Catches any management filter leaving unrelated material groups visible."""
+    root, db_path = _seed_material_versions(tmp_path)
+    page = AppTest.from_function(_render_materials_manager, args=(str(root), str(db_path))).run()
+
+    if "keyword" in widget_key:
+        page.text_input(key=widget_key).set_value(selection).run()
+    else:
+        page.selectbox(key=widget_key).select(selection).run()
+
+    headings = [item.value for item in page.markdown if item.value.startswith("#### ")]
+    assert headings == [expected_heading]
+
+
+def test_materials_manager_keeps_paths_ids_hashes_and_schema_in_technical_details(
+    tmp_path,
+) -> None:
+    """Catches implementation metadata leaking into the compact group summary."""
+    root, db_path = _seed_material_versions(tmp_path)
+
+    page = AppTest.from_function(_render_materials_manager, args=(str(root), str(db_path))).run()
+
+    technical = [item for item in page.expander if item.label.startswith("技术详情")]
+    assert len(technical) == 2
+    technical_text = "\n".join(
+        element.value
+        for expander in technical
+        for element in (*expander.markdown, *expander.caption, *expander.code)
+    )
+    assert str(root / "PROJECT_A" / "raw") in technical_text
+    assert "SRC-PROJECT-A-103" in technical_text
+    assert "2.2" in technical_text
+    assert "SHA-256" in technical_text
+    assert sum(len(expander.code) for expander in technical) == len(page.code)
+
+
+def test_materials_manager_renders_failure_and_error_code_control_in_its_version_row(
+    tmp_path,
+) -> None:
+    """Catches one failed version becoming a page-wide warning or exposing raw codes."""
+    root, db_path = _seed_material_versions(tmp_path)
+
+    page = AppTest.from_function(_render_materials_manager, args=(str(root), str(db_path))).run()
+
+    assert len(page.error) == 1
+    assert "路线图 · v2.0" in page.error[0].value
+    assert "MODEL_TIMEOUT" not in page.error[0].value
+    assert page.button(key="material_error_code_SRC-PROJECT-A-102")
+
+
+def test_materials_manager_hides_delete_for_running_and_ingested_versions(tmp_path) -> None:
+    """Catches protected lifecycle states exposing any destructive UI entry."""
+    root, db_path = _seed_material_versions(tmp_path)
+    from src.infrastructure.db.repositories import SqliteSourceRepository
+
+    repository = SqliteSourceRepository(db_path)
+    pending = repository.get("SRC-PROJECT-A-103")
+    repository.update(pending.model_copy(update={"ingest_status": "ingesting"}))
+
+    page = AppTest.from_function(_render_materials_manager, args=(str(root), str(db_path))).run()
+
+    with pytest.raises(KeyError):
+        page.button(key="material_delete_SRC-PROJECT-A-103")
+    with pytest.raises(KeyError):
+        page.button(key="material_delete_SRC-PROJECT-A-201")
+    rendered = "\n".join(item.value for item in (*page.caption, *page.markdown))
+    assert "已生成 Wiki，不可删除" in rendered
+
+
+def test_materials_manager_requires_two_steps_and_promotes_previous_version_after_delete(
+    tmp_path,
+) -> None:
+    """Catches a one-click delete or a stale group summary after deleting its newest version."""
+    root, db_path = _seed_material_versions(tmp_path)
+    page = AppTest.from_function(_render_materials_manager, args=(str(root), str(db_path))).run()
+
+    page.button(key="material_delete_SRC-PROJECT-A-103").click().run()
+
+    assert page.checkbox(key="material_delete_confirm_SRC-PROJECT-A-103")
+    assert page.button(key="material_delete_execute_SRC-PROJECT-A-103")
+    rendered = "\n".join(item.value for item in (*page.caption, *page.markdown))
+    assert "路线图" in rendered
+    assert "v3.0" in rendered
+    assert "仅删除此版本" in rendered
+
+    page.checkbox(key="material_delete_confirm_SRC-PROJECT-A-103").check().run()
+    page.button(key="material_delete_execute_SRC-PROJECT-A-103").click().run()
+
+    assert not page.exception
+    assert any("当前版本 · v2.0" in item.value for item in page.caption)

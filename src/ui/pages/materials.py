@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import streamlit as st
 
@@ -8,6 +9,7 @@ from src.application.container import AppContainer
 from src.application.dto.materials import (
     ArchiveRawSourceInput,
     CreateLocalDraftInput,
+    DeleteArchivedSourceInput,
     ReclassifySourceInput,
     SensitiveComparisonInput,
 )
@@ -29,6 +31,8 @@ def render(container: AppContainer) -> None:
     if service is None or container.active_project is None:
         st.info("材料归档服务尚未就绪，请先进入一个产品项目。")
         return
+    archive_tab, manager_tab = st.tabs(("归档新材料", "已归档材料"))
+    archive_tab.__enter__()
     with st.form("materials_archive_form"):
         uploaded = st.file_uploader(
             "选择单份原始材料",
@@ -122,92 +126,269 @@ def render(container: AppContainer) -> None:
                 st.success("材料已归档到当前项目。")
             st.code(str(result.archive_path), language=None)
             st.caption(f"来源 ID：{result.source_id} · SHA-256：{result.sha256[:12]}")
+    archive_tab.__exit__(None, None, None)
+    manager_tab.__enter__()
     _render_index(container)
+    manager_tab.__exit__(None, None, None)
 
 
 def _render_index(container: AppContainer) -> None:
     assert container.active_project is not None
-    index_path = container.active_project.paths.system_root / "source-index.json"
-    if not index_path.is_file():
-        st.caption("当前还没有已归档材料。")
-        return
-    import json
-
-    payload = json.loads(index_path.read_text(encoding="utf-8"))
-    sources = payload.get("sources", []) if isinstance(payload, dict) else []
+    sources = _material_items(container)
     if not sources:
         st.caption("当前还没有已归档材料。")
         return
-    st.subheader("已归档材料")
-    for item in sources:
-        if not isinstance(item, dict):
-            continue
-        st.markdown(
-            f"**{item.get('material_name') or item.get('filename', '未知文件')}** · "
-            f"{item.get('material_version', '--')} · {item.get('source_id', '--')}  \\n"
-            f"`{str(item.get('sha256', ''))[:12]}` · {item.get('source_type', '--')} · "
-            f"{item.get('ingest_status', '--')}"
+    keyword = st.text_input("搜索材料", key="materials_filter_keyword").strip().casefold()
+    statuses = tuple(sorted({str(item.get("ingest_status", "")) for item in sources}))
+    selected_status = st.selectbox(
+        "状态",
+        options=("", *statuses),
+        format_func=lambda value: "全部状态" if not value else _status_label(value),
+        key="materials_filter_status",
+    )
+    source_types = tuple(sorted({str(item.get("source_type", "")) for item in sources}))
+    selected_type = st.selectbox(
+        "材料类型",
+        options=("", *source_types),
+        format_func=lambda value: "全部类型" if not value else _type_label(value),
+        key="materials_filter_type",
+    )
+    filtered = [
+        item
+        for item in sources
+        if (not selected_status or item.get("ingest_status") == selected_status)
+        and (not selected_type or item.get("source_type") == selected_type)
+        and (
+            not keyword
+            or keyword
+            in " ".join(
+                str(item.get(field, ""))
+                for field in ("material_name", "filename", "material_version")
+            ).casefold()
         )
-        st.code(str(item.get("archive_path", "")), language=None)
-        _render_wiki_ingest(container, item)
-        if item.get("local_sensitive_comparison_required"):
-            count = item.get("excluded_sensitive_topic_count", 0)
-            st.warning(f"有 {count} 个相关主题仅可在本地核验，未外发给模型。")
-        if item.get("security_level") in {"L3", "L4"} and container.compare_sensitive_source:
-            if st.button("与当前方案对照", key=f"compare-{item.get('source_id')}"):
-                try:
-                    comparison = container.compare_sensitive_source.execute(
-                        SensitiveComparisonInput(
-                            project_id=container.active_project.project_id,
-                            source_id=str(item["source_id"]),
-                        )
+    ]
+    if not filtered:
+        st.info("没有匹配的已归档材料。")
+        return
+    groups: dict[str, list[dict]] = {}
+    for item in filtered:
+        group_id = str(item.get("material_series_id") or item.get("source_id"))
+        groups.setdefault(group_id, []).append(item)
+    ordered_groups = sorted(
+        (sorted(group, key=_created_key, reverse=True) for group in groups.values()),
+        key=lambda group: _created_key(group[0]),
+        reverse=True,
+    )
+    for versions in ordered_groups:
+        _render_material_group(container, versions)
+
+
+def _material_items(container: AppContainer) -> list[dict]:
+    assert container.active_project is not None
+    if container.source_repository is not None:
+        return [
+            {
+                "source_id": source.id,
+                "material_name": source.material_name,
+                "material_series_id": source.material_series_id,
+                "previous_source_id": source.previous_source_id,
+                "material_version": source.document_version,
+                "filename": source.original_filename,
+                "archive_path": source.archive_path,
+                "sha256": source.sha256,
+                "mime_type": source.mime_type,
+                "size_bytes": source.size_bytes,
+                "source_type": source.source_type,
+                "security_level": source.security_level.value,
+                "ingest_status": source.ingest_status,
+                "ingest_schema_version": source.ingest_schema_version,
+                "ingest_error_code": source.ingest_error_code,
+                "source_page_path": source.source_page_path,
+                "document_date": source.document_date.isoformat(),
+                "created_at": source.created_at.isoformat(),
+                "is_redacted": source.is_redacted,
+                "allow_external_model": source.allow_external_model,
+            }
+            for source in container.source_repository.list_for_project(
+                container.active_project.project_id
+            )
+        ]
+    index_path = container.active_project.paths.system_root / "source-index.json"
+    if not index_path.is_file():
+        return []
+    import json
+
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    entries = payload.get("sources", []) if isinstance(payload, dict) else []
+    return [item for item in entries if isinstance(item, dict)]
+
+
+def _render_material_group(container: AppContainer, versions: list[dict]) -> None:
+    latest = versions[0]
+    name = str(latest.get("material_name") or latest.get("filename") or "未命名材料")
+    st.markdown(f"#### {name}")
+    st.caption(f"当前版本 · {latest.get('material_version') or '--'}")
+    _render_version_row(container, latest)
+    historical = versions[1:]
+    if historical:
+        with st.expander(f"历史版本（{len(historical)}）"):
+            for item in historical:
+                st.markdown(f"**{item.get('material_version') or '--'}**")
+                _render_version_row(container, item)
+    with st.expander(f"技术详情 · {name}"):
+        for item in versions:
+            version = item.get("material_version") or "--"
+            st.markdown(f"**{version}**")
+            archive_path = Path(str(item.get("archive_path") or ""))
+            if not archive_path.is_absolute():
+                archive_path = container.active_project.paths.project_root / archive_path
+            st.code(str(archive_path.absolute()), language=None)
+            st.caption(f"Source ID：{item.get('source_id') or '--'}")
+            st.caption(f"SHA-256：{item.get('sha256') or '--'}")
+            st.caption(f"Schema：{item.get('ingest_schema_version') or '--'}")
+
+
+def _render_version_row(container: AppContainer, item: dict) -> None:
+    version = str(item.get("material_version") or "--")
+    st.markdown(
+        f"{_type_label(str(item.get('source_type') or ''))} · "
+        f"{_status_label(str(item.get('ingest_status') or ''))} · "
+        f"文档日期 {item.get('document_date') or '--'}"
+    )
+    _render_wiki_ingest(container, item)
+    _render_legacy_material_actions(container, item)
+    status = item.get("ingest_status")
+    if status == "ingested":
+        st.caption("已生成 Wiki，不可删除")
+    if status in {"pending_ingest", "ingest_failed"}:
+        _render_delete_action(container, item, version)
+
+
+def _render_delete_action(container: AppContainer, item: dict, version: str) -> None:
+    service = container.delete_archived_source
+    if service is None:
+        return
+    source_id = str(item.get("source_id") or "")
+    state_key = f"material_delete_confirming_{source_id}"
+    if st.button("删除此版本", key=f"material_delete_{source_id}"):
+        st.session_state[state_key] = True
+    if not st.session_state.get(state_key):
+        return
+    name = str(item.get("material_name") or item.get("filename") or "未命名材料")
+    st.caption(f"{name} · {version} · 仅删除此版本")
+    confirmed = st.checkbox(
+        "我确认将此版本移入本地可恢复回收区",
+        key=f"material_delete_confirm_{source_id}",
+    )
+    if not st.button(
+        "确认删除此版本",
+        key=f"material_delete_execute_{source_id}",
+        type="primary",
+        disabled=not confirmed,
+    ):
+        return
+    try:
+        service.execute(
+            DeleteArchivedSourceInput(
+                project_id=container.require_project_id(),
+                source_id=source_id,
+                requested_by="Owner",
+                confirmed=True,
+            )
+        )
+    except AppError as error:
+        st.error(f"{name} · {version}：删除失败（{error.code}）")
+    except (OSError, RuntimeError, ValueError):
+        st.error(f"{name} · {version}：删除失败，原材料已保留。")
+    else:
+        st.session_state.pop(state_key, None)
+        st.rerun()
+
+
+def _created_key(item: dict) -> str:
+    return str(item.get("created_at") or "")
+
+
+def _status_label(status: str) -> str:
+    return {
+        "pending_ingest": "待 Ingest",
+        "ingest_failed": "Ingest 失败",
+        "ingesting": "Ingest 中",
+        "ingested": "已 Ingest",
+        "local_review_required": "待本地复核",
+        "reingest_recommended": "建议重新 Ingest",
+    }.get(status, status or "--")
+
+
+def _type_label(source_type: str) -> str:
+    return next(
+        (definition.label for definition in MATERIAL_TYPES if definition.code == source_type),
+        source_type or "--",
+    )
+
+
+def _render_legacy_material_actions(container: AppContainer, item: dict) -> None:
+    """Render actions retained for historical classifications and sensitive local work."""
+    if not isinstance(item, dict):
+        return
+    if item.get("local_sensitive_comparison_required"):
+        count = item.get("excluded_sensitive_topic_count", 0)
+        st.warning(f"有 {count} 个相关主题仅可在本地核验，未外发给模型。")
+    if item.get("security_level") in {"L3", "L4"} and container.compare_sensitive_source:
+        if st.button("与当前方案对照", key=f"compare-{item.get('source_id')}"):
+            try:
+                comparison = container.compare_sensitive_source.execute(
+                    SensitiveComparisonInput(
+                        project_id=container.active_project.project_id,
+                        source_id=str(item["source_id"]),
                     )
-                except ValueError as error:
-                    st.error(f"本地对照失败：{error}")
-                else:
-                    st.info("仅本地处理，未调用外部模型。")
-                    left, right = st.columns(2)
-                    left.text_area(comparison.left_label, comparison.left_markdown, height=320)
-                    right.text_area("敏感材料", comparison.sensitive_text, height=320)
-            if st.button("创建本地候选", key=f"local-draft-{item.get('source_id')}"):
+                )
+            except ValueError as error:
+                st.error(f"本地对照失败：{error}")
+            else:
+                st.info("仅本地处理，未调用外部模型。")
+                left, right = st.columns(2)
+                left.text_area(comparison.left_label, comparison.left_markdown, height=320)
+                right.text_area("敏感材料", comparison.sensitive_text, height=320)
+        if st.button("创建本地候选", key=f"local-draft-{item.get('source_id')}"):
+            try:
+                if container.create_local_document_draft is None:
+                    raise ValueError("本地候选服务尚未就绪")
+                draft = container.create_local_document_draft.execute(
+                    CreateLocalDraftInput(
+                        project_id=container.active_project.project_id,
+                        source_id=str(item["source_id"]),
+                        requested_by="Owner",
+                    )
+                )
+            except (OSError, ValueError, RuntimeError) as error:
+                st.error(f"创建本地候选失败：{error}")
+            else:
+                st.success(f"已创建本地候选：{draft.draft.version_id}")
+    if item.get("source_type") not in {definition.code for definition in MATERIAL_TYPES}:
+        with st.expander("调整历史材料分类"):
+            target = st.selectbox(
+                "调整为",
+                options=(None, *MATERIAL_TYPES),
+                format_func=lambda value: "请选择" if value is None else value.label,
+                key=f"reclassify-type-{item.get('source_id')}",
+            )
+            if st.button("保存分类", key=f"reclassify-save-{item.get('source_id')}"):
                 try:
-                    if container.create_local_document_draft is None:
-                        raise ValueError("本地候选服务尚未就绪")
-                    draft = container.create_local_document_draft.execute(
-                        CreateLocalDraftInput(
+                    if target is None or container.reclassify_source is None:
+                        raise ValueError("请选择目标分类")
+                    container.reclassify_source.execute(
+                        ReclassifySourceInput(
                             project_id=container.active_project.project_id,
                             source_id=str(item["source_id"]),
-                            requested_by="Owner",
+                            new_source_type=target.code,
+                            owner_name="Owner",
                         )
                     )
                 except (OSError, ValueError, RuntimeError) as error:
-                    st.error(f"创建本地候选失败：{error}")
+                    st.error(f"材料分类调整失败，原分类保持不变。{error}")
                 else:
-                    st.success(f"已创建本地候选：{draft.draft.version_id}")
-        if item.get("source_type") not in {definition.code for definition in MATERIAL_TYPES}:
-            with st.expander("调整历史材料分类"):
-                target = st.selectbox(
-                    "调整为",
-                    options=(None, *MATERIAL_TYPES),
-                    format_func=lambda value: "请选择" if value is None else value.label,
-                    key=f"reclassify-type-{item.get('source_id')}",
-                )
-                if st.button("保存分类", key=f"reclassify-save-{item.get('source_id')}"):
-                    try:
-                        if target is None or container.reclassify_source is None:
-                            raise ValueError("请选择目标分类")
-                        container.reclassify_source.execute(
-                            ReclassifySourceInput(
-                                project_id=container.active_project.project_id,
-                                source_id=str(item["source_id"]),
-                                new_source_type=target.code,
-                                owner_name="Owner",
-                            )
-                        )
-                    except (OSError, ValueError, RuntimeError) as error:
-                        st.error(f"材料分类调整失败，原分类保持不变。{error}")
-                    else:
-                        st.success(f"材料分类已调整为“{target.label}”。")
+                    st.success(f"材料分类已调整为“{target.label}”。")
 
 
 def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
@@ -236,12 +417,17 @@ def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
         else:
             st.markdown("查看 Wiki 结果")
         return
+    if status == "ingest_failed":
+        name = item.get("material_name") or item.get("filename") or "未命名材料"
+        version = item.get("material_version") or "--"
+        st.error(f"{name} · {version}：Wiki Ingest 失败，可重试。")
+        if st.button("查看技术错误码", key=f"material_error_code_{source_id}"):
+            st.caption(f"安全错误码：{item.get('ingest_error_code') or 'WIKI_CHANGESET_INVALID'}")
     # Historical Wiki outcomes stay visible even if this session has no
     # external credential.  Only a new/retry action requires the gateway.
     if container.wiki_ingest is None:
         return
     if status == "ingest_failed":
-        st.caption(f"安全错误码：{item.get('ingest_error_code') or 'WIKI_CHANGESET_INVALID'}")
         label = "重新 Ingest"
         key = f"material_reingest_{source_id}"
     elif status == "reingest_recommended":

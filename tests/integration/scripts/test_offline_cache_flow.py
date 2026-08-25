@@ -77,7 +77,7 @@ def _offline_container(root: Path, monkeypatch: pytest.MonkeyPatch) -> AppContai
     monkeypatch.chdir(root)
     container = build_container(
         root / "config" / "app.yaml",
-        environ=OFFLINE_ENVIRON,
+        environ={**OFFLINE_ENVIRON, "INCUBATOR_LIBRARY_ROOT": str(root)},
         http_factory=_forbidden_factory,
     )
     assert container.import_source is not None

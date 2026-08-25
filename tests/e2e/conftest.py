@@ -44,7 +44,7 @@ def _build(
     monkeypatch.chdir(root)
     return build_container(
         root / "config" / "app.yaml",
-        environ=MOCK_ENVIRON,
+        environ={**MOCK_ENVIRON, "INCUBATOR_LIBRARY_ROOT": str(root)},
         http_factory=http_factory or (lambda: mock_http_factory(timeout_tasks, record=record)),
     )
 
@@ -70,7 +70,10 @@ def make_container(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.chdir(root)
         container = build_container(
             root / "config" / "app.yaml",
-            environ=environ or MOCK_ENVIRON,
+            environ={
+                **(environ or MOCK_ENVIRON),
+                "INCUBATOR_LIBRARY_ROOT": str(root),
+            },
             http_factory=http_factory or (lambda: mock_http_factory(timeout_tasks)),
         )
         containers.append(container)

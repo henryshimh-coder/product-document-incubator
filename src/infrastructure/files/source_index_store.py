@@ -57,6 +57,23 @@ class SourceIndexStore:
         }
         self._atomic_write(payload)
 
+    def remove(self, source_id: str) -> None:
+        current = self._read()
+        retained = [
+            self._normalize_entry(item)
+            for item in current["sources"]
+            if isinstance(item, dict) and item.get("source_id") != source_id
+        ]
+        if len(retained) == len(current["sources"]):
+            raise KeyError(f"source not found in active index: {source_id}")
+        self._atomic_write(
+            {
+                "schema_version": "2.2",
+                "project_id": self.paths.project_id,
+                "sources": retained,
+            }
+        )
+
     @staticmethod
     def _normalize_entry(entry: dict) -> dict:
         normalized = dict(entry)

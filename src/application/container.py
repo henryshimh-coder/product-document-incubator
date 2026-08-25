@@ -17,6 +17,10 @@ from src.application.dto.decision import RecordDecisionInput
 from src.application.dto.documents import ArchivedSourceView, ArchiveRawSourceInput
 from src.application.dto.ingest import ImportSourceInput
 from src.application.dto.lint import ListLintIssuesInput, RunLintInput
+from src.application.dto.materials import (
+    DeleteArchivedSourceInput,
+    DeletedArchivedSourceView,
+)
 from src.application.dto.query import RunQueryInput
 from src.application.dto.release import PublishBaselineInput, ReviewChangeRequestInput
 from src.application.dto.trace import BuildTraceInput
@@ -34,12 +38,14 @@ from src.application.ports.incubator import (
     DocumentStructureSuggester,
     ProjectManagement,
 )
+from src.application.ports.repositories import SourceRepository
 from src.application.project_context import ProjectContext
 from src.application.use_cases.archive_raw_source import ArchiveRawSource
 from src.application.use_cases.build_trace import BuildTrace
 from src.application.use_cases.compare_sensitive_source import CompareSensitiveSource
 from src.application.use_cases.confirm_local_wiki_ingest import ConfirmLocalWikiIngest
 from src.application.use_cases.create_local_document_draft import CreateLocalDocumentDraft
+from src.application.use_cases.delete_archived_source import DeleteArchivedSource
 from src.application.use_cases.export_current_document import ExportCurrentDocument
 from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
@@ -119,6 +125,7 @@ from src.infrastructure.files.project_scaffolder import ProjectScaffolder
 from src.infrastructure.files.project_source_archive import ProjectSourceArchive
 from src.infrastructure.files.query_material_reader import LocalQueryMaterialReader
 from src.infrastructure.files.source_index_store import SourceIndexStore
+from src.infrastructure.files.source_trash import SourceTrash
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
 from src.infrastructure.files.wiki_context_reader import WikiContextReader
 from src.infrastructure.gateways.composition import (
@@ -147,6 +154,10 @@ class DashboardService(Protocol):
 
 class RawSourceArchiveService(Protocol):
     def execute(self, command: ArchiveRawSourceInput) -> ArchivedSourceView: ...
+
+
+class ArchivedSourceDeletionService(Protocol):
+    def execute(self, command: DeleteArchivedSourceInput) -> DeletedArchivedSourceView: ...
 
 
 class SourceReclassificationService(Protocol):
@@ -257,6 +268,8 @@ class AppContainer:
     manage_projects: ProjectManagement | None = None
     active_project: ProjectContext | None = None
     archive_raw_source: RawSourceArchiveService | None = None
+    source_repository: SourceRepository | None = None
+    delete_archived_source: ArchivedSourceDeletionService | None = None
     reclassify_source: SourceReclassificationService | None = None
     compare_sensitive_source: SensitiveComparisonService | None = None
     create_local_document_draft: LocalDraftService | None = None
@@ -358,6 +371,8 @@ def build_container(
                 manage_projects=project_management,
                 active_project=active_project,
                 archive_raw_source=_build_raw_source_archive(active_project),
+                source_repository=SqliteSourceRepository(active_project.db_path),
+                delete_archived_source=_build_delete_archived_source(active_project),
                 reclassify_source=_build_reclassify_source(active_project),
                 compare_sensitive_source=_build_sensitive_comparison(active_project),
                 create_local_document_draft=_build_local_document_draft(active_project),
@@ -509,6 +524,12 @@ def _build_stateful_container(
         "manage_projects": project_management,
         "archive_raw_source": (
             None if active_project is None else _build_raw_source_archive(active_project)
+        ),
+        "source_repository": (
+            None if active_project is None else SqliteSourceRepository(active_project.db_path)
+        ),
+        "delete_archived_source": (
+            None if active_project is None else _build_delete_archived_source(active_project)
         ),
         "reclassify_source": (
             None if active_project is None else _build_reclassify_source(active_project)
@@ -776,6 +797,15 @@ def _build_raw_source_archive(active_project: ProjectContext) -> ArchiveRawSourc
             year=year,
         ),
         index=SourceIndexStore(active_project.paths),
+    )
+
+
+def _build_delete_archived_source(active_project: ProjectContext) -> DeleteArchivedSource:
+    return DeleteArchivedSource(
+        paths=active_project.paths,
+        sources=SqliteSourceRepository(active_project.db_path),
+        index=SourceIndexStore(active_project.paths),
+        trash=SourceTrash(active_project.paths),
     )
 
 

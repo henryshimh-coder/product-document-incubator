@@ -154,6 +154,7 @@ timeouts:
                 "DIFY_INGEST_API_KEY": "app-ingest-secret",
                 "DIFY_QUERY_API_KEY": "app-query-secret",
                 "DIFY_LINT_API_KEY": "app-lint-secret",
+                "INCUBATOR_LIBRARY_ROOT": str(tmp_path),
             },
         )
 
@@ -250,6 +251,7 @@ timeouts:
             "DIFY_INGEST_API_KEY": "app-ingest-secret",
             "DIFY_QUERY_API_KEY": "app-query-secret",
             "DIFY_LINT_API_KEY": "app-lint-secret",
+            "INCUBATOR_LIBRARY_ROOT": str(tmp_path),
         },
     )
 
@@ -426,6 +428,7 @@ timeouts:
             "DIFY_INGEST_API_KEY": "app-ingest-secret",
             "DIFY_QUERY_API_KEY": "app-query-secret",
             "DIFY_LINT_API_KEY": "app-lint-secret",
+            "INCUBATOR_LIBRARY_ROOT": str(tmp_path),
             "REDACTION_CUSTOMER_NAMES": "某客户",
             "REDACTION_STRATEGY_TERMS": "北极星计划",
             "REDACTION_FINANCIAL_TERMS": "预算利润",
@@ -517,6 +520,7 @@ timeouts:
         "DIFY_INGEST_API_KEY": "app-ingest-secret",
         "DIFY_QUERY_API_KEY": "app-query-secret",
         "DIFY_LINT_API_KEY": "app-lint-secret",
+        "INCUBATOR_LIBRARY_ROOT": str(tmp_path),
     }
 
     first = container_module.build_container(app_yaml, schema_yaml, environ=runtime)
@@ -660,6 +664,7 @@ timeouts:
             "DIFY_INGEST_API_KEY": "app-ingest-secret",
             "DIFY_QUERY_API_KEY": "app-query-secret",
             "DIFY_LINT_API_KEY": "app-lint-secret",
+            "INCUBATOR_LIBRARY_ROOT": str(tmp_path),
         },
         http_factory=http_factory,
     )
@@ -827,6 +832,7 @@ timeouts:
             "DIFY_INGEST_API_KEY": "app-ingest-secret",
             "DIFY_QUERY_API_KEY": "app-query-secret",
             "DIFY_LINT_API_KEY": "app-lint-secret",
+            "INCUBATOR_LIBRARY_ROOT": str(tmp_path),
         },
     )
 
