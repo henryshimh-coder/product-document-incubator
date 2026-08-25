@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
@@ -14,6 +15,11 @@ REDACTION_PATTERNS = {
     "email": re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"),
 }
 _UNSET = object()
+
+
+class RedactionMode(StrEnum):
+    STRICT = "strict"
+    OWNER_CONFIRMED = "owner_confirmed"
 
 
 class RedactionResult(BaseModel):
@@ -36,6 +42,7 @@ def _dictionary_pattern(terms: Iterable[str]) -> re.Pattern[str] | None:
 def redact_text(
     text: str,
     *,
+    mode: RedactionMode = RedactionMode.STRICT,
     security_level: SecurityLevel = SecurityLevel.L2_INTERNAL,
     customer_names: Iterable[str] | object = _UNSET,
     strategy_terms: Iterable[str] | object = _UNSET,
@@ -54,12 +61,13 @@ def redact_text(
         ("leader_name", leader_names),
         ("unpublished_decision", unpublished_decisions),
     )
-    for finding_type, terms in dictionary_inputs:
-        if terms is _UNSET:
-            continue
-        pattern = _dictionary_pattern(terms)
-        if pattern is not None:
-            patterns.append((finding_type, pattern))
+    if mode is RedactionMode.STRICT:
+        for finding_type, terms in dictionary_inputs:
+            if terms is _UNSET:
+                continue
+            pattern = _dictionary_pattern(terms)
+            if pattern is not None:
+                patterns.append((finding_type, pattern))
 
     for finding_type, pattern in patterns:
         redacted, count = pattern.subn(f"[已脱敏:{finding_type}]", redacted)
@@ -68,6 +76,7 @@ def redact_text(
 
     has_sensitive_residue = any(pattern.search(redacted) for _, pattern in patterns)
     has_complete_dictionary_profile = all(terms is not _UNSET for _, terms in dictionary_inputs)
+    dictionary_profile_ok = mode is RedactionMode.OWNER_CONFIRMED or has_complete_dictionary_profile
     return RedactionResult(
         redacted_text=redacted,
         findings=findings,
@@ -75,7 +84,7 @@ def redact_text(
         redacted_chars=len(redacted),
         safe_for_external_model=(
             not has_sensitive_residue
-            and has_complete_dictionary_profile
+            and dictionary_profile_ok
             and security_level in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL}
         ),
     )

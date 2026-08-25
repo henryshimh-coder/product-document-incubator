@@ -5,11 +5,48 @@ import importlib
 import pytest
 
 from src.domain.enums import SecurityLevel
+from src.infrastructure.files.redactor import RedactionMode
 
 
 def redactor_module():
     """Loads the real local redactor for an observable missing-feature RED."""
     return importlib.import_module("src.infrastructure.files.redactor")
+
+
+def test_strict_mode_keeps_business_dictionary_redaction() -> None:
+    result = redactor_module().redact_text(
+        "某银行采用灰度策略",
+        security_level=SecurityLevel.L2_INTERNAL,
+        customer_names=("某银行",),
+        strategy_terms=("灰度策略",),
+        financial_terms=(),
+        leader_names=(),
+        unpublished_decisions=(),
+    )
+
+    assert "某银行" not in result.redacted_text
+    assert "灰度策略" not in result.redacted_text
+
+
+def test_owner_confirmed_mode_allows_business_terms_but_masks_hard_identifiers() -> None:
+    result = redactor_module().redact_text(
+        "某银行采用灰度策略，联系 13812345678，邮箱 owner@example.com",
+        mode=RedactionMode.OWNER_CONFIRMED,
+        security_level=SecurityLevel.L2_INTERNAL,
+        customer_names=("某银行",),
+        strategy_terms=("灰度策略",),
+        financial_terms=(),
+        leader_names=(),
+        unpublished_decisions=(),
+    )
+
+    assert "某银行" in result.redacted_text
+    assert "灰度策略" in result.redacted_text
+    assert "13812345678" not in result.redacted_text
+    assert "owner@example.com" not in result.redacted_text
+    assert "[已脱敏:phone]" in result.redacted_text
+    assert "[已脱敏:email]" in result.redacted_text
+    assert result.safe_for_external_model is True
 
 
 def test_redacts_supported_identifiers_deterministically() -> None:
