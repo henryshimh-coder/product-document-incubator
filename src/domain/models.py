@@ -390,7 +390,7 @@ class ModelCallLog(DomainModel):
     authorized: bool
     redacted: bool
     outbound_chars: NonNegativeInt
-    outbound_coverage: float = Field(ge=0, le=1)
+    outbound_coverage: float = Field(ge=0, allow_inf_nan=False)
     result_mode: CallResultMode
     status: Literal["started", "succeeded", "failed", "timeout"]
     started_at: datetime

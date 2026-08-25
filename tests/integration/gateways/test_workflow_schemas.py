@@ -590,7 +590,6 @@ def test_proof_factory_rejects_invalid_source_total_or_derived_excess_coverage(
     [
         "_outbound_chars",
         "_source_total_chars",
-        "_coverage_mode",
         "_coverage_chars",
         "_coverage",
         "_signature",
@@ -600,7 +599,6 @@ def test_gateway_rejects_tampered_or_fake_signed_proof(
     tampered_field: str,
 ):
     """Catches post-factory metadata changes and fake signatures before invocation."""
-    common = importlib.import_module("src.infrastructure.gateways._common")
     inputs = _query_input()
     client = FakeDifyClient(_query_output())
     proof = _outbound_proof("query", inputs)
@@ -618,8 +616,6 @@ def test_gateway_rejects_tampered_or_fake_signed_proof(
         object.__setattr__(tampered_proof, field, getattr(proof, field))
     if tampered_field == "_signature":
         tampered_value: Any = b"fake-signature"
-    elif tampered_field == "_coverage_mode":
-        tampered_value = common.OutboundCoverageMode.WIKI_SOURCE_CHUNKS
     elif tampered_field == "_coverage":
         tampered_value = 0.0
     else:
@@ -628,6 +624,46 @@ def test_gateway_rejects_tampered_or_fake_signed_proof(
 
     with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
         _gateway("query", client).run(inputs, safety_proof=tampered_proof)
+
+    assert client.calls == 0
+
+
+def test_gateway_rejects_coverage_mode_tamper_when_both_modes_are_valid() -> None:
+    """Catches a valid alternate coverage mode bypassing its HMAC binding."""
+    common = importlib.import_module("src.infrastructure.gateways._common")
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
+    inputs = _ingest_input()
+    canonical_proof = _outbound_proof("ingest", inputs)
+    wiki_proof = common.create_outbound_safety_proof(
+        schemas.IngestWorkflowInput,
+        inputs,
+        security_level=SecurityLevel.L2_INTERNAL,
+        customer_names=(),
+        strategy_terms=(),
+        financial_terms=(),
+        leader_names=(),
+        unpublished_decisions=(),
+        source_total_chars=100_000,
+        coverage_mode=common.OutboundCoverageMode.WIKI_SOURCE_CHUNKS,
+    )
+    tampered_proof = object.__new__(type(canonical_proof))
+    for field in (
+        "_payload_digest",
+        "_outbound_chars",
+        "_source_total_chars",
+        "_coverage_mode",
+        "_coverage_chars",
+        "_coverage",
+        "_signature",
+    ):
+        value = getattr(wiki_proof, field)
+        if field == "_signature":
+            value = canonical_proof._signature
+        object.__setattr__(tampered_proof, field, value)
+    client = FakeDifyClient(_ingest_output())
+
+    with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        _gateway("ingest", client).run(inputs, safety_proof=tampered_proof)
 
     assert client.calls == 0
 

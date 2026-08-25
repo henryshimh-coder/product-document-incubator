@@ -332,6 +332,35 @@ def test_wiki_ingest_reports_coverage_error_before_gateway(tmp_path: Path) -> No
     assert fixture.gateway.calls == []
 
 
+def test_redaction_expansion_persists_truthful_over_one_coverage_audit(
+    tmp_path: Path,
+) -> None:
+    """Catches truthful over-one coverage being dropped by audit validation."""
+    raw_text = "a@b.co"
+    redacted_text = "[已脱敏:email]"
+    fixture = make_ingest_fixture(tmp_path, raw_text=raw_text)
+
+    with pytest.raises(DomainError) as caught:
+        fixture.execute(requested_by="Owner")
+
+    expected_coverage = len(redacted_text) / len(raw_text)
+    assert expected_coverage > 1
+    assert caught.value.code == ErrorCode.OUTBOUND_COVERAGE_EXCEEDED.value
+    assert fixture.gateway.calls == []
+    with connect(fixture.db_path) as connection:
+        audit = connection.execute(
+            "SELECT outbound_coverage, result_mode, status, error_code "
+            "FROM model_call_logs WHERE task_type = 'wiki_ingest'"
+        ).fetchone()
+    assert audit is not None
+    assert audit["outbound_coverage"] == pytest.approx(expected_coverage)
+    assert tuple(audit)[1:] == (
+        "local_only",
+        "failed",
+        ErrorCode.OUTBOUND_COVERAGE_EXCEEDED.value,
+    )
+
+
 def test_successful_duplicate_returns_without_gateway_or_wiki_change(ingest_fixture) -> None:
     """Catches idempotent success invoking the model or appending Wiki content twice."""
     first = ingest_fixture.execute()
