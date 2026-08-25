@@ -11,6 +11,7 @@ import pytest
 from src.domain.enums import AuthorityLevel, SecurityLevel
 from src.domain.models import SourceRecord
 from src.infrastructure.files.project_library import ProjectPaths
+from src.infrastructure.files.redactor import RedactionMode
 from src.infrastructure.files.wiki_outbound_context import WikiOutboundContextBuilder
 
 
@@ -276,6 +277,34 @@ def test_projection_includes_only_authorized_l1_l2_claims(
     assert "wiki/topics" not in projection.model_dump_json()
     assert projection.local_sensitive_comparison_required is False
     assert projection.excluded_topic_count == 0
+
+
+def test_owner_confirmed_projection_keeps_business_terms_and_masks_hard_identifiers(
+    project_wiki: _ProjectWiki,
+    source_repository: _SourceRepository,
+) -> None:
+    """Catches Owner projection leaking hard identifiers or redacting approved business terms."""
+    path = project_wiki.write_topic(
+        "bank-rollout",
+        citations=["SRC-L2"],
+        body="某银行采用灰度策略，联系人 13812345678，邮箱 owner@example.com。",
+    )
+
+    projection = WikiOutboundContextBuilder(
+        project_wiki.paths,
+        source_repository,
+        customer_names=("某银行",),
+        strategy_terms=("灰度策略",),
+        redaction_mode=RedactionMode.OWNER_CONFIRMED,
+    ).build(project_id="PROJECT_A", related_topic_paths=[path])
+
+    markdown = projection.safe_related_topics[0].markdown
+    assert "某银行" in markdown
+    assert "灰度策略" in markdown
+    assert "13812345678" not in markdown
+    assert "owner@example.com" not in markdown
+    assert "[已脱敏:phone]" in markdown
+    assert "[已脱敏:email]" in markdown
 
 
 @pytest.mark.parametrize(

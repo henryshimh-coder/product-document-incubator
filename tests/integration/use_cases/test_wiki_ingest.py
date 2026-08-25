@@ -99,12 +99,12 @@ class IngestFixture:
     def page(self, relative_path: str) -> Path:
         return self.paths.project_root / relative_path
 
-    def execute(self):
+    def execute(self, *, requested_by: str = "Owner"):
         return self.service.execute(
             IngestArchivedSourceInput(
                 project_id="PROJECT_A",
                 source_id=self.source_id,
-                requested_by="Owner",
+                requested_by=requested_by,
             )
         )
 
@@ -119,7 +119,16 @@ class IngestFixture:
         return {path: hashlib.sha256(self.page(path).read_bytes()).hexdigest() for path in paths}
 
 
-def make_ingest_fixture(tmp_path: Path) -> IngestFixture:
+def make_ingest_fixture(
+    tmp_path: Path,
+    *,
+    raw_text: str | None = None,
+    security_level: SecurityLevel = SecurityLevel.L2_INTERNAL,
+    is_redacted: bool = True,
+    allow_external_model: bool = True,
+    customer_names: tuple[str, ...] = (),
+    strategy_terms: tuple[str, ...] = (),
+) -> IngestFixture:
     library = tmp_path / "library"
     paths = ProjectPaths.for_project(library, "PROJECT_A")
     paths.project_root.mkdir(parents=True)
@@ -162,7 +171,7 @@ def make_ingest_fixture(tmp_path: Path) -> IngestFixture:
         )
     )
     source_id = "SRC-PROJECT-A-001"
-    raw_text = "Approved redacted product principle and supporting evidence.\n" * 1200
+    raw_text = raw_text or "Approved redacted product principle and supporting evidence.\n" * 1200
     raw_path = paths.raw_root / "2026" / source_id / "principles.md"
     raw_path.parent.mkdir(parents=True)
     raw_path.write_text(raw_text, encoding="utf-8")
@@ -182,9 +191,9 @@ def make_ingest_fixture(tmp_path: Path) -> IngestFixture:
         document_date=date(2026, 8, 17),
         document_version="1.0",
         applicable_baseline_version="BASE-1",
-        security_level=SecurityLevel.L2_INTERNAL,
-        is_redacted=True,
-        allow_external_model=True,
+        security_level=security_level,
+        is_redacted=is_redacted,
+        allow_external_model=allow_external_model,
         is_sandbox=False,
         ingest_status="pending_ingest",
         created_at=NOW,
@@ -247,8 +256,8 @@ def make_ingest_fixture(tmp_path: Path) -> IngestFixture:
         sources=SqliteSourceRepository(db_path),
         runs=SqliteWikiIngestRunRepository(db_path),
         gateway=gateway,
-        customer_names=(),
-        strategy_terms=(),
+        customer_names=customer_names,
+        strategy_terms=strategy_terms,
         financial_terms=(),
         leader_names=(),
         unpublished_decisions=(),

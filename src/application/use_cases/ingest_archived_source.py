@@ -36,7 +36,7 @@ from src.infrastructure.files.project_library import (
     require_canonical_project_path,
     require_safe_project_roles,
 )
-from src.infrastructure.files.redactor import redact_text
+from src.infrastructure.files.redactor import RedactionMode, redact_text
 from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
 from src.infrastructure.files.wiki_outbound_context import WikiOutboundContextBuilder
@@ -98,6 +98,7 @@ class IngestArchivedSource:
             financial_terms=self.financial_terms,
             leader_names=self.leader_names,
             unpublished_decisions=self.unpublished_decisions,
+            redaction_mode=RedactionMode.OWNER_CONFIRMED,
         )
         self.index = SourceIndexStore(paths)
         self.model_call_logger = ModelCallLogger(db_path)
@@ -147,7 +148,7 @@ class IngestArchivedSource:
 
             # Authorization precedes extraction. No L3/L4 or unapproved source can
             # reach extraction, projection, proof creation, or the Gateway.
-            self._authorize_external(source)
+            self._authorize_external(source, command.requested_by)
             extracted = extract_document_bytes(
                 raw_payload,
                 filename=source.original_filename,
@@ -185,11 +186,11 @@ class IngestArchivedSource:
                 WikiIngestWorkflowInput,
                 workflow_inputs,
                 security_level=source.security_level,
-                customer_names=self.customer_names,
-                strategy_terms=self.strategy_terms,
-                financial_terms=self.financial_terms,
-                leader_names=self.leader_names,
-                unpublished_decisions=self.unpublished_decisions,
+                customer_names=(),
+                strategy_terms=(),
+                financial_terms=(),
+                leader_names=(),
+                unpublished_decisions=(),
                 source_total_chars=len(extracted.text),
             )
             audit_redacted = True
@@ -445,7 +446,7 @@ class IngestArchivedSource:
             return None
         return self.runs.get_by_transaction(str(row["transaction_id"]))
 
-    def _authorize_external(self, source: SourceRecord) -> None:
+    def _authorize_external(self, source: SourceRecord, requested_by: str) -> None:
         try:
             with connect(self.db_path) as connection:
                 row = connection.execute(
@@ -462,7 +463,7 @@ class IngestArchivedSource:
                 in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL},
                 source.is_redacted,
                 source.allow_external_model,
-                not source.is_sandbox or source.security_level == SecurityLevel.L1_PUBLIC_SIMULATED,
+                requested_by == "Owner",
             )
         )
         if not allowed:
@@ -473,6 +474,7 @@ class IngestArchivedSource:
         for chunk in chunks[:MAX_OUTBOUND_SOURCE_CHUNKS]:
             redaction = redact_text(
                 chunk.text,
+                mode=RedactionMode.OWNER_CONFIRMED,
                 security_level=source.security_level,
                 customer_names=self.customer_names,
                 strategy_terms=self.strategy_terms,
@@ -480,13 +482,13 @@ class IngestArchivedSource:
                 leader_names=self.leader_names,
                 unpublished_decisions=self.unpublished_decisions,
             )
-            if not redaction.safe_for_external_model or redaction.redacted_text != chunk.text:
+            if not redaction.safe_for_external_model:
                 raise DomainError(ErrorCode.WIKI_EXTERNAL_CALL_DENIED, "REDACTION_REQUIRED")
             safe_chunks.append(
                 {
                     "chunk_id": chunk.chunk_id,
                     "locator": chunk.locator,
-                    "text": redaction.redacted_text,
+                    "text": redaction.redacted_text.strip(),
                 }
             )
         if not safe_chunks:

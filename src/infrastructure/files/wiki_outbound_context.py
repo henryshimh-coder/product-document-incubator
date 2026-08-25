@@ -23,7 +23,7 @@ from src.infrastructure.files.project_library import (
     require_canonical_project_path,
     require_safe_project_roles,
 )
-from src.infrastructure.files.redactor import redact_text
+from src.infrastructure.files.redactor import RedactionMode, redact_text
 from src.infrastructure.files.wiki_citations import parse_canonical_source_locator
 from src.infrastructure.files.wiki_topic_metadata import validate_topic_id
 
@@ -159,6 +159,7 @@ class WikiOutboundContextBuilder:
         financial_terms: Iterable[str] = (),
         leader_names: Iterable[str] = (),
         unpublished_decisions: Iterable[str] = (),
+        redaction_mode: RedactionMode = RedactionMode.STRICT,
     ) -> None:
         self.paths = paths
         self.sources = sources
@@ -168,6 +169,7 @@ class WikiOutboundContextBuilder:
         self.financial_terms = tuple(financial_terms)
         self.leader_names = tuple(leader_names)
         self.unpublished_decisions = tuple(unpublished_decisions)
+        self.redaction_mode = redaction_mode
         self.project_root = paths.project_root.resolve()
         self.topics_root = (paths.wiki_root / "topics").resolve()
 
@@ -336,9 +338,9 @@ class WikiOutboundContextBuilder:
             chunk.chunk_id: {
                 "chunk_id": chunk.chunk_id,
                 "locator": chunk.locator,
-                "text": chunk.text,
+                "text": self._redact_for_outbound(source, chunk.text),
             }
-            for chunk in document.chunks
+            for chunk in document.chunks[:3]
         }
 
     def _trusted_ingest_contract(self) -> str:
@@ -447,6 +449,7 @@ class WikiOutboundContextBuilder:
                 return None
             redaction = redact_text(
                 statement,
+                mode=self.redaction_mode,
                 security_level=SecurityLevel.L2_INTERNAL,
                 customer_names=self.customer_names,
                 strategy_terms=self.strategy_terms,
@@ -454,9 +457,11 @@ class WikiOutboundContextBuilder:
                 leader_names=self.leader_names,
                 unpublished_decisions=self.unpublished_decisions,
             )
-            if not redaction.safe_for_external_model or redaction.redacted_text != statement:
+            if not redaction.safe_for_external_model or (
+                self.redaction_mode is RedactionMode.STRICT and redaction.redacted_text != statement
+            ):
                 return None
-            statements.append(statement)
+            statements.append(redaction.redacted_text)
             for source in resolved_sources:
                 assert source is not None
                 if not self._source_record_is_exportable(source, project_id):
@@ -490,8 +495,16 @@ class WikiOutboundContextBuilder:
             return None
         if any(not self._source_record_is_exportable(item, source.project_id) for item in cited):
             return None
+        try:
+            safe_markdown = self._redact_for_outbound(source, markdown)
+        except ValueError:
+            return None
+        return safe_markdown
+
+    def _redact_for_outbound(self, source: SourceRecord, text: str) -> str:
         redaction = redact_text(
-            markdown,
+            text,
+            mode=self.redaction_mode,
             security_level=source.security_level,
             customer_names=self.customer_names,
             strategy_terms=self.strategy_terms,
@@ -499,9 +512,11 @@ class WikiOutboundContextBuilder:
             leader_names=self.leader_names,
             unpublished_decisions=self.unpublished_decisions,
         )
-        if not redaction.safe_for_external_model or redaction.redacted_text != markdown:
-            return None
-        return markdown
+        if not redaction.safe_for_external_model or (
+            self.redaction_mode is RedactionMode.STRICT and redaction.redacted_text != text
+        ):
+            raise ValueError("WIKI_OUTBOUND_REDACTION_REQUIRED")
+        return redaction.redacted_text.strip()
 
     def citation_sources(self, markdown: str) -> list[SourceRecord]:
         """Parse complete citation tokens only; malformed tokens fail closed."""
