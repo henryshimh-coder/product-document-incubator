@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from src.domain.enums import SecurityLevel
 from src.domain.errors import GatewayError, OutputValidationError
-from src.infrastructure.files.redactor import RedactionResult
+from src.infrastructure.files.redactor import RedactionMode, RedactionResult
 
 
 def _wiki_ingest_schema_input() -> dict[str, Any]:
@@ -37,6 +37,60 @@ def _wiki_ingest_schema_input() -> dict[str, Any]:
         ],
         "ingest_contract": "Produce traceable Wiki statements.",
     }
+
+
+def test_wiki_coverage_counts_only_source_chunk_text() -> None:
+    """Catches fixed contract metadata consuming the Wiki source coverage budget."""
+    common = importlib.import_module("src.infrastructure.gateways._common")
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
+    inputs = _wiki_ingest_schema_input()
+    inputs["source_chunks"] = [{"chunk_id": "CHK-A", "locator": "第1节", "text": "A" * 200}]
+    inputs["ingest_contract"] = "契约" * 1500
+
+    proof = common.create_outbound_safety_proof(
+        schemas.WikiIngestWorkflowInput,
+        inputs,
+        security_level=SecurityLevel.L2_INTERNAL,
+        customer_names=(),
+        strategy_terms=(),
+        financial_terms=(),
+        leader_names=(),
+        unpublished_decisions=(),
+        source_total_chars=1000,
+        redaction_mode=RedactionMode.OWNER_CONFIRMED,
+        coverage_mode=common.OutboundCoverageMode.WIKI_SOURCE_CHUNKS,
+    )
+
+    assert proof is not None
+
+
+def test_preinvoke_validation_recomputes_signed_wiki_source_coverage() -> None:
+    """Catches source-chunk mutation escaping the signed pre-invocation coverage check."""
+    common = importlib.import_module("src.infrastructure.gateways._common")
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
+    inputs = _wiki_ingest_schema_input()
+    proof = common.create_outbound_safety_proof(
+        schemas.WikiIngestWorkflowInput,
+        inputs,
+        security_level=SecurityLevel.L2_INTERNAL,
+        customer_names=(),
+        strategy_terms=(),
+        financial_terms=(),
+        leader_names=(),
+        unpublished_decisions=(),
+        source_total_chars=4000,
+        redaction_mode=RedactionMode.OWNER_CONFIRMED,
+        coverage_mode=common.OutboundCoverageMode.WIKI_SOURCE_CHUNKS,
+    )
+    inputs["source_chunks"][0]["text"] += "X" * 1200
+
+    with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        common.validate_input(
+            schemas.WikiIngestWorkflowInput,
+            inputs,
+            invalid_detail="WIKI_INGEST_INPUT_INVALID",
+            safety_proof=proof,
+        )
 
 
 @pytest.mark.parametrize(
@@ -533,12 +587,20 @@ def test_proof_factory_rejects_invalid_source_total_or_derived_excess_coverage(
 
 @pytest.mark.parametrize(
     "tampered_field",
-    ["_outbound_chars", "_source_total_chars", "_coverage", "_signature"],
+    [
+        "_outbound_chars",
+        "_source_total_chars",
+        "_coverage_mode",
+        "_coverage_chars",
+        "_coverage",
+        "_signature",
+    ],
 )
 def test_gateway_rejects_tampered_or_fake_signed_proof(
     tampered_field: str,
 ):
     """Catches post-factory metadata changes and fake signatures before invocation."""
+    common = importlib.import_module("src.infrastructure.gateways._common")
     inputs = _query_input()
     client = FakeDifyClient(_query_output())
     proof = _outbound_proof("query", inputs)
@@ -547,6 +609,8 @@ def test_gateway_rejects_tampered_or_fake_signed_proof(
         "_payload_digest",
         "_outbound_chars",
         "_source_total_chars",
+        "_coverage_mode",
+        "_coverage_chars",
         "_coverage",
         "_signature",
     )
@@ -554,6 +618,8 @@ def test_gateway_rejects_tampered_or_fake_signed_proof(
         object.__setattr__(tampered_proof, field, getattr(proof, field))
     if tampered_field == "_signature":
         tampered_value: Any = b"fake-signature"
+    elif tampered_field == "_coverage_mode":
+        tampered_value = common.OutboundCoverageMode.WIKI_SOURCE_CHUNKS
     elif tampered_field == "_coverage":
         tampered_value = 0.0
     else:

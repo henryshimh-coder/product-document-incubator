@@ -14,7 +14,7 @@ import pytest
 from src.application.dto.wiki_ingest import IngestArchivedSourceInput
 from src.application.use_cases.ingest_archived_source import IngestArchivedSource
 from src.domain.enums import AuthorityLevel, SecurityLevel
-from src.domain.errors import DomainError, GatewayError
+from src.domain.errors import DomainError, ErrorCode, GatewayError
 from src.domain.models import Project, SourceRecord
 from src.domain.wiki import WikiIngestStatus
 from src.infrastructure.db.connection import connect
@@ -307,14 +307,29 @@ def test_ingest_archived_l2_source_updates_complete_wiki(ingest_fixture) -> None
     assert hashlib.sha256(ingest_fixture.raw_path.read_bytes()).hexdigest() == before_raw
     with connect(ingest_fixture.db_path) as connection:
         audit = connection.execute(
-            "SELECT task_type, source_ids_json, outbound_chars, status, error_code "
+            "SELECT task_type, source_ids_json, outbound_chars, outbound_coverage, "
+            "status, error_code "
             "FROM model_call_logs WHERE task_type = 'wiki_ingest'"
         ).fetchone()
     assert audit is not None
     assert audit["source_ids_json"] == json.dumps([ingest_fixture.source_id], separators=(",", ":"))
     assert audit["outbound_chars"] > 0
+    source_line = "Approved redacted product principle and supporting evidence."
+    source_chars = (len(source_line) * 1200) + 1199
+    assert audit["outbound_coverage"] == pytest.approx((3 * len(source_line)) / source_chars)
     assert audit["status"] == "succeeded"
     assert audit["error_code"] is None
+
+
+def test_wiki_ingest_reports_coverage_error_before_gateway(tmp_path: Path) -> None:
+    """Catches genuine source-chunk coverage excess being mislabeled or invoked."""
+    fixture = make_ingest_fixture(tmp_path, raw_text="A" * 1000)
+
+    with pytest.raises(DomainError) as caught:
+        fixture.execute(requested_by="Owner")
+
+    assert caught.value.code == ErrorCode.OUTBOUND_COVERAGE_EXCEEDED.value
+    assert fixture.gateway.calls == []
 
 
 def test_successful_duplicate_returns_without_gateway_or_wiki_change(ingest_fixture) -> None:

@@ -6,6 +6,7 @@ import json
 import math
 import secrets
 from collections.abc import Iterable, Mapping
+from enum import StrEnum
 from typing import Any, TypeVar
 from uuid import uuid4
 
@@ -14,13 +15,18 @@ from pydantic import BaseModel, ValidationError
 from src.application.ports.workflow_gateway import WorkflowGateway
 from src.domain.enums import SecurityLevel
 from src.domain.errors import GatewayError, OutputValidationError
-from src.infrastructure.files.redactor import REDACTION_PATTERNS, redact_text
+from src.infrastructure.files.redactor import REDACTION_PATTERNS, RedactionMode, redact_text
 
 InputModel = TypeVar("InputModel", bound=BaseModel)
 MAX_OUTBOUND_COVERAGE = 0.25
 MAX_CANONICAL_PAYLOAD_CHARS = 20_000
 _PROOF_HMAC_KEY = secrets.token_bytes(32)
 _PROOF_ISSUER = object()
+
+
+class OutboundCoverageMode(StrEnum):
+    CANONICAL_PAYLOAD = "canonical_payload"
+    WIKI_SOURCE_CHUNKS = "wiki_source_chunks"
 
 
 def new_workflow_task_id(prefix: str) -> str:
@@ -43,6 +49,8 @@ class OutboundSafetyProof:
         "_payload_digest",
         "_outbound_chars",
         "_source_total_chars",
+        "_coverage_mode",
+        "_coverage_chars",
         "_coverage",
         "_signature",
     )
@@ -54,6 +62,8 @@ class OutboundSafetyProof:
         payload_digest: bytes,
         outbound_chars: int,
         source_total_chars: int,
+        coverage_mode: OutboundCoverageMode,
+        coverage_chars: int,
         coverage: float,
         signature: bytes,
     ) -> None:
@@ -62,6 +72,8 @@ class OutboundSafetyProof:
         object.__setattr__(self, "_payload_digest", payload_digest)
         object.__setattr__(self, "_outbound_chars", outbound_chars)
         object.__setattr__(self, "_source_total_chars", source_total_chars)
+        object.__setattr__(self, "_coverage_mode", coverage_mode)
+        object.__setattr__(self, "_coverage_chars", coverage_chars)
         object.__setattr__(self, "_coverage", coverage)
         object.__setattr__(self, "_signature", signature)
 
@@ -81,10 +93,36 @@ def _canonical_payload(serialized: Mapping[str, Any]) -> str:
     )
 
 
+def _coverage_chars(
+    serialized: Mapping[str, Any],
+    canonical_payload: str,
+    mode: OutboundCoverageMode,
+) -> int:
+    if mode is OutboundCoverageMode.CANONICAL_PAYLOAD:
+        result = len(canonical_payload)
+    elif mode is OutboundCoverageMode.WIKI_SOURCE_CHUNKS:
+        chunks = serialized.get("source_chunks")
+        if not isinstance(chunks, list) or not chunks:
+            raise GatewayError.outbound_safety_proof_invalid()
+        texts: list[str] = []
+        for chunk in chunks:
+            if not isinstance(chunk, Mapping) or not isinstance(chunk.get("text"), str):
+                raise GatewayError.outbound_safety_proof_invalid()
+            texts.append(chunk["text"])
+        result = sum(len(text) for text in texts)
+    else:
+        raise GatewayError.outbound_safety_proof_invalid()
+    if result <= 0:
+        raise GatewayError.outbound_safety_proof_invalid()
+    return result
+
+
 def _proof_message(
     payload_digest: bytes,
     outbound_chars: int,
     source_total_chars: int,
+    coverage_mode: OutboundCoverageMode,
+    coverage_chars: int,
     coverage: float,
 ) -> bytes:
     return "\n".join(
@@ -92,6 +130,8 @@ def _proof_message(
             payload_digest.hex(),
             str(outbound_chars),
             str(source_total_chars),
+            coverage_mode.value,
+            str(coverage_chars),
             coverage.hex(),
         )
     ).encode("ascii")
@@ -101,6 +141,8 @@ def _sign_proof(
     payload_digest: bytes,
     outbound_chars: int,
     source_total_chars: int,
+    coverage_mode: OutboundCoverageMode,
+    coverage_chars: int,
     coverage: float,
 ) -> bytes:
     return hmac.digest(
@@ -109,6 +151,8 @@ def _sign_proof(
             payload_digest,
             outbound_chars,
             source_total_chars,
+            coverage_mode,
+            coverage_chars,
             coverage,
         ),
         "sha256",
@@ -126,10 +170,18 @@ def create_outbound_safety_proof(
     leader_names: Iterable[str],
     unpublished_decisions: Iterable[str],
     source_total_chars: int,
+    redaction_mode: RedactionMode = RedactionMode.STRICT,
+    coverage_mode: OutboundCoverageMode = OutboundCoverageMode.CANONICAL_PAYLOAD,
 ) -> OutboundSafetyProof:
     """Validate, redact, size, and sign the exact canonical outbound payload."""
 
-    if not isinstance(source_total_chars, int) or source_total_chars <= 0:
+    if (
+        not isinstance(source_total_chars, int)
+        or isinstance(source_total_chars, bool)
+        or source_total_chars <= 0
+        or not isinstance(redaction_mode, RedactionMode)
+        or not isinstance(coverage_mode, OutboundCoverageMode)
+    ):
         raise GatewayError.outbound_safety_proof_invalid()
     try:
         validated = schema.model_validate(inputs)
@@ -138,11 +190,13 @@ def create_outbound_safety_proof(
     serialized = validated.model_dump(mode="json")
     canonical_payload = _canonical_payload(serialized)
     outbound_chars = len(canonical_payload)
-    coverage = outbound_chars / source_total_chars
+    coverage_chars = _coverage_chars(serialized, canonical_payload, coverage_mode)
+    coverage = coverage_chars / source_total_chars
     if outbound_chars > MAX_CANONICAL_PAYLOAD_CHARS or coverage > MAX_OUTBOUND_COVERAGE:
         raise GatewayError.outbound_safety_proof_invalid()
     redaction = redact_text(
         canonical_payload,
+        mode=redaction_mode,
         security_level=security_level,
         customer_names=customer_names,
         strategy_terms=strategy_terms,
@@ -162,6 +216,8 @@ def create_outbound_safety_proof(
         payload_digest,
         outbound_chars,
         source_total_chars,
+        coverage_mode,
+        coverage_chars,
         coverage,
     )
     return OutboundSafetyProof(
@@ -169,6 +225,8 @@ def create_outbound_safety_proof(
         payload_digest=payload_digest,
         outbound_chars=outbound_chars,
         source_total_chars=source_total_chars,
+        coverage_mode=coverage_mode,
+        coverage_chars=coverage_chars,
         coverage=coverage,
         signature=signature,
     )
@@ -207,12 +265,18 @@ def validate_input(
     try:
         outbound_chars = len(canonical_payload)
         source_total_chars = safety_proof._source_total_chars
-        coverage = outbound_chars / source_total_chars
+        coverage_mode = safety_proof._coverage_mode
+        if not isinstance(coverage_mode, OutboundCoverageMode):
+            raise TypeError
+        coverage_chars = _coverage_chars(serialized, canonical_payload, coverage_mode)
+        coverage = coverage_chars / source_total_chars
         payload_digest = hashlib.sha256(canonical_payload.encode("utf-8")).digest()
         expected_signature = _sign_proof(
             payload_digest,
             outbound_chars,
             source_total_chars,
+            coverage_mode,
+            coverage_chars,
             coverage,
         )
         proof_valid = all(
@@ -226,6 +290,7 @@ def validate_input(
                     safety_proof._payload_digest,
                 ),
                 outbound_chars == safety_proof._outbound_chars,
+                coverage_chars == safety_proof._coverage_chars,
                 coverage == safety_proof._coverage,
                 hmac.compare_digest(
                     expected_signature,

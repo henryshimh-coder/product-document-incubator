@@ -46,6 +46,8 @@ from src.infrastructure.files.wiki_topic_metadata import (
 )
 from src.infrastructure.files.wiki_validator import WikiValidator
 from src.infrastructure.gateways._common import (
+    MAX_OUTBOUND_COVERAGE,
+    OutboundCoverageMode,
     create_outbound_safety_proof,
     new_workflow_task_id,
 )
@@ -129,6 +131,7 @@ class IngestArchivedSource:
         audit_started: datetime | None = None
         audit_source_ids: list[str] = []
         audit_outbound_chars = 0
+        audit_outbound_coverage = 0.0
         audit_authorized = False
         audit_redacted = False
         audit_invoked = False
@@ -182,16 +185,23 @@ class IngestArchivedSource:
                     separators=(",", ":"),
                 )
             )
+            audit_outbound_coverage = sum(
+                len(chunk["text"]) for chunk in workflow_inputs["source_chunks"]
+            ) / len(extracted.text)
+            if audit_outbound_coverage > MAX_OUTBOUND_COVERAGE:
+                raise DomainError(ErrorCode.OUTBOUND_COVERAGE_EXCEEDED)
             safety_proof = create_outbound_safety_proof(
                 WikiIngestWorkflowInput,
                 workflow_inputs,
                 security_level=source.security_level,
-                customer_names=(),
-                strategy_terms=(),
-                financial_terms=(),
-                leader_names=(),
-                unpublished_decisions=(),
+                customer_names=self.customer_names,
+                strategy_terms=self.strategy_terms,
+                financial_terms=self.financial_terms,
+                leader_names=self.leader_names,
+                unpublished_decisions=self.unpublished_decisions,
                 source_total_chars=len(extracted.text),
+                redaction_mode=RedactionMode.OWNER_CONFIRMED,
+                coverage_mode=OutboundCoverageMode.WIKI_SOURCE_CHUNKS,
             )
             audit_redacted = True
             wiki_authorization = self.context.authorize(
@@ -219,6 +229,7 @@ class IngestArchivedSource:
                     source_ids=audit_source_ids,
                     started=audit_started or self.now(),
                     outbound_chars=audit_outbound_chars,
+                    outbound_coverage=audit_outbound_coverage,
                     authorized=audit_authorized,
                     redacted=audit_redacted,
                     invoked=audit_invoked,
@@ -234,6 +245,7 @@ class IngestArchivedSource:
                 source_ids=audit_source_ids,
                 started=audit_started or self.now(),
                 outbound_chars=audit_outbound_chars,
+                outbound_coverage=audit_outbound_coverage,
                 authorized=audit_authorized,
                 redacted=audit_redacted,
                 invoked=audit_invoked,
@@ -285,6 +297,7 @@ class IngestArchivedSource:
                     source_ids=audit_source_ids or [source.id],
                     started=audit_started,
                     outbound_chars=audit_outbound_chars,
+                    outbound_coverage=audit_outbound_coverage,
                     authorized=audit_authorized,
                     redacted=audit_redacted,
                     invoked=audit_invoked,
@@ -981,6 +994,7 @@ class IngestArchivedSource:
         source_ids: list[str],
         started: datetime,
         outbound_chars: int,
+        outbound_coverage: float,
         authorized: bool,
         redacted: bool,
         invoked: bool,
@@ -1004,7 +1018,7 @@ class IngestArchivedSource:
                     authorized=authorized,
                     redacted=redacted,
                     outbound_chars=outbound_chars,
-                    outbound_coverage=(1.0 if outbound_chars else 0.0),
+                    outbound_coverage=outbound_coverage,
                     result_mode=(CallResultMode.REALTIME if invoked else CallResultMode.LOCAL_ONLY),
                     status=status,  # type: ignore[arg-type]
                     started_at=started,
