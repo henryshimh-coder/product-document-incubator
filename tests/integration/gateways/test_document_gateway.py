@@ -12,10 +12,33 @@ class FakeDocumentClient:
     def __init__(self, result: dict[str, Any]) -> None:
         self.result = result
         self.last_inputs: dict[str, Any] | None = None
+        self.last_run_lookup: tuple[str, str, int] | None = None
 
-    def run(self, *, inputs: dict[str, Any], user: str, timeout_seconds: int) -> dict[str, Any]:
+    def run(
+        self,
+        *,
+        inputs: dict[str, Any],
+        user: str,
+        timeout_seconds: int,
+        on_started=None,
+    ) -> dict[str, Any]:
         self.last_inputs = deepcopy(inputs)
+        if on_started is not None:
+            on_started("TASK-DOCUMENT-001", "WF-DOCUMENT-001")
         return {"workflow_run_id": "WF-DOCUMENT-001", "result": deepcopy(self.result)}
+
+    def get_run(
+        self,
+        *,
+        workflow_run_id: str,
+        user: str,
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        self.last_run_lookup = (workflow_run_id, user, timeout_seconds)
+        return {
+            "workflow_run_id": workflow_run_id,
+            "status": "running",
+        }
 
 
 def _draft_input() -> dict[str, Any]:
@@ -160,3 +183,33 @@ def test_suggestion_input_contains_only_outlines() -> None:
     assert client.last_inputs["reference_projects"] == [
         {"project_id": "PROJECT_B", "headings": ["产品概述", "业务流程"]}
     ]
+
+
+def test_document_gateway_forwards_workflow_started_callback() -> None:
+    from src.infrastructure.gateways.document_gateway import DocumentWorkflowGateway
+
+    client = FakeDocumentClient(_draft_output())
+    gateway = DocumentWorkflowGateway(client, timeout_seconds=300)
+    started: list[tuple[str, str]] = []
+
+    gateway.generate_draft(
+        _draft_input(),
+        on_started=lambda task_id, run_id: started.append((task_id, run_id)),
+    )
+
+    assert started == [("TASK-DOCUMENT-001", "WF-DOCUMENT-001")]
+
+
+def test_document_gateway_queries_existing_workflow_run_with_configured_timeout() -> None:
+    from src.infrastructure.gateways.document_gateway import DocumentWorkflowGateway
+
+    client = FakeDocumentClient(_draft_output())
+    gateway = DocumentWorkflowGateway(client, timeout_seconds=300)
+
+    result = gateway.get_run(workflow_run_id="WF-DOCUMENT-001", user="PROJECT_A")
+
+    assert result == {
+        "workflow_run_id": "WF-DOCUMENT-001",
+        "status": "running",
+    }
+    assert client.last_run_lookup == ("WF-DOCUMENT-001", "PROJECT_A", 300)

@@ -10,7 +10,7 @@ from src.domain.errors import DomainError, ErrorCode
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 DEFAULT_SOURCE_ARCHIVE_ROOT = Path("data/source_archive")
-_SAFE_FILENAME = re.compile(r"^[A-Za-z0-9\u4e00-\u9fff._-]+$")
+_FORBIDDEN_FILENAME_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 _SAFE_BUSINESS_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -27,13 +27,15 @@ def resolve_source_archive_root() -> Path:
 
 
 def sanitize_filename(filename: str) -> str:
-    """Return an archive-safe filename, rejecting every path-like input."""
+    """Return an archive-safe filename while allowing ordinary document names."""
     if (
         not filename
+        or not filename.strip()
+        or filename in {".", ".."}
         or Path(filename).name != filename
         or "/" in filename
         or "\\" in filename
-        or not _SAFE_FILENAME.fullmatch(filename)
+        or _FORBIDDEN_FILENAME_CHARS.search(filename) is not None
         or Path(filename).suffix.lower() not in ALLOWED_EXTENSIONS
     ):
         raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, detail="UNSAFE_FILENAME")

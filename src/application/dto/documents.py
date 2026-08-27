@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +25,21 @@ class IncubationView(BaseModel):
 
     draft: DocumentDraft
     markdown: str
+
+
+class DocumentIncubationPreparation(BaseModel):
+    """Stable local context shared by live and recovered workflow completion."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    project_id: str = Field(min_length=1)
+    source_ids: list[str] = Field(min_length=1, max_length=200)
+    version_id: str = Field(min_length=1)
+    parent_version_id: str | None
+    inputs: dict[str, Any]
+    started_at: datetime
+    outbound_chars: int = Field(ge=0)
+    outbound_coverage: float = Field(ge=0, le=1)
 
 
 class PublishDocumentDraftInput(BaseModel):

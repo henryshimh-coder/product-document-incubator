@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
+
+
+def test_repository_config_allows_slow_document_workflows():
+    """Catches the deployed document workflow reverting to the former 90s limit."""
+    container = importlib.import_module("src.application.container")
+    repository_root = Path(__file__).resolve().parents[2]
+
+    settings = container.load_settings(
+        repository_root / "config" / "app.yaml",
+        repository_root / "config" / "schema.yaml",
+    )
+
+    assert settings.timeouts.document_seconds == 300
 
 
 def test_app_settings_defaults_lint_contract_for_non_lint_construction():

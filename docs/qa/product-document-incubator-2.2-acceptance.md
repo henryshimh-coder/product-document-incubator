@@ -44,3 +44,37 @@
 ### AC-25 不可写父目录人工复核
 
 在 macOS/Linux 创建空目录后执行 `chmod 500 <parent>`，在项目中心选择该目录并创建新项目；应显示 `PROJECT_ROOT_NOT_WRITABLE`，且 `<parent>/<项目ID>` 与中央 DB `projects` 表均无新增。复核后执行 `chmod 700 <parent>` 恢复权限。Windows 使用无写入权限的测试目录执行同一操作。该项受执行账户权限影响，保留为可重复的人工证据，不以平台相关的自动化结果替代。
+
+## 2.3 候选文档异步生成补充验收
+
+验收日期：2026-08-26。该补充验收只覆盖候选产品文档生成链路，不改变上方 2.2 历史
+验收结果和 Owner 已接受的全仓覆盖率、历史 Ruff 格式债务。
+
+| 补充 AC | 验收标准 | 证据 | 结果 |
+| --- | --- | --- | --- |
+| AC-30 | Dify 文档工作流使用流式响应，并在 `workflow_started` 后持久化 `task_id`、`workflow_run_id` | `test_dify_client.py`、`test_document_gateway.py` | PASS |
+| AC-31 | SQLite 记录 `PENDING/RUNNING/SUCCEEDED/FAILED`，同一项目仅允许一个活动任务 | `test_document_incubation_job_repository.py`、`test_manage_document_incubation_job.py` | PASS |
+| AC-32 | 点击生成后页面显示处理中并禁用按钮，刷新不会重复调用 Dify | `test_incubate_page.py` 与本地浏览器复核 | PASS |
+| AC-33 | Dify 成功后只保存一份候选草稿，重复刷新返回同一 `draft_id` | `test_manage_document_incubation_job.py`、`test_incubate_page.py` | PASS |
+| AC-34 | 应用重启后可使用 `workflow_run_id` 查询 Dify 并恢复终态 | `test_manage_document_incubation_job.py` | PASS |
+| AC-35 | 候选文档总等待上限为 300 秒，页面请求不被长调用阻塞 | `config/app.yaml`、`test_dify_client.py` | PASS |
+| AC-36 | 失败页面只展示安全错误码，不泄露响应、密钥或堆栈 | `test_incubate_page.py` | PASS |
+
+人工复核时，在 Owner 项目中选择已 Ingest Wiki 并点击生成；1 秒内应出现处理中提示，刷新
+仍显示同一任务且按钮不可重复点击。Dify 完成后刷新应展示唯一候选文档。应用重启场景以
+SQLite 中保存的 `workflow_run_id` 和 Dify 日志中的运行 ID 一致作为恢复证据。具体操作见
+`docs/runbook/dify-document-workflow.md`。
+
+### 2.3 最终回归记录
+
+- 聚焦回归：58 项通过。
+- 全量回归：1184 项通过。
+- 本次涉及的 19 个 Python 文件通过 Ruff 检查和格式检查；`src/`、`tests/` 编译检查通过，
+  `git diff --check` 通过。
+- 本地 `http://127.0.0.1:8512/incubate` 浏览器烟测确认页面可加载、未选择 Wiki 时生成按钮
+  禁用。为避免重复向 Dify 外发项目 Wiki 和产生额外模型调用，本轮没有再次触发真实生成；
+  处理中、刷新恢复、重启恢复与幂等保存由上述集成/E2E 回归覆盖，并结合 Owner 此前提供的
+  Dify 成功运行记录复核。
+- 当前基线 HEAD 为 `69f7248`；本轮变更尚未提交，最终代码 SHA 待 Owner 授权提交后产生。
+- 2.2 已接受的全仓覆盖率 92%（低于 94% 目标）及历史 Ruff/格式债务继续保留，不属于本次
+  候选文档异步生成改造的新增回归。

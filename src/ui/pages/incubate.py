@@ -6,6 +6,7 @@ import streamlit as st
 
 from src.application.container import AppContainer
 from src.application.dto.documents import IncubateDocumentInput, PublishDocumentDraftInput
+from src.domain.enums import DocumentIncubationJobStatus
 from src.domain.errors import AppError
 from src.ui.components.change_diff import render_change_diff
 
@@ -13,11 +14,28 @@ from src.ui.components.change_diff import render_change_diff
 def render(container: AppContainer) -> None:
     project_id = container.require_project_id()
     service = container.incubate_document
+    jobs = container.document_incubation_jobs
     st.title("文档孵化")
     st.caption("基于已 Ingest 的 Wiki 页面生成候选产品文档；候选不会直接覆盖当前生效方案。")
-    if service is None:
+    if service is None or jobs is None:
         st.info("文档工作流尚未配置。请设置 DIFY_BASE_URL 与 DIFY_DOCUMENT_API_KEY 后启用。")
         return
+    current_job = jobs.get_current(project_id)
+    job_is_active = current_job is not None and current_job.status in {
+        DocumentIncubationJobStatus.PENDING,
+        DocumentIncubationJobStatus.RUNNING,
+    }
+    if job_is_active:
+        st.info("候选产品文档生成中，请稍候。刷新页面可恢复进度，不会重复生成。")
+    elif current_job is not None and current_job.status is DocumentIncubationJobStatus.SUCCEEDED:
+        result = jobs.get_result(current_job.id)
+        draft_id = result.draft.id if result is not None else current_job.draft_id
+        if draft_id is not None:
+            st.session_state["incubate_selected_draft"] = draft_id
+        st.success("候选产品文档已生成，可在下方查看和编辑。")
+    elif current_job is not None and current_job.status is DocumentIncubationJobStatus.FAILED:
+        st.error(f"候选文档生成失败：{current_job.error_code}")
+        st.caption("请重新选择材料后重试；刷新页面不会丢失失败状态。")
     sources = service.list_sources(project_id)
     if not sources:
         st.warning("请先在“原始材料”完成至少一份材料的 Ingest。")
@@ -40,10 +58,13 @@ def render(container: AppContainer) -> None:
         if gap_count:
             st.info(f"所选 Wiki 中有 {gap_count} 项证据缺口。")
     if st.button(
-        "生成候选产品文档", type="primary", disabled=not selected, key="incubate_generate"
+        "生成候选产品文档",
+        type="primary",
+        disabled=not selected or job_is_active,
+        key="incubate_generate",
     ):
         try:
-            result = service.execute(
+            jobs.start(
                 IncubateDocumentInput(
                     project_id=project_id,
                     source_ids=selected,
@@ -51,10 +72,12 @@ def render(container: AppContainer) -> None:
                 )
             )
         except (AppError, OSError, ValueError, KeyError) as error:
-            st.error(f"候选文档生成失败：{error}")
+            error_code = (
+                error.code if isinstance(error, AppError) else "DOCUMENT_INCUBATION_START_FAILED"
+            )
+            st.error(f"候选文档生成失败：{error_code}")
         else:
-            st.session_state["incubate_selected_draft"] = result.draft.id
-            st.success(f"已生成候选版本 {result.draft.version_id}。")
+            st.rerun()
     _render_drafts(container)
 
 

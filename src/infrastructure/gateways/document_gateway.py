@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from pydantic import ValidationError
@@ -26,7 +26,12 @@ class DocumentWorkflowGateway:
         self.client = client
         self.timeout_seconds = timeout_seconds
 
-    def generate_draft(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
+    def generate_draft(
+        self,
+        inputs: Mapping[str, Any],
+        *,
+        on_started: Callable[[str, str], None] | None = None,
+    ) -> dict[str, Any]:
         try:
             validated = DocumentDraftWorkflowInput.model_validate(inputs)
         except ValidationError as error:
@@ -41,6 +46,7 @@ class DocumentWorkflowGateway:
             serialized,
             serialized["project_id"],
             self.timeout_seconds,
+            on_started=on_started or (lambda _task_id, _run_id: None),
         )
         try:
             output = DocumentDraftWorkflowOutput.model_validate(raw_output)
@@ -63,6 +69,13 @@ class DocumentWorkflowGateway:
             if citation.locator != fragment["locator"] or citation.excerpt != fragment["excerpt"]:
                 raise OutputValidationError("DOCUMENT_OUTPUT_INVALID")
         return {"workflow_run_id": workflow_run_id, "result": output.model_dump(mode="json")}
+
+    def get_run(self, *, workflow_run_id: str, user: str) -> dict[str, Any]:
+        return self.client.get_run(
+            workflow_run_id=workflow_run_id,
+            user=user,
+            timeout_seconds=self.timeout_seconds,
+        )
 
     def generate_suggestions(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
         if "document_markdown" in inputs:

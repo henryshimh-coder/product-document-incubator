@@ -231,6 +231,22 @@ CREATE TABLE IF NOT EXISTS structure_suggestions (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS document_incubation_jobs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id),
+    source_ids_json TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','running','succeeded','failed')),
+    dify_task_id TEXT,
+    workflow_run_id TEXT,
+    draft_id TEXT REFERENCES document_drafts(id),
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS event_logs (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id),
@@ -259,6 +275,11 @@ CREATE INDEX IF NOT EXISTS idx_document_drafts_project_created
     ON document_drafts(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_structure_suggestions_project_status
     ON structure_suggestions(project_id, status, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_incubation_jobs_project_active
+    ON document_incubation_jobs(project_id)
+    WHERE status IN ('pending','running');
+CREATE INDEX IF NOT EXISTS idx_document_incubation_jobs_project_created
+    ON document_incubation_jobs(project_id, created_at DESC, id DESC);
 """
 
 

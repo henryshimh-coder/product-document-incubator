@@ -5,7 +5,7 @@ import hmac
 import json
 import math
 import secrets
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from enum import StrEnum
 from typing import Any, TypeVar
 from uuid import uuid4
@@ -312,12 +312,17 @@ def invoke(
     inputs: Mapping[str, Any],
     user: str | None,
     timeout_seconds: int,
+    *,
+    on_started: Callable[[str, str], None] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    response = client.run(
-        inputs=dict(inputs),
-        user=user or str(inputs.get("project_id", "workflow")),
-        timeout_seconds=timeout_seconds,
-    )
+    run_arguments = {
+        "inputs": dict(inputs),
+        "user": user or str(inputs.get("project_id", "workflow")),
+        "timeout_seconds": timeout_seconds,
+    }
+    if on_started is not None:
+        run_arguments["on_started"] = on_started
+    response = client.run(**run_arguments)
     workflow_run_id = response.get("workflow_run_id")
     result = response.get("result")
     if not isinstance(workflow_run_id, str) or not workflow_run_id.strip():

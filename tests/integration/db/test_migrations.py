@@ -114,6 +114,107 @@ def test_migrate_adds_wiki_ingest_fields_and_runs_table(tmp_path: Path) -> None:
     assert "wiki_ingest_runs" in table_names
 
 
+def test_migrate_adds_document_incubation_jobs_with_lifecycle_columns(
+    tmp_path: Path,
+) -> None:
+    """Catches application restart losing the candidate-generation task identity."""
+    db_path = tmp_path / "product_intelligence.db"
+
+    migrate(db_path)
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(document_incubation_jobs)")
+        }
+    assert columns == {
+        "id",
+        "project_id",
+        "source_ids_json",
+        "requested_by",
+        "status",
+        "dify_task_id",
+        "workflow_run_id",
+        "draft_id",
+        "error_code",
+        "created_at",
+        "started_at",
+        "updated_at",
+        "finished_at",
+    }
+
+
+def test_document_incubation_job_schema_rejects_invalid_status_and_second_active_job(
+    tmp_path: Path,
+) -> None:
+    """Catches invalid or duplicate active tasks bypassing the SQLite source of truth."""
+    db_path = tmp_path / "product_intelligence.db"
+    migrate(db_path)
+    insert_legacy_project(db_path, "PROJECT_A")
+    values = (
+        "PROJECT_A",
+        '["SRC-001"]',
+        "Henry",
+        None,
+        None,
+        None,
+        None,
+        "2026-08-26T01:00:00+00:00",
+        None,
+        "2026-08-26T01:00:00+00:00",
+        None,
+    )
+
+    with sqlite3.connect(db_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO document_incubation_jobs (
+                    id, project_id, source_ids_json, requested_by, status,
+                    dify_task_id, workflow_run_id, draft_id, error_code,
+                    created_at, started_at, updated_at, finished_at
+                ) VALUES (?, ?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("INCUBATION-INVALID", *values),
+            )
+
+        connection.execute(
+            """
+            INSERT INTO document_incubation_jobs (
+                id, project_id, source_ids_json, requested_by, status,
+                dify_task_id, workflow_run_id, draft_id, error_code,
+                created_at, started_at, updated_at, finished_at
+            ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("INCUBATION-ACTIVE-1", *values),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO document_incubation_jobs (
+                    id, project_id, source_ids_json, requested_by, status,
+                    dify_task_id, workflow_run_id, draft_id, error_code,
+                    created_at, started_at, updated_at, finished_at
+                ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("INCUBATION-ACTIVE-2", *values),
+            )
+
+        connection.execute(
+            "UPDATE document_incubation_jobs SET status = 'failed' WHERE id = ?",
+            ("INCUBATION-ACTIVE-1",),
+        )
+        connection.execute(
+            """
+            INSERT INTO document_incubation_jobs (
+                id, project_id, source_ids_json, requested_by, status,
+                dify_task_id, workflow_run_id, draft_id, error_code,
+                created_at, started_at, updated_at, finished_at
+            ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("INCUBATION-ACTIVE-2", *values),
+        )
+
+
 def test_migrate_adds_binding_version_to_existing_wiki_transaction_bindings(tmp_path: Path) -> None:
     """Protects legacy 2.2 rows from becoming unreadable after trusted binding upgrades."""
     db_path = tmp_path / "product_intelligence.db"

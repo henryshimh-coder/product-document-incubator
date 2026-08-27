@@ -69,7 +69,11 @@ def _render_materials_page(library_root: str, source_path: str) -> None:
 
 
 def _render_materials_ingest_page(
-    library_root: str, status: str, security_level: str | None = None
+    library_root: str,
+    status: str,
+    security_level: str | None = None,
+    source_page_path: str | None = None,
+    source_page_content: str | None = None,
 ) -> None:
     import json
     from pathlib import Path as path_type
@@ -117,13 +121,16 @@ def _render_materials_ingest_page(
     root = path_type(library_root)
     paths = ProjectPaths.for_project(root, "PROJECT_A")
     paths.system_root.mkdir(parents=True, exist_ok=True)
+    stored_source_page_path = source_page_path or "wiki/sources/SRC-PROJECT-A-001-material.md"
+    if source_page_content is not None:
+        wiki_file = paths.project_root / stored_source_page_path
+        wiki_file.parent.mkdir(parents=True, exist_ok=True)
+        wiki_file.write_text(source_page_content, encoding="utf-8")
     effective_security_level = security_level or (
         "L4" if status == "local_review_required" else "L2"
     )
     if status == "ingest_failed" and effective_security_level in {"L3", "L4"}:
-        (paths.wiki_root / "drafts" / "local-ingest" / "SRC-PROJECT-A-001").mkdir(
-            parents=True
-        )
+        (paths.wiki_root / "drafts" / "local-ingest" / "SRC-PROJECT-A-001").mkdir(parents=True)
     (paths.system_root / "source-index.json").write_text(
         json.dumps(
             {
@@ -143,9 +150,7 @@ def _render_materials_ingest_page(
                             "MODEL_TIMEOUT" if status == "ingest_failed" else None
                         ),
                         "source_page_path": (
-                            "wiki/sources/SRC-PROJECT-A-001-material.md"
-                            if status == "ingested"
-                            else None
+                            stored_source_page_path if status == "ingested" else None
                         ),
                     }
                 ],
@@ -430,6 +435,58 @@ def test_authorized_archived_material_shows_owner_outbound_notice(tmp_path) -> N
     assert page.button(key="material_ingest_SRC-PROJECT-A-001")
 
 
+def test_materials_page_shows_a_safe_message_for_domain_upload_rejection(tmp_path) -> None:
+    """Catches a rejected upload leaking a Streamlit technical stack trace to an Owner."""
+
+    def render_page(root_path: str) -> None:
+        from pathlib import Path
+
+        from src.application.container import AppContainer, AppSettings
+        from src.application.project_context import ProjectContext
+        from src.domain.errors import DomainError, ErrorCode
+        from src.infrastructure.files.project_library import ProjectPaths
+        from src.ui.pages.materials import render
+
+        class RejectingArchiveService:
+            def execute(self, command):
+                raise DomainError(ErrorCode.FILE_TYPE_NOT_ALLOWED, "UNSAFE_FILENAME")
+
+        root = Path(root_path)
+        paths = ProjectPaths.for_project(root, "PROJECT_A")
+        paths.system_root.mkdir(parents=True, exist_ok=True)
+        render(
+            AppContainer(
+                settings=AppSettings(
+                    name="产品文档孵化器",
+                    project_id="LLD",
+                    default_query_scope="effective",
+                    max_upload_mb=20,
+                    accepted_extensions=("md",),
+                    demo_mode=True,
+                    schema_version="1.0",
+                ),
+                active_project=ProjectContext(
+                    "PROJECT_A", paths, root / ".incubator/product_incubator.db"
+                ),
+                archive_raw_source=RejectingArchiveService(),
+            )
+        )
+
+    page = AppTest.from_function(render_page, args=(str(tmp_path / "library"),)).run()
+    page.file_uploader(key="materials_upload").set_value(
+        ("需求.md", "# 需求".encode(), "text/markdown")
+    )
+    page.selectbox(key="materials_archive_mode").select("新材料")
+    page.selectbox(key="materials_type").select("产品需求")
+    page.selectbox(key="materials_authority").select("正式基线依据")
+    page.text_input(key="materials_version").set_value("v1.0")
+    page.run()
+    page.button(key="materials_archive").click().run()
+
+    assert not page.exception
+    assert any("不支持该文件格式" in item.value for item in page.error)
+
+
 def test_material_page_runs_ingest_after_owner_click(tmp_path) -> None:
     """Catches the pending action failing to invoke the application service."""
     page = AppTest.from_function(
@@ -442,7 +499,8 @@ def test_material_page_runs_ingest_after_owner_click(tmp_path) -> None:
     button.click().run()
 
     assert page.success
-    assert any("已 Ingest" in item.value for item in page.markdown)
+    assert any("已 Ingest" in item.value for item in page.success)
+    assert page.button(key="material_view_wiki_SRC-PROJECT-A-001")
 
 
 def test_material_page_confirms_l4_local_draft_without_external_ingest(tmp_path) -> None:
@@ -532,6 +590,39 @@ def test_material_page_renders_wiki_ingest_lifecycle(
     assert expected_text in rendered
     if button_key is not None:
         assert page.button(key=button_key).disabled is disabled
+
+
+def test_material_page_displays_generated_wiki_result_in_place(tmp_path) -> None:
+    """Catches an ingested Wiki file being opened as an unserved browser URL."""
+    page = AppTest.from_function(
+        _render_materials_ingest_page,
+        args=(
+            str(tmp_path / "library"),
+            "ingested",
+            None,
+            "wiki/sources/SRC-PROJECT-A-001-material.md",
+            "# 已生成 Wiki\n\n这是当前项目内可查看的 Wiki 结果。",
+        ),
+    ).run()
+
+    page.button(key="material_view_wiki_SRC-PROJECT-A-001").click().run()
+
+    assert not page.exception
+    assert any("当前项目内可查看的 Wiki 结果" in item.value for item in page.markdown)
+
+
+def test_material_page_rejects_wiki_result_path_outside_wiki_root(tmp_path) -> None:
+    """Catches a tampered source index making the page read another project file."""
+    page = AppTest.from_function(
+        _render_materials_ingest_page,
+        args=(str(tmp_path / "library"), "ingested", None, "raw/unsafe.md"),
+    ).run()
+
+    page.button(key="material_view_wiki_SRC-PROJECT-A-001").click().run()
+
+    assert not page.exception
+    assert any("Wiki 结果路径无效" in item.value for item in page.error)
+
 
 def test_materials_manager_groups_versions_and_keeps_newest_outside_history(tmp_path) -> None:
     """Catches a flat archive list obscuring series and current-version precedence."""

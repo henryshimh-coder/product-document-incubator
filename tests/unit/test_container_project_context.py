@@ -108,3 +108,5 @@ timeouts:
     assert container.require_project_id() == "PROJECT_A"
     assert container.active_project is not None
     assert container.active_project.paths.project_root == (external_parent / "PROJECT_A").resolve()
+    assert container.incubate_document is not None
+    assert container.document_incubation_jobs is not None

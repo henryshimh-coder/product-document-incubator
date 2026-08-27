@@ -5,15 +5,21 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 
-def _render_incubate_page(library_root: str) -> None:
+def _render_incubate_page(library_root: str, job_mode: str = "idle_then_running") -> None:
     import hashlib
     from datetime import UTC, datetime
     from pathlib import Path
 
     from src.application.container import AppContainer, AppSettings
+    from src.application.dto.documents import IncubateDocumentInput
     from src.application.project_context import ProjectContext
     from src.application.use_cases.incubate_document import IncubateDocument
-    from src.domain.enums import AuthorityLevel, SecurityLevel
+    from src.domain.enums import (
+        AuthorityLevel,
+        DocumentIncubationJobStatus,
+        SecurityLevel,
+    )
+    from src.domain.incubator import DocumentIncubationJob
     from src.domain.models import Project, SourceRecord
     from src.infrastructure.db.migrations import migrate
     from src.infrastructure.db.repositories import (
@@ -28,7 +34,9 @@ def _render_incubate_page(library_root: str) -> None:
     from src.ui.pages.incubate import render
 
     class Gateway:
-        def generate_draft(self, inputs):
+        def generate_draft(self, inputs, *, on_started=None):
+            if on_started is not None:
+                on_started("TASK-DOCUMENT-001", "WF-UI")
             page = inputs["wiki_pages"][0]
             return {
                 "workflow_run_id": "WF-UI",
@@ -134,6 +142,71 @@ def _render_incubate_page(library_root: str) -> None:
         model_call_logger=ModelCallLogger(db_path),
         now=lambda: now,
     )
+    drafts = service.list_drafts("PROJECT_A")
+    if job_mode == "succeeded" and not drafts:
+        service.execute(
+            IncubateDocumentInput(
+                project_id="PROJECT_A",
+                source_ids=["SRC-001"],
+                requested_by="Owner",
+            )
+        )
+        drafts = service.list_drafts("PROJECT_A")
+
+    state_path = root / "fake-incubation-state.txt"
+    count_path = root / "fake-incubation-start-count.txt"
+
+    def make_job(status: DocumentIncubationJobStatus) -> DocumentIncubationJob:
+        lifecycle = {}
+        if status in {
+            DocumentIncubationJobStatus.RUNNING,
+            DocumentIncubationJobStatus.SUCCEEDED,
+        }:
+            lifecycle.update(
+                started_at=now,
+                dify_task_id="TASK-DOCUMENT-001",
+                workflow_run_id="WF-UI",
+            )
+        if status is DocumentIncubationJobStatus.SUCCEEDED:
+            lifecycle.update(draft_id=drafts[0].id, finished_at=now)
+        if status is DocumentIncubationJobStatus.FAILED:
+            lifecycle.update(
+                error_code="DOCUMENT_INCUBATION_WORKFLOW_FAILED",
+                finished_at=now,
+            )
+        return DocumentIncubationJob(
+            id="JOB-UI-001",
+            project_id="PROJECT_A",
+            source_ids=["SRC-001"],
+            requested_by="Owner",
+            status=status,
+            created_at=now,
+            updated_at=now,
+            **lifecycle,
+        )
+
+    class JobCoordinator:
+        def start(self, command):
+            del command
+            previous = int(count_path.read_text(encoding="utf-8")) if count_path.is_file() else 0
+            count_path.write_text(str(previous + 1), encoding="utf-8")
+            state_path.write_text("running", encoding="utf-8")
+            return make_job(DocumentIncubationJobStatus.RUNNING)
+
+        def get_current(self, project_id):
+            assert project_id == "PROJECT_A"
+            if job_mode == "running" or state_path.is_file():
+                return make_job(DocumentIncubationJobStatus.RUNNING)
+            if job_mode == "succeeded":
+                return make_job(DocumentIncubationJobStatus.SUCCEEDED)
+            if job_mode == "failed":
+                return make_job(DocumentIncubationJobStatus.FAILED)
+            return None
+
+        def get_result(self, job_id):
+            assert job_id == "JOB-UI-001"
+            return None
+
     render(
         AppContainer(
             settings=AppSettings(
@@ -147,18 +220,61 @@ def _render_incubate_page(library_root: str) -> None:
             ),
             active_project=ProjectContext("PROJECT_A", paths, db_path),
             incubate_document=service,
+            document_incubation_jobs=JobCoordinator(),
         )
     )
 
 
-def test_incubate_page_generates_an_editable_candidate(tmp_path: Path) -> None:
-    page = AppTest.from_function(_render_incubate_page, args=(str(tmp_path / "library"),)).run()
+def test_incubate_page_starts_once_and_shows_running_state(tmp_path: Path) -> None:
+    root = tmp_path / "library"
+    page = AppTest.from_function(_render_incubate_page, args=(str(root),)).run()
 
     page.multiselect(key="incubate_source_ids").select("SRC-001")
     page.button(key="incubate_generate").click().run()
 
     assert not page.exception
-    assert "已生成候选版本" in "\n".join(item.value for item in page.success)
+    assert "候选产品文档生成中" in "\n".join(item.value for item in page.info)
+    assert page.button(key="incubate_generate").disabled is True
+    assert (root / "fake-incubation-start-count.txt").read_text(encoding="utf-8") == "1"
+
+    page.run()
+
+    assert (root / "fake-incubation-start-count.txt").read_text(encoding="utf-8") == "1"
+
+
+def test_incubate_page_recovers_running_job_after_refresh(tmp_path: Path) -> None:
+    page = AppTest.from_function(
+        _render_incubate_page,
+        args=(str(tmp_path / "library"), "running"),
+    ).run()
+
+    assert not page.exception
+    assert "候选产品文档生成中" in "\n".join(item.value for item in page.info)
+    assert page.button(key="incubate_generate").disabled is True
+
+
+def test_incubate_page_recovers_succeeded_job_and_shows_candidate(tmp_path: Path) -> None:
+    page = AppTest.from_function(
+        _render_incubate_page,
+        args=(str(tmp_path / "library"), "succeeded"),
+    ).run()
+
+    assert not page.exception
+    assert "候选产品文档已生成" in "\n".join(item.value for item in page.success)
     assert page.text_area(
         key=next(item.key for item in page.text_area if item.key.startswith("draft_edit_"))
     )
+
+
+def test_incubate_page_failed_job_shows_safe_code_and_allows_retry(tmp_path: Path) -> None:
+    page = AppTest.from_function(
+        _render_incubate_page,
+        args=(str(tmp_path / "library"), "failed"),
+    ).run()
+
+    assert not page.exception
+    assert "DOCUMENT_INCUBATION_WORKFLOW_FAILED" in "\n".join(item.value for item in page.error)
+
+    page.multiselect(key="incubate_source_ids").select("SRC-001").run()
+
+    assert page.button(key="incubate_generate").disabled is False

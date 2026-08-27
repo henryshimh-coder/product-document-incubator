@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -23,6 +23,7 @@ from src.application.dto.projects import (
 from src.domain.enums import ProjectRootStatus
 from src.domain.incubator import (
     DocumentDraft,
+    DocumentIncubationJob,
     IncubatorSettings,
     ProjectSummary,
     StructureSuggestion,
@@ -101,14 +102,77 @@ class DocumentDraftRepository(Protocol):
     def list_for_project(self, project_id: str) -> list[DocumentDraft]: ...
 
 
+class DocumentIncubationJobRepository(Protocol):
+    def create(self, job: DocumentIncubationJob) -> None: ...
+
+    def get(self, job_id: str) -> DocumentIncubationJob: ...
+
+    def get_active(self, project_id: str) -> DocumentIncubationJob | None: ...
+
+    def get_latest(self, project_id: str) -> DocumentIncubationJob | None: ...
+
+    def mark_started(
+        self,
+        job_id: str,
+        *,
+        dify_task_id: str,
+        workflow_run_id: str,
+        started_at: datetime,
+    ) -> DocumentIncubationJob: ...
+
+    def mark_succeeded(
+        self,
+        job_id: str,
+        *,
+        draft_id: str,
+        finished_at: datetime,
+    ) -> DocumentIncubationJob: ...
+
+    def mark_failed(
+        self,
+        job_id: str,
+        *,
+        error_code: str,
+        finished_at: datetime,
+    ) -> DocumentIncubationJob: ...
+
+
 class DocumentIncubation(Protocol):
-    def execute(self, command: IncubateDocumentInput) -> IncubationView: ...
+    def execute(
+        self,
+        command: IncubateDocumentInput,
+        *,
+        on_started: Callable[[str, str], None] | None = None,
+    ) -> IncubationView: ...
+
+    def complete_from_workflow(
+        self,
+        command: IncubateDocumentInput,
+        workflow_response: Mapping[str, object],
+    ) -> IncubationView: ...
 
     def list_sources(self, project_id: str) -> list[dict[str, str]]: ...
 
     def list_drafts(self, project_id: str) -> list[DocumentDraft]: ...
 
     def save_draft(self, project_id: str, draft_id: str, markdown: str) -> DocumentDraft: ...
+
+
+class DocumentWorkflowRunReader(Protocol):
+    def get_run(
+        self,
+        *,
+        workflow_run_id: str,
+        user: str,
+    ) -> Mapping[str, object]: ...
+
+
+class DocumentIncubationJobManagement(Protocol):
+    def start(self, command: IncubateDocumentInput) -> DocumentIncubationJob: ...
+
+    def get_current(self, project_id: str) -> DocumentIncubationJob | None: ...
+
+    def get_result(self, job_id: str) -> IncubationView | None: ...
 
 
 class DocumentDraftPublisher(Protocol):

@@ -31,7 +31,7 @@ class WorkflowTimeouts(BaseModel):
     query_seconds: StrictInt = Field(gt=0, le=MAX_WORKFLOW_TIMEOUT_SECONDS)
     lint_seconds: StrictInt = Field(gt=0, le=MAX_WORKFLOW_TIMEOUT_SECONDS)
     # 2.0 文档工作流是增量能力；保持旧版本地配置可启动，但生产
-    # config/app.yaml 仍显式写入 90 秒，避免调用端使用隐式 HTTP 超时。
+    # config/app.yaml 显式写入经运行验证的超时值，避免调用端使用隐式 HTTP 超时。
     document_seconds: StrictInt = Field(default=90, gt=0, le=MAX_WORKFLOW_TIMEOUT_SECONDS)
 
 

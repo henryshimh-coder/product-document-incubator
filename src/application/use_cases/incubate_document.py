@@ -6,7 +6,11 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import uuid4
 
-from src.application.dto.documents import IncubateDocumentInput, IncubationView
+from src.application.dto.documents import (
+    DocumentIncubationPreparation,
+    IncubateDocumentInput,
+    IncubationView,
+)
 from src.application.dto.materials import CreateLocalDraftInput
 from src.application.ports.incubator import DocumentDraftRepository
 from src.application.ports.repositories import ProjectRepository, SourceRepository
@@ -24,7 +28,12 @@ from src.infrastructure.observability.model_call_logger import ModelCallLogger
 
 
 class DocumentWorkflow(Protocol):
-    def generate_draft(self, inputs: Mapping[str, Any]) -> dict[str, Any]: ...
+    def generate_draft(
+        self,
+        inputs: Mapping[str, Any],
+        *,
+        on_started: Callable[[str, str], None] | None = None,
+    ) -> dict[str, Any]: ...
 
 
 class AcceptedSuggestionReader(Protocol):
@@ -121,7 +130,12 @@ class IncubateDocument:
         )
         return updated
 
-    def execute(self, command: IncubateDocumentInput) -> IncubationView:
+    def execute(
+        self,
+        command: IncubateDocumentInput,
+        *,
+        on_started: Callable[[str, str], None] | None = None,
+    ) -> IncubationView:
         if command.project_id != self.paths.project_id:
             raise ValueError("incubation project_id does not match active project")
         project = self.projects.get(command.project_id)
@@ -136,6 +150,52 @@ class IncubateDocument:
                     requested_by=command.requested_by,
                 )
             )
+        preparation = self._prepare_external(command, project)
+        workflow_run_id: str | None = None
+
+        def capture_started(task_id: str, run_id: str) -> None:
+            nonlocal workflow_run_id
+            workflow_run_id = run_id
+            if on_started is not None:
+                on_started(task_id, run_id)
+
+        try:
+            if self.gateway is None:
+                raise ValueError("DOCUMENT_GATEWAY_NOT_CONFIGURED")
+            response = self.gateway.generate_draft(
+                preparation.inputs,
+                on_started=capture_started,
+            )
+        except BaseException as error:
+            self._record_prepared_call(
+                preparation,
+                status="failed",
+                workflow_run_id=workflow_run_id,
+                error_code=getattr(error, "code", "DOCUMENT_INCUBATION_FAILED"),
+            )
+            raise
+        return self._complete(preparation, response)
+
+    def complete_from_workflow(
+        self,
+        command: IncubateDocumentInput,
+        workflow_response: Mapping[str, Any],
+    ) -> IncubationView:
+        """Persist an already completed Dify run without starting another run."""
+        if command.project_id != self.paths.project_id:
+            raise ValueError("incubation project_id does not match active project")
+        project = self.projects.get(command.project_id)
+        sources = self._sources_for_command(project, command.source_ids)
+        if any(source.security_level.value in {"L3", "L4"} for source in sources):
+            raise DomainError(ErrorCode.EXTERNAL_CALL_DENIED, "DOCUMENT_LOCAL_ROUTE_REQUIRED")
+        preparation = self._prepare_external(command, project)
+        return self._complete(preparation, workflow_response)
+
+    def _prepare_external(
+        self,
+        command: IncubateDocumentInput,
+        project: Project,
+    ) -> DocumentIncubationPreparation:
         context = self.wiki_context.read_context(command.project_id, command.source_ids)
         now = self.now()
         existing = self.drafts.list_for_project(command.project_id)
@@ -160,67 +220,109 @@ class IncubateDocument:
             json.dumps(inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
         source_total_chars = sum(len(item["excerpt"]) for item in inputs["wiki_pages"])
-        started = self.now()
+        return DocumentIncubationPreparation(
+            project_id=command.project_id,
+            source_ids=list(command.source_ids),
+            version_id=version_id,
+            parent_version_id=parent_version_id,
+            inputs=inputs,
+            started_at=self.now(),
+            outbound_chars=outbound_chars,
+            outbound_coverage=min(1.0, outbound_chars / max(source_total_chars, 1)),
+        )
+
+    def _complete(
+        self,
+        preparation: DocumentIncubationPreparation,
+        workflow_response: Mapping[str, Any],
+    ) -> IncubationView:
+        workflow_run_id: str | None = None
         try:
-            if self.gateway is None:
-                raise ValueError("DOCUMENT_GATEWAY_NOT_CONFIGURED")
-            response = self.gateway.generate_draft(inputs)
-            result = response["result"]
+            workflow_run_id = self._workflow_run_id(workflow_response)
+            status = workflow_response.get("status")
+            if status is not None and status != "succeeded":
+                raise ValueError("DOCUMENT_WORKFLOW_NOT_SUCCEEDED")
+            result = workflow_response["result"]
+            if not isinstance(result, Mapping):
+                raise ValueError("DOCUMENT_WORKFLOW_RESULT_INVALID")
             markdown = validate_product_markdown(str(result["document_markdown"]))
             section_citations = [
                 DocumentSectionCitation.model_validate(item) for item in result["section_citations"]
             ]
+            self._validate_workflow_evidence(preparation.inputs, result, section_citations)
             self._validate_citation_headings(markdown, section_citations)
-            markdown_path, markdown_sha256 = self.store.write_draft(version_id, markdown)
+            markdown_path, markdown_sha256 = self.store.write_draft(
+                preparation.version_id, markdown
+            )
+            draft = DocumentDraft(
+                id=f"DRAFT-{uuid4().hex.upper()}",
+                project_id=preparation.project_id,
+                version_id=preparation.version_id,
+                parent_version_id=preparation.parent_version_id,
+                status=DocumentDraftStatus.CANDIDATE_DRAFT,
+                markdown_path=markdown_path,
+                markdown_sha256=markdown_sha256,
+                source_ids=list(preparation.source_ids),
+                section_citations=section_citations,
+                summary=str(result["summary"]),
+                missing_sections=list(result["missing_sections"]),
+                evidence_gaps=list(result["evidence_gaps"]),
+                created_at=preparation.started_at,
+                updated_at=preparation.started_at,
+            )
+            try:
+                self.drafts.add(draft)
+            except BaseException:
+                (self.paths.project_root / markdown_path).unlink(missing_ok=True)
+                raise
         except BaseException as error:
-            self._record_call(
-                project_id=command.project_id,
-                source_ids=list(command.source_ids),
-                version_id=parent_version_id or "INITIAL",
-                started=started,
+            self._record_prepared_call(
+                preparation,
                 status="failed",
-                workflow_run_id=None,
+                workflow_run_id=workflow_run_id,
                 error_code=getattr(error, "code", "DOCUMENT_INCUBATION_FAILED"),
-                outbound_chars=outbound_chars,
-                # 文档工作流的固定 Schema 与基线会使请求总字符大于材料
-                # 摘录本身；日志以 1.0 表示当前选择材料已被完全覆盖。
-                outbound_coverage=min(1.0, outbound_chars / max(source_total_chars, 1)),
             )
             raise
-        draft = DocumentDraft(
-            id=f"DRAFT-{uuid4().hex.upper()}",
-            project_id=command.project_id,
-            version_id=version_id,
-            parent_version_id=parent_version_id,
-            status=DocumentDraftStatus.CANDIDATE_DRAFT,
-            markdown_path=markdown_path,
-            markdown_sha256=markdown_sha256,
-            source_ids=list(command.source_ids),
-            section_citations=section_citations,
-            summary=result["summary"],
-            missing_sections=result["missing_sections"],
-            evidence_gaps=result["evidence_gaps"],
-            created_at=now,
-            updated_at=now,
+        self.store.append_log(
+            f"- {preparation.started_at.isoformat()} 生成候选产品文档 {preparation.version_id}。\n"
         )
-        try:
-            self.drafts.add(draft)
-        except BaseException:
-            (self.paths.project_root / markdown_path).unlink(missing_ok=True)
-            raise
-        self.store.append_log(f"- {now.isoformat()} 生成候选产品文档 {version_id}。\n")
-        self._record_call(
-            project_id=command.project_id,
-            source_ids=list(command.source_ids),
-            version_id=parent_version_id or "INITIAL",
-            started=started,
+        self._record_prepared_call(
+            preparation,
             status="succeeded",
-            workflow_run_id=str(response["workflow_run_id"]),
+            workflow_run_id=workflow_run_id,
             error_code=None,
-            outbound_chars=outbound_chars,
-            outbound_coverage=min(1.0, outbound_chars / max(source_total_chars, 1)),
         )
         return IncubationView(draft=draft, markdown=markdown)
+
+    @staticmethod
+    def _workflow_run_id(workflow_response: Mapping[str, Any]) -> str:
+        workflow_run_id = workflow_response.get("workflow_run_id")
+        if not isinstance(workflow_run_id, str) or not workflow_run_id.strip():
+            raise ValueError("DOCUMENT_WORKFLOW_RUN_ID_INVALID")
+        return workflow_run_id
+
+    @staticmethod
+    def _validate_workflow_evidence(
+        inputs: Mapping[str, Any],
+        result: Mapping[str, Any],
+        citations: list[DocumentSectionCitation],
+    ) -> None:
+        pages = inputs.get("wiki_pages")
+        if not isinstance(pages, list) or not pages:
+            raise ValueError("DOCUMENT_WORKFLOW_CONTEXT_INVALID")
+        by_fragment = {(str(page["source_id"]), str(page["chunk_id"])): page for page in pages}
+        allowed_source_ids = {source_id for source_id, _ in by_fragment}
+        output_source_ids = result.get("source_ids")
+        if not isinstance(output_source_ids, list) or not output_source_ids:
+            raise ValueError("DOCUMENT_WORKFLOW_SOURCE_IDS_INVALID")
+        if not set(output_source_ids) <= allowed_source_ids:
+            raise ValueError("DOCUMENT_WORKFLOW_SOURCE_IDS_INVALID")
+        for citation in citations:
+            page = by_fragment.get((citation.source_id, citation.chunk_id))
+            if page is None:
+                raise ValueError("DOCUMENT_WORKFLOW_CITATION_INVALID")
+            if citation.locator != page["locator"] or citation.excerpt != page["excerpt"]:
+                raise ValueError("DOCUMENT_WORKFLOW_CITATION_INVALID")
 
     def _sources_for_command(self, project: Project, source_ids: list[str]) -> list[SourceRecord]:
         if len(set(source_ids)) != len(source_ids):
@@ -322,4 +424,25 @@ class IncubateDocument:
                 elapsed_ms=max(0, int((finished - started).total_seconds() * 1000)),
                 error_code=error_code,
             )
+        )
+
+    def _record_prepared_call(
+        self,
+        preparation: DocumentIncubationPreparation,
+        *,
+        status: str,
+        workflow_run_id: str | None,
+        error_code: str | None,
+    ) -> None:
+        self._record_call(
+            project_id=preparation.project_id,
+            source_ids=list(preparation.source_ids),
+            version_id=preparation.parent_version_id or "INITIAL",
+            started=preparation.started_at,
+            status=status,
+            workflow_run_id=workflow_run_id,
+            error_code=error_code,
+            outbound_chars=preparation.outbound_chars,
+            # 固定 Schema 与基线会使请求大于材料摘录；1.0 表示材料已完全覆盖。
+            outbound_coverage=preparation.outbound_coverage,
         )

@@ -15,13 +15,14 @@ from src.domain.enums import (
     CallResultMode,
     ChangeReviewAction,
     ChangeStatus,
+    DocumentIncubationJobStatus,
     IssueStatus,
     KnowledgeStatus,
     ProjectRootStatus,
     StructureSuggestionStatus,
 )
 from src.domain.errors import DomainError, ErrorCode
-from src.domain.incubator import DocumentDraft, StructureSuggestion
+from src.domain.incubator import DocumentDraft, DocumentIncubationJob, StructureSuggestion
 from src.domain.models import (
     Baseline,
     ChangeRequest,
@@ -571,6 +572,261 @@ class SqliteDocumentDraftRepository:
         data["missing_sections"] = _json_loads(data.pop("missing_sections_json"))
         data["evidence_gaps"] = _json_loads(data.pop("evidence_gaps_json"))
         return DocumentDraft.model_validate(data)
+
+
+class SqliteDocumentIncubationJobRepository:
+    _STATE_CONFLICT = "DOCUMENT_INCUBATION_STATE_CONFLICT"
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+
+    def create(self, job: DocumentIncubationJob) -> None:
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO document_incubation_jobs (
+                    id, project_id, source_ids_json, requested_by, status,
+                    dify_task_id, workflow_run_id, draft_id, error_code,
+                    created_at, started_at, updated_at, finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._values(job),
+            )
+
+    def get(self, job_id: str) -> DocumentIncubationJob:
+        with connect(self.db_path) as connection:
+            row = _require(
+                connection.execute(
+                    "SELECT * FROM document_incubation_jobs WHERE id = ?", (job_id,)
+                ).fetchone(),
+                "document incubation job",
+                job_id,
+            )
+        return self._to_model(row)
+
+    def get_active(self, project_id: str) -> DocumentIncubationJob | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM document_incubation_jobs
+                WHERE project_id = ? AND status IN ('pending', 'running')
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (project_id,),
+            ).fetchone()
+        return None if row is None else self._to_model(row)
+
+    def get_latest(self, project_id: str) -> DocumentIncubationJob | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM document_incubation_jobs
+                WHERE project_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (project_id,),
+            ).fetchone()
+        return None if row is None else self._to_model(row)
+
+    def mark_started(
+        self,
+        job_id: str,
+        *,
+        dify_task_id: str,
+        workflow_run_id: str,
+        started_at: datetime,
+    ) -> DocumentIncubationJob:
+        started_at = _require_utc(started_at)
+        with connect(self.db_path) as connection:
+            current = self._get_from_connection(connection, job_id)
+            if current.status is DocumentIncubationJobStatus.RUNNING:
+                if (
+                    current.dify_task_id == dify_task_id
+                    and current.workflow_run_id == workflow_run_id
+                ):
+                    return current
+                raise ValueError(self._STATE_CONFLICT)
+            if current.status is not DocumentIncubationJobStatus.PENDING:
+                raise ValueError(self._STATE_CONFLICT)
+
+            candidate = self._transition_candidate(
+                current,
+                status=DocumentIncubationJobStatus.RUNNING,
+                dify_task_id=dify_task_id,
+                workflow_run_id=workflow_run_id,
+                started_at=started_at,
+                updated_at=started_at,
+            )
+            result = connection.execute(
+                """
+                UPDATE document_incubation_jobs
+                SET status = ?, dify_task_id = ?, workflow_run_id = ?,
+                    started_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (
+                    candidate.status.value,
+                    candidate.dify_task_id,
+                    candidate.workflow_run_id,
+                    candidate.started_at.isoformat(),
+                    candidate.updated_at.isoformat(),
+                    job_id,
+                ),
+            )
+            if result.rowcount != 1:
+                concurrent = self._get_from_connection(connection, job_id)
+                if (
+                    concurrent.status is DocumentIncubationJobStatus.RUNNING
+                    and concurrent.dify_task_id == dify_task_id
+                    and concurrent.workflow_run_id == workflow_run_id
+                ):
+                    return concurrent
+                raise ValueError(self._STATE_CONFLICT)
+        return candidate
+
+    def mark_succeeded(
+        self,
+        job_id: str,
+        *,
+        draft_id: str,
+        finished_at: datetime,
+    ) -> DocumentIncubationJob:
+        finished_at = _require_utc(finished_at)
+        with connect(self.db_path) as connection:
+            current = self._get_from_connection(connection, job_id)
+            if current.status is DocumentIncubationJobStatus.SUCCEEDED:
+                if current.draft_id == draft_id:
+                    return current
+                raise ValueError(self._STATE_CONFLICT)
+            if current.status is not DocumentIncubationJobStatus.RUNNING:
+                raise ValueError(self._STATE_CONFLICT)
+
+            candidate = self._transition_candidate(
+                current,
+                status=DocumentIncubationJobStatus.SUCCEEDED,
+                draft_id=draft_id,
+                finished_at=finished_at,
+                updated_at=finished_at,
+            )
+            result = connection.execute(
+                """
+                UPDATE document_incubation_jobs
+                SET status = ?, draft_id = ?, finished_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (
+                    candidate.status.value,
+                    candidate.draft_id,
+                    candidate.finished_at.isoformat(),
+                    candidate.updated_at.isoformat(),
+                    job_id,
+                ),
+            )
+            if result.rowcount != 1:
+                concurrent = self._get_from_connection(connection, job_id)
+                if (
+                    concurrent.status is DocumentIncubationJobStatus.SUCCEEDED
+                    and concurrent.draft_id == draft_id
+                ):
+                    return concurrent
+                raise ValueError(self._STATE_CONFLICT)
+        return candidate
+
+    def mark_failed(
+        self,
+        job_id: str,
+        *,
+        error_code: str,
+        finished_at: datetime,
+    ) -> DocumentIncubationJob:
+        finished_at = _require_utc(finished_at)
+        with connect(self.db_path) as connection:
+            current = self._get_from_connection(connection, job_id)
+            if current.status is DocumentIncubationJobStatus.FAILED:
+                if current.error_code == error_code:
+                    return current
+                raise ValueError(self._STATE_CONFLICT)
+            if current.status not in {
+                DocumentIncubationJobStatus.PENDING,
+                DocumentIncubationJobStatus.RUNNING,
+            }:
+                raise ValueError(self._STATE_CONFLICT)
+
+            candidate = self._transition_candidate(
+                current,
+                status=DocumentIncubationJobStatus.FAILED,
+                error_code=error_code,
+                finished_at=finished_at,
+                updated_at=finished_at,
+            )
+            result = connection.execute(
+                """
+                UPDATE document_incubation_jobs
+                SET status = ?, error_code = ?, finished_at = ?, updated_at = ?
+                WHERE id = ? AND status IN ('pending', 'running')
+                """,
+                (
+                    candidate.status.value,
+                    candidate.error_code,
+                    candidate.finished_at.isoformat(),
+                    candidate.updated_at.isoformat(),
+                    job_id,
+                ),
+            )
+            if result.rowcount != 1:
+                concurrent = self._get_from_connection(connection, job_id)
+                if (
+                    concurrent.status is DocumentIncubationJobStatus.FAILED
+                    and concurrent.error_code == error_code
+                ):
+                    return concurrent
+                raise ValueError(self._STATE_CONFLICT)
+        return candidate
+
+    @staticmethod
+    def _transition_candidate(
+        current: DocumentIncubationJob, **updates: object
+    ) -> DocumentIncubationJob:
+        return DocumentIncubationJob.model_validate({**current.model_dump(), **updates})
+
+    @classmethod
+    def _get_from_connection(
+        cls, connection: sqlite3.Connection, job_id: str
+    ) -> DocumentIncubationJob:
+        row = _require(
+            connection.execute(
+                "SELECT * FROM document_incubation_jobs WHERE id = ?", (job_id,)
+            ).fetchone(),
+            "document incubation job",
+            job_id,
+        )
+        return cls._to_model(row)
+
+    @staticmethod
+    def _values(job: DocumentIncubationJob) -> tuple[object, ...]:
+        return (
+            job.id,
+            job.project_id,
+            _json_dumps(job.source_ids),
+            job.requested_by,
+            job.status.value,
+            job.dify_task_id,
+            job.workflow_run_id,
+            job.draft_id,
+            job.error_code,
+            job.created_at.isoformat(),
+            job.started_at.isoformat() if job.started_at is not None else None,
+            job.updated_at.isoformat(),
+            job.finished_at.isoformat() if job.finished_at is not None else None,
+        )
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> DocumentIncubationJob:
+        data = _row_data(row)
+        data["source_ids"] = _json_loads(data.pop("source_ids_json"))
+        return DocumentIncubationJob.model_validate(data)
 
 
 class SqliteStructureSuggestionRepository:

@@ -30,6 +30,23 @@ def _success(result: str | dict = "{}") -> httpx.Response:
     )
 
 
+def _sse(*events: tuple[str, dict[str, Any]]) -> httpx.Response:
+    lines: list[str] = []
+    for event_name, data in events:
+        lines.extend(
+            (
+                f"event: {event_name}",
+                f"data: {__import__('json').dumps(data, ensure_ascii=False)}",
+                "",
+            )
+        )
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content="\n".join(lines).encode(),
+    )
+
+
 def _exception_graph_text(error: BaseException) -> str:
     graph: list[str] = ["".join(traceback.format_exception(error))]
     pending = [error]
@@ -183,3 +200,82 @@ def test_dify_accepts_mapping_result_without_mutating_it():
         "workflow_run_id": "WF-001",
         "result": {"schema_version": "1.0"},
     }
+
+
+def test_dify_streams_workflow_and_reports_started_identifiers():
+    """Catches long document workflows falling back to Cloudflare-prone blocking mode."""
+    requests: list[httpx.Request] = []
+    started: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _sse(
+            (
+                "workflow_started",
+                {
+                    "task_id": "TASK-001",
+                    "workflow_run_id": "WF-STREAM-001",
+                    "data": {"id": "WF-STREAM-001"},
+                },
+            ),
+            ("ping", {"task_id": "TASK-001"}),
+            (
+                "workflow_finished",
+                {
+                    "task_id": "TASK-001",
+                    "workflow_run_id": "WF-STREAM-001",
+                    "data": {"status": "succeeded", "outputs": {"result": '{"ok":true}'}},
+                },
+            ),
+        )
+
+    result = _client(handler).run(
+        inputs={"schema_version": "2.0"},
+        user="PROJECT_A",
+        timeout_seconds=300,
+        on_started=lambda task_id, run_id: started.append((task_id, run_id)),
+    )
+
+    assert result == {"workflow_run_id": "WF-STREAM-001", "result": {"ok": True}}
+    assert started == [("TASK-001", "WF-STREAM-001")]
+    assert len(requests) == 1
+    assert requests[0].read() == (
+        b'{"inputs":{"schema_version":"2.0"},"response_mode":"streaming","user":"PROJECT_A"}'
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "outputs", "expected"),
+    [
+        ("running", None, {"workflow_run_id": "WF-DETAIL-001", "status": "running"}),
+        (
+            "succeeded",
+            {"result": '{"schema_version":"2.0"}'},
+            {
+                "workflow_run_id": "WF-DETAIL-001",
+                "status": "succeeded",
+                "result": {"schema_version": "2.0"},
+            },
+        ),
+        ("failed", None, {"workflow_run_id": "WF-DETAIL-001", "status": "failed"}),
+    ],
+)
+def test_dify_gets_safe_workflow_run_detail(status: str, outputs: dict | None, expected: dict):
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload: dict[str, Any] = {"id": "WF-DETAIL-001", "status": status}
+        if outputs is not None:
+            payload["outputs"] = outputs
+        return httpx.Response(200, json=payload)
+
+    result = _client(handler).get_run(
+        workflow_run_id="WF-DETAIL-001",
+        user="PROJECT_A",
+        timeout_seconds=30,
+    )
+
+    assert result == expected
+    assert requests[0].method == "GET"
+    assert requests[0].url == "https://dify.test/v1/workflows/run/WF-DETAIL-001"

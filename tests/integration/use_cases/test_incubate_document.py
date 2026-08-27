@@ -29,9 +29,13 @@ NOW = datetime(2026, 8, 12, 10, 0, tzinfo=UTC)
 class FakeDocumentGateway:
     def __init__(self) -> None:
         self.inputs: dict | None = None
+        self.call_count = 0
 
-    def generate_draft(self, inputs: dict) -> dict:
+    def generate_draft(self, inputs: dict, *, on_started=None) -> dict:
+        self.call_count += 1
         self.inputs = inputs
+        if on_started is not None:
+            on_started("TASK-DOCUMENT-001", "WF-DOCUMENT-001")
         page = inputs["wiki_pages"][0]
         assert page["source_id"] == "SRC-001"
         return {
@@ -218,6 +222,52 @@ def test_initial_incubation_creates_draft_without_current_baseline(tmp_path: Pat
     assert gateway.inputs is not None
     assert gateway.inputs["current_document_markdown"] is None
     assert gateway.inputs["wiki_pages"][0]["page_path"] == "wiki/sources/SRC-001-需求.md"
+
+
+def test_incubation_reports_dify_identifiers_when_stream_starts(tmp_path: Path) -> None:
+    _, service, _ = _environment(tmp_path)
+    started: list[tuple[str, str]] = []
+
+    service.execute(
+        _command(),
+        on_started=lambda task_id, workflow_run_id: started.append((task_id, workflow_run_id)),
+    )
+
+    assert started == [("TASK-DOCUMENT-001", "WF-DOCUMENT-001")]
+
+
+def test_completed_workflow_can_be_persisted_without_second_gateway_call(
+    tmp_path: Path,
+) -> None:
+    paths, service, gateway = _environment(tmp_path)
+    page = service.wiki_context.read_context("NEW", ["SRC-001"]).pages[0]
+    response = {
+        "workflow_run_id": "WF-RECOVERED-001",
+        "status": "succeeded",
+        "result": {
+            "document_markdown": "# 新产品方案\n\n## 产品概述\n\n恢复已完成的候选文档。",
+            "summary": "已恢复候选文档。",
+            "missing_sections": [],
+            "evidence_gaps": [],
+            "source_ids": [page.source_id],
+            "section_citations": [
+                {
+                    "heading": "产品概述",
+                    "source_id": page.source_id,
+                    "chunk_id": page.chunk_id,
+                    "locator": page.locator,
+                    "excerpt": page.excerpt,
+                }
+            ],
+        },
+    }
+
+    result = service.complete_from_workflow(_command(), response)
+
+    assert gateway.call_count == 0
+    assert result.draft.version_id == "NEW-20260812-01"
+    assert (paths.project_root / result.draft.markdown_path).is_file()
+    assert service.drafts.list_for_project("NEW") == [result.draft]
 
 
 def test_incubation_lists_only_ingested_sources(tmp_path: Path) -> None:

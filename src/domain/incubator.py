@@ -1,16 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated, Self
 
-from pydantic import Field
+from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from src.domain.enums import (
     DocumentDraftStatus,
     DocumentGenerationMode,
+    DocumentIncubationJobStatus,
     ProjectRootStatus,
     StructureSuggestionStatus,
 )
 from src.domain.models import DomainModel, NonEmptyStr, Sha256Str
+
+SafeErrorCode = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        pattern=r"^[A-Z][A-Z0-9_]*(?::[A-Z][A-Z0-9_]*)?$",
+    ),
+]
 
 
 class IncubatorSettings(DomainModel):
@@ -57,6 +67,83 @@ class DocumentDraft(DomainModel):
     created_at: datetime
     updated_at: datetime
     generation_mode: DocumentGenerationMode = DocumentGenerationMode.EXTERNAL_AI
+
+
+class DocumentIncubationJob(DomainModel):
+    id: NonEmptyStr
+    project_id: NonEmptyStr
+    source_ids: list[NonEmptyStr] = Field(min_length=1)
+    requested_by: NonEmptyStr
+    status: DocumentIncubationJobStatus
+    dify_task_id: NonEmptyStr | None = None
+    workflow_run_id: NonEmptyStr | None = None
+    draft_id: NonEmptyStr | None = None
+    error_code: SafeErrorCode | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+    @field_validator("created_at", "started_at", "updated_at", "finished_at")
+    @classmethod
+    def require_utc_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (
+            value.tzinfo is None or value.utcoffset() != UTC.utcoffset(value)
+        ):
+            raise ValueError("TIMESTAMP_MUST_BE_UTC")
+        return value
+
+    @model_validator(mode="after")
+    def validate_lifecycle(self) -> Self:
+        if self.updated_at < self.created_at:
+            raise ValueError("UPDATED_AT_BEFORE_CREATED_AT")
+        if self.started_at is not None and self.started_at < self.created_at:
+            raise ValueError("STARTED_AT_BEFORE_CREATED_AT")
+        if self.finished_at is not None:
+            earliest = self.started_at or self.created_at
+            if self.finished_at < earliest:
+                raise ValueError("FINISHED_AT_BEFORE_JOB_START")
+
+        if self.status is DocumentIncubationJobStatus.PENDING:
+            if any(
+                value is not None
+                for value in (
+                    self.started_at,
+                    self.dify_task_id,
+                    self.workflow_run_id,
+                    self.draft_id,
+                    self.error_code,
+                    self.finished_at,
+                )
+            ):
+                raise ValueError("PENDING_JOB_HAS_LIFECYCLE_OUTPUT")
+        elif self.status is DocumentIncubationJobStatus.RUNNING:
+            if not all((self.started_at, self.dify_task_id, self.workflow_run_id)):
+                raise ValueError("RUNNING_JOB_MISSING_GATEWAY_IDENTIFIERS")
+            if any(
+                value is not None for value in (self.draft_id, self.error_code, self.finished_at)
+            ):
+                raise ValueError("RUNNING_JOB_HAS_TERMINAL_OUTPUT")
+        elif self.status is DocumentIncubationJobStatus.SUCCEEDED:
+            if not all(
+                (
+                    self.started_at,
+                    self.dify_task_id,
+                    self.workflow_run_id,
+                    self.draft_id,
+                    self.finished_at,
+                )
+            ):
+                raise ValueError("SUCCEEDED_JOB_MISSING_OUTPUT")
+            if self.error_code is not None:
+                raise ValueError("SUCCEEDED_JOB_HAS_ERROR")
+        elif self.status is DocumentIncubationJobStatus.FAILED:
+            if self.error_code is None or self.finished_at is None:
+                raise ValueError("FAILED_JOB_MISSING_SAFE_ERROR")
+            if self.draft_id is not None:
+                raise ValueError("FAILED_JOB_HAS_DRAFT")
+
+        return self
 
 
 class StructureSuggestion(DomainModel):

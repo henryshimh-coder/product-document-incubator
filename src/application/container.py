@@ -35,6 +35,7 @@ from src.application.ports.incubator import (
     CurrentDocumentExporter,
     DocumentDraftPublisher,
     DocumentIncubation,
+    DocumentIncubationJobManagement,
     DocumentStructureSuggester,
     ProjectManagement,
 )
@@ -51,6 +52,9 @@ from src.application.use_cases.get_dashboard import GetDashboard
 from src.application.use_cases.import_source import ImportSource
 from src.application.use_cases.incubate_document import IncubateDocument
 from src.application.use_cases.ingest_archived_source import IngestArchivedSource
+from src.application.use_cases.manage_document_incubation_job import (
+    DocumentIncubationCoordinator,
+)
 from src.application.use_cases.manage_projects import ManageProjects
 from src.application.use_cases.prepare_local_wiki_ingest import PrepareLocalWikiIngest
 from src.application.use_cases.publish_baseline import PublishBaseline
@@ -94,6 +98,7 @@ from src.infrastructure.db.repositories import (
     SqliteDecisionRepository,
     SqliteDecisionUnitOfWork,
     SqliteDocumentDraftRepository,
+    SqliteDocumentIncubationJobRepository,
     SqliteEventRepository,
     SqliteIngestUnitOfWork,
     SqliteIssueRepository,
@@ -277,6 +282,7 @@ class AppContainer:
     prepare_local_wiki_ingest: PrepareLocalWikiIngestService | None = None
     confirm_local_wiki_ingest: ConfirmLocalWikiIngestService | None = None
     incubate_document: DocumentIncubation | None = None
+    document_incubation_jobs: DocumentIncubationJobManagement | None = None
     publish_document_draft: DocumentDraftPublisher | None = None
     export_current_document: CurrentDocumentExporter | None = None
     suggest_document_structure: DocumentStructureSuggester | None = None
@@ -366,6 +372,12 @@ def build_container(
         except DomainError:
             return AppContainer(settings=settings, manage_projects=project_management)
         if not active_project.paths.manifest_path.is_file():
+            document_incubation = _build_document_incubation(
+                settings=settings,
+                active_project=active_project,
+                environ=environ,
+                http_factory=http_factory,
+            )
             return AppContainer(
                 settings=settings,
                 manage_projects=project_management,
@@ -384,11 +396,10 @@ def build_container(
                 ),
                 prepare_local_wiki_ingest=_build_prepare_local_wiki_ingest(active_project),
                 confirm_local_wiki_ingest=_build_confirm_local_wiki_ingest(active_project),
-                incubate_document=_build_document_incubation(
-                    settings=settings,
+                incubate_document=document_incubation,
+                document_incubation_jobs=_build_document_incubation_jobs(
                     active_project=active_project,
-                    environ=environ,
-                    http_factory=http_factory,
+                    incubation=document_incubation,
                 ),
                 publish_document_draft=_build_document_draft_publisher(active_project),
                 export_current_document=_build_current_document_exporter(active_project),
@@ -520,6 +531,17 @@ def _build_stateful_container(
     def dictionary(name: str) -> tuple[str, ...]:
         return tuple(term.strip() for term in runtime.get(name, "").split(",") if term.strip())
 
+    document_incubation = (
+        None
+        if active_project is None
+        else _build_document_incubation(
+            settings=settings,
+            active_project=active_project,
+            environ=environ,
+            http_factory=http_factory,
+        )
+    )
+
     local_services = {
         "manage_projects": project_management,
         "archive_raw_source": (
@@ -556,14 +578,13 @@ def _build_stateful_container(
         "confirm_local_wiki_ingest": (
             None if active_project is None else _build_confirm_local_wiki_ingest(active_project)
         ),
-        "incubate_document": (
+        "incubate_document": document_incubation,
+        "document_incubation_jobs": (
             None
-            if active_project is None
-            else _build_document_incubation(
-                settings=settings,
+            if active_project is None or document_incubation is None
+            else _build_document_incubation_jobs(
                 active_project=active_project,
-                environ=environ,
-                http_factory=http_factory,
+                incubation=document_incubation,
             )
         ),
         "publish_document_draft": (
@@ -967,6 +988,21 @@ def _build_document_incubation(
         financial_terms=dictionary("REDACTION_FINANCIAL_TERMS"),
         leader_names=dictionary("REDACTION_LEADER_NAMES"),
         unpublished_decisions=dictionary("REDACTION_UNPUBLISHED_DECISIONS"),
+    )
+
+
+def _build_document_incubation_jobs(
+    *,
+    active_project: ProjectContext,
+    incubation: IncubateDocument,
+) -> DocumentIncubationCoordinator:
+    gateway = incubation.gateway
+    workflow_runs = gateway if gateway is not None and hasattr(gateway, "get_run") else None
+    return DocumentIncubationCoordinator(
+        db_path=active_project.db_path,
+        jobs=SqliteDocumentIncubationJobRepository(active_project.db_path),
+        incubation=incubation,
+        workflow_runs=workflow_runs,
     )
 
 

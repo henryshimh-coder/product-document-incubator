@@ -94,6 +94,13 @@ class DocumentGenerationMode(StrEnum):
     LOCAL_MANUAL = "local_manual"
 
 
+class DocumentIncubationJobStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 class StructureSuggestionStatus(StrEnum):
     OPEN = "open"
     ACCEPTED = "accepted"

@@ -404,8 +404,10 @@ class _WikiDocumentGateway:
     def __init__(self) -> None:
         self.calls = 0
 
-    def generate_draft(self, inputs: dict) -> dict:
+    def generate_draft(self, inputs: dict, *, on_started=None) -> dict:
         self.calls += 1
+        if on_started is not None:
+            on_started("TASK-DOCUMENT-001", f"WF-{inputs['project_id']}")
         page = inputs["wiki_pages"][0]
         return {
             "workflow_run_id": f"WF-{inputs['project_id']}",

@@ -21,6 +21,7 @@ from src.application.dto.wiki_ingest import (
 from src.domain.enums import AuthorityLevel, SecurityLevel
 from src.domain.errors import AppError
 from src.domain.material_catalog import MATERIAL_TYPES, NEW_AUTHORITY_LEVELS
+from src.infrastructure.files.project_library import require_canonical_project_path
 
 
 def render(container: AppContainer) -> None:
@@ -117,6 +118,8 @@ def render(container: AppContainer) -> None:
                     allow_external_model=external,
                 )
             )
+        except AppError as error:
+            st.error(f"材料归档失败：{error.user_message}")
         except (OSError, ValueError, RuntimeError) as error:
             st.error(f"材料归档失败：{error}")
         else:
@@ -401,7 +404,7 @@ def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
         SecurityLevel.L4_RESTRICTED.value,
     }
     if item.get("security_level") in sensitive_levels:
-        _render_local_wiki_ingest(container, source_id, status)
+        _render_local_wiki_ingest(container, source_id, status, item.get("source_page_path"))
         return
     if status == "ingesting":
         st.button(
@@ -411,11 +414,7 @@ def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
         )
         return
     if status == "ingested":
-        source_page_path = item.get("source_page_path")
-        if source_page_path:
-            st.markdown(f"[查看 Wiki 结果]({source_page_path})")
-        else:
-            st.markdown("查看 Wiki 结果")
+        _render_wiki_result_action(container, source_id, item.get("source_page_path"))
         return
     if status == "ingest_failed":
         name = item.get("material_name") or item.get("filename") or "未命名材料"
@@ -457,13 +456,51 @@ def _render_wiki_ingest(container: AppContainer, item: dict) -> None:
         st.error("Wiki Ingest 失败：WIKI_CHANGESET_INVALID")
     else:
         st.success("已 Ingest 到当前项目 Wiki。")
-        if result.source_page_path:
-            st.markdown(f"[已 Ingest · 查看 Wiki 结果]({result.source_page_path})")
+        _render_wiki_result_action(container, source_id, result.source_page_path)
 
 
-def _render_local_wiki_ingest(container: AppContainer, source_id: str, status: object) -> None:
+def _render_wiki_result_action(
+    container: AppContainer, source_id: str, source_page_path: object
+) -> None:
+    if not isinstance(source_page_path, str) or not source_page_path:
+        st.caption("Wiki 结果路径不可用。")
+        return
+    if st.button("查看 Wiki 结果", key=f"material_view_wiki_{source_id}"):
+        _render_wiki_result(container, source_page_path)
+
+
+def _render_wiki_result(container: AppContainer, source_page_path: str) -> None:
+    assert container.active_project is not None
+    if not source_page_path.startswith("wiki/") or Path(source_page_path).suffix != ".md":
+        st.error("Wiki 结果路径无效。")
+        return
+    try:
+        result_path = require_canonical_project_path(
+            container.active_project.paths,
+            source_page_path,
+        )
+    except ValueError:
+        st.error("Wiki 结果路径无效。")
+        return
+    if not result_path.is_file():
+        st.warning("Wiki 结果文件不存在，请重新 Ingest 或检查当前项目 Wiki 目录。")
+        return
+    try:
+        markdown = result_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        st.error("Wiki 结果暂时无法读取。")
+        return
+    st.markdown(markdown)
+
+
+def _render_local_wiki_ingest(
+    container: AppContainer,
+    source_id: str,
+    status: object,
+    source_page_path: object,
+) -> None:
     if status == "ingested":
-        st.markdown("查看 Wiki 结果")
+        _render_wiki_result_action(container, source_id, source_page_path)
         return
     draft_root = container.active_project.paths.wiki_root / "drafts" / "local-ingest" / source_id
     if status == "local_review_required" or (status == "ingest_failed" and draft_root.is_dir()):
@@ -495,8 +532,7 @@ def _render_local_wiki_ingest(container: AppContainer, source_id: str, status: o
             st.error("本地 Ingest 校验失败：WIKI_CHANGESET_INVALID")
         else:
             st.success("已确认并 Ingest 到当前项目 Wiki。")
-            if result.source_page_path:
-                st.markdown(f"[已 Ingest · 查看 Wiki 结果]({result.source_page_path})")
+            _render_wiki_result_action(container, source_id, result.source_page_path)
         return
     if status not in {"pending_ingest", "ingest_failed", "reingest_recommended"}:
         return

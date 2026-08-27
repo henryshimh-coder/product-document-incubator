@@ -44,3 +44,16 @@ def test_upload_accepts_utf8_markdown() -> None:
     """Catches security validation blocking a valid allowed text document."""
     filename = "风险意见.md"
     assert file_safety().validate_upload(filename, "# 风险意见\n内容".encode()) == filename
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "产品方案 2.2（终稿）.md",
+        "需求说明【待确认】.txt",
+        "2026-08-23 产品文档（V1.0）.docx",
+    ],
+)
+def test_upload_accepts_normal_owner_filenames_with_spaces_and_punctuation(filename: str) -> None:
+    """Catches common macOS/Windows document names being mistaken for unsafe paths."""
+    assert file_safety().sanitize_filename(filename) == filename
