@@ -58,6 +58,71 @@ def test_owner_confirmed_masks_hard_identifiers_in_content_derived_locator(
     assert hashlib.sha256(fixture.raw_path.read_bytes()).hexdigest() == before_sha
 
 
+def test_owner_confirmed_masks_hard_identifiers_in_source_metadata(tmp_path) -> None:
+    """Catches archived source metadata bypassing the local hard-ID masker."""
+    fixture = make_ingest_fixture(tmp_path)
+    source = fixture.service.sources.get(fixture.source_id)
+    fixture.service.sources.update(
+        source.model_copy(
+            update={
+                "material_name": "联系人13812345678 owner@example.com",
+                "document_version": "版本6222020202020202020",
+                "applicable_baseline_version": "身份证11010519491231002X",
+            }
+        )
+    )
+    before_raw = fixture.raw_path.read_bytes()
+
+    result = fixture.execute(requested_by="Owner")
+
+    assert result.status.value == "ingested"
+    sent_source = fixture.gateway.calls[0]["inputs"]["source"]
+    serialized = str(sent_source)
+    for hard_identifier in (
+        "13812345678",
+        "owner@example.com",
+        "6222020202020202020",
+        "11010519491231002X",
+    ):
+        assert hard_identifier not in serialized
+    assert "[已脱敏:phone]" in sent_source["material_name"]
+    assert "[已脱敏:email]" in sent_source["material_name"]
+    assert "[已脱敏:bank_card]" in sent_source["document_version"]
+    assert "[已脱敏:id_card]" in sent_source["applicable_scope"]
+    assert fixture.raw_path.read_bytes() == before_raw
+
+
+def test_owner_confirmed_l2_sends_up_to_twenty_chunks_beyond_legacy_coverage(
+    tmp_path,
+) -> None:
+    """Catches the legacy three-chunk/25% cap starving an Owner-approved Wiki Ingest."""
+    lines = [f"第{index}节：某银行灰度策略的产品事实、流程与验收依据。" for index in range(1, 26)]
+    lines[19] += " 联系人 13812345678，邮箱 owner@example.com。"
+    fixture = make_ingest_fixture(
+        tmp_path,
+        raw_text="\n".join(lines),
+        customer_names=("某银行",),
+        strategy_terms=("灰度策略",),
+    )
+
+    result = fixture.execute(requested_by="Owner")
+
+    assert result.status.value == "ingested"
+    sent_chunks = fixture.gateway.calls[0]["inputs"]["source_chunks"]
+    assert len(sent_chunks) == 20
+    assert (
+        sum(len(chunk["text"]) for chunk in sent_chunks)
+        / len(fixture.raw_path.read_text(encoding="utf-8"))
+        > 0.25
+    )
+    assert "某银行" in sent_chunks[-1]["text"]
+    assert "灰度策略" in sent_chunks[-1]["text"]
+    assert "13812345678" not in sent_chunks[-1]["text"]
+    assert "owner@example.com" not in sent_chunks[-1]["text"]
+    assert "[已脱敏:phone]" in sent_chunks[-1]["text"]
+    assert "[已脱敏:email]" in sent_chunks[-1]["text"]
+
+
 @pytest.mark.parametrize(
     ("requested_by", "is_redacted", "allow_external", "level"),
     [

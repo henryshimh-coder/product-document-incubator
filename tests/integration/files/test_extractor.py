@@ -128,6 +128,79 @@ def test_docx_locator_retains_heading_and_paragraph_number(fixture_dir: Path) ->
     assert any("paragraph:" in chunk.locator for chunk in result.chunks)
 
 
+def test_docx_extracts_table_cells_in_document_order(fixture_dir: Path) -> None:
+    """Catches product details in DOCX tables being omitted or moved after later prose."""
+    path = fixture_dir / "table-content.docx"
+    document = Document()
+    document.add_heading("产品方案", level=1)
+    document.add_paragraph("表格前说明")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "产品名称"
+    table.cell(0, 1).text = "联合运营贷"
+    table.cell(1, 0).text = "准入条件"
+    table.cell(1, 1).text = "正常经营满一年"
+    document.add_paragraph("表格后说明")
+    document.save(path)
+
+    result = extractor_module().extract_document(path, source_id="SRC-001")
+
+    assert result.text.splitlines() == [
+        "产品方案",
+        "表格前说明",
+        "产品名称",
+        "联合运营贷",
+        "准入条件",
+        "正常经营满一年",
+        "表格后说明",
+    ]
+    table_chunks = [chunk for chunk in result.chunks if "table:" in chunk.locator]
+    assert [chunk.text for chunk in table_chunks] == [
+        "产品名称",
+        "联合运营贷",
+        "准入条件",
+        "正常经营满一年",
+    ]
+    assert table_chunks[0].locator == "title:产品方案; table:1; row:1; cell:1"
+
+
+def test_docx_extracts_merged_cell_once_in_document_order(fixture_dir: Path) -> None:
+    """Catches python-docx exposing one merged cell through multiple grid positions."""
+    path = fixture_dir / "merged-table.docx"
+    document = Document()
+    document.add_paragraph("表格前")
+    table = document.add_table(rows=2, cols=2)
+    merged = table.cell(0, 0).merge(table.cell(0, 1))
+    merged.text = "合并标题"
+    table.cell(1, 0).text = "字段"
+    table.cell(1, 1).text = "值"
+    document.add_paragraph("表格后")
+    document.save(path)
+
+    result = extractor_module().extract_document(path, source_id="SRC-001")
+
+    assert result.text.splitlines() == ["表格前", "合并标题", "字段", "值", "表格后"]
+    assert [chunk.text for chunk in result.chunks].count("合并标题") == 1
+
+
+def test_docx_extracts_nested_table_content_in_cell_order(fixture_dir: Path) -> None:
+    """Catches product facts in a table nested inside an outer table cell being lost."""
+    path = fixture_dir / "nested-table.docx"
+    document = Document()
+    outer = document.add_table(rows=1, cols=1)
+    cell = outer.cell(0, 0)
+    cell.text = "外层前"
+    nested = cell.add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "内层事实"
+    cell.add_paragraph("外层后")
+    document.save(path)
+
+    result = extractor_module().extract_document(path, source_id="SRC-001")
+
+    lines = [line for line in result.text.splitlines() if line]
+    assert lines == ["外层前", "内层事实", "外层后"]
+    assert any("table:2" in chunk.locator for chunk in result.chunks if chunk.text == "内层事实")
+
+
 def test_extractor_rejects_a_lookalike_source_archive_and_reads_the_fixed_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -307,6 +307,51 @@ def test_owner_confirmed_projection_keeps_business_terms_and_masks_hard_identifi
     assert "[已脱敏:email]" in markdown
 
 
+def test_owner_confirmed_projection_masks_hard_identifier_topic_title_and_index(
+    project_wiki: _ProjectWiki,
+    source_repository: _SourceRepository,
+) -> None:
+    """Topic IDs are outbound titles too, so hard identifiers must be masked locally."""
+    path = project_wiki.write_topic(
+        "13812345678",
+        citations=["SRC-L2"],
+        body="Safe statement",
+    )
+
+    projection = WikiOutboundContextBuilder(
+        project_wiki.paths,
+        source_repository,
+        redaction_mode=RedactionMode.OWNER_CONFIRMED,
+    ).build(project_id="PROJECT_A", related_topic_paths=[path])
+
+    topic = projection.safe_related_topics[0]
+    assert "13812345678" not in topic.title
+    assert "[已脱敏:phone]" in topic.title
+    assert "13812345678" not in projection.safe_index_projection
+    assert "[已脱敏:phone]" in projection.safe_index_projection
+
+
+def test_strict_projection_excludes_hard_identifier_topic_title(
+    project_wiki: _ProjectWiki,
+    source_repository: _SourceRepository,
+) -> None:
+    path = project_wiki.write_topic(
+        "13812345678",
+        citations=["SRC-L2"],
+        body="Safe statement",
+    )
+
+    projection = WikiOutboundContextBuilder(
+        project_wiki.paths,
+        source_repository,
+    ).build(project_id="PROJECT_A", related_topic_paths=[path])
+
+    assert projection.safe_related_topics == []
+    assert projection.safe_index_projection == ""
+    assert projection.excluded_topic_count == 1
+    assert projection.local_sensitive_comparison_required is True
+
+
 def test_strict_safe_source_page_preserves_accepted_markdown_whitespace(
     project_wiki: _ProjectWiki,
     source_repository: _SourceRepository,

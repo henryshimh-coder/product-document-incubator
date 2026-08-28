@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -9,6 +10,8 @@ from src.application.dto.documents import IncubateDocumentInput, PublishDocument
 from src.domain.enums import DocumentIncubationJobStatus
 from src.domain.errors import AppError
 from src.ui.components.change_diff import render_change_diff
+
+_SAFE_START_DETAIL = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 def render(container: AppContainer) -> None:
@@ -72,13 +75,21 @@ def render(container: AppContainer) -> None:
                 )
             )
         except (AppError, OSError, ValueError, KeyError) as error:
-            error_code = (
-                error.code if isinstance(error, AppError) else "DOCUMENT_INCUBATION_START_FAILED"
-            )
+            error_code = _incubation_start_error_code(error)
             st.error(f"候选文档生成失败：{error_code}")
         else:
             st.rerun()
     _render_drafts(container)
+
+
+def _incubation_start_error_code(error: BaseException) -> str:
+    if isinstance(error, AppError):
+        return str(error.code)
+    if isinstance(error, (ValueError, KeyError)) and error.args:
+        detail = str(error.args[0])
+        if _SAFE_START_DETAIL.fullmatch(detail):
+            return f"DOCUMENT_INCUBATION_START_FAILED:{detail}"
+    return "DOCUMENT_INCUBATION_START_FAILED"
 
 
 def _render_drafts(container: AppContainer) -> None:

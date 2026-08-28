@@ -212,7 +212,16 @@ class _WikiGateway:
         return WikiIngestWorkflowOutput(
             schema_version="2.2",
             task_id=inputs["task_id"],
-            source_page_markdown="# 来源摘要\n\n已脱敏的产品需求。",
+            source_page_markdown=(
+                "# 来源摘要\n\n"
+                "该材料明确了产品建设目标、适用范围、目标用户与核心使用场景，"
+                "并描述了需要解决的业务问题和预期价值。\n\n"
+                "材料进一步说明了主要功能边界、关键业务流程、输入输出关系、"
+                "异常处理原则以及各环节的责任分工。\n\n"
+                "在交付要求方面，材料给出了数据使用约束、安全合规要求、"
+                "实施依赖、验收口径和后续迭代方向，可作为候选产品文档的依据。\n\n"
+                "本次整理仅归纳归档材料中已经明确的信息，不补写材料未提供的事实。"
+            ),
             topic_changes=[],
             conflicts=[],
             evidence_gaps=[],

@@ -32,6 +32,7 @@ _BULLET = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)")
 _AUTHORIZATION_KEY = secrets.token_bytes(32)
 _AUTHORIZATION_ISSUER = object()
 _AUTHORIZATION_DETAIL = "WIKI_OUTBOUND_AUTHORIZATION_INVALID"
+MAX_OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS = 20
 
 
 class _SourceReading(Protocol):
@@ -270,11 +271,20 @@ class WikiOutboundContextBuilder:
             raise _authorization_invalid()
         expected_source = {
             "id": source.id,
-            "source_type": source.source_type,
-            "material_name": source.material_name or Path(source.original_filename).stem,
-            "document_version": source.document_version,
+            "source_type": self._redact_for_outbound(source, source.source_type),
+            "material_name": self._redact_for_outbound(
+                source,
+                source.material_name or Path(source.original_filename).stem,
+            ),
+            "document_version": self._redact_for_outbound(
+                source,
+                source.document_version,
+            ),
             "document_date": source.document_date.isoformat(),
-            "applicable_scope": source.applicable_baseline_version,
+            "applicable_scope": self._redact_for_outbound(
+                source,
+                source.applicable_baseline_version,
+            ),
             "authority_level": source.authority_level.value,
             "security_level": source.security_level.value,
         }
@@ -340,7 +350,7 @@ class WikiOutboundContextBuilder:
                 "locator": self._redact_for_outbound(source, chunk.locator),
                 "text": self._redact_for_outbound(source, chunk.text),
             }
-            for chunk in document.chunks[:3]
+            for chunk in document.chunks[:MAX_OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS]
         }
 
     def _trusted_ingest_contract(self) -> str:
@@ -434,6 +444,7 @@ class WikiOutboundContextBuilder:
 
         statements: list[str] = []
         source_ids: list[str] = []
+        title_source: SourceRecord | None = None
         for line in body.splitlines():
             matches = list(_CITATION_TOKEN.finditer(line))
             line_without_complete_tokens = _CITATION_TOKEN.sub("", line)
@@ -466,13 +477,19 @@ class WikiOutboundContextBuilder:
                 assert source is not None
                 if not self._source_record_is_exportable(source, project_id):
                     return None
+                if title_source is None:
+                    title_source = source
                 source_id = source.id
                 if source_id not in source_ids:
                     source_ids.append(source_id)
-        if not statements or not source_ids:
+        if not statements or not source_ids or title_source is None:
+            return None
+        try:
+            safe_title = self._redact_for_outbound(title_source, title)
+        except ValueError:
             return None
         return SafeWikiTopicInput(
-            title=title,
+            title=safe_title,
             markdown="\n".join(statements),
             source_ids=source_ids,
         )

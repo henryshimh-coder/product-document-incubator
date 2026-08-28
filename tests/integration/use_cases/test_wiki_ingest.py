@@ -11,10 +11,11 @@ from typing import Any
 
 import pytest
 
+import src.application.use_cases.ingest_archived_source as ingest_module
 from src.application.dto.wiki_ingest import IngestArchivedSourceInput
 from src.application.use_cases.ingest_archived_source import IngestArchivedSource
 from src.domain.enums import AuthorityLevel, SecurityLevel
-from src.domain.errors import DomainError, ErrorCode, GatewayError
+from src.domain.errors import DomainError, GatewayError
 from src.domain.models import Project, SourceRecord
 from src.domain.wiki import WikiIngestStatus
 from src.infrastructure.db.connection import connect
@@ -37,6 +38,14 @@ class RecordingWikiGateway:
         self.calls: list[dict[str, Any]] = []
         self.error: Exception | None = None
         self.before_return = lambda: None
+        self.source_page_markdown = (
+            "# 来源摘要\n\n"
+            "该材料明确了产品原则、业务目标、使用场景与可追溯证据。"
+            "方案要求以已归档材料为依据，将结构化结论写入 Wiki，"
+            "并保留来源定位、冲突与证据缺口。"
+            "产品文档孵化后应保持与原始依据一致，"
+            "不得虚构未获材料支持的业务规则。"
+        )
         self.topic_changes: list[dict[str, Any]] | None = None
         self.conflicts: list[dict[str, Any]] = []
         self.evidence_gaps: list[str] = []
@@ -55,14 +64,20 @@ class RecordingWikiGateway:
         return WikiIngestWorkflowOutput(
             schema_version="2.2",
             task_id=inputs["task_id"],
-            source_page_markdown=("# 来源摘要\n\n该材料明确了已脱敏的产品原则和可追溯证据。"),
+            source_page_markdown=self.source_page_markdown,
             topic_changes=self.topic_changes
             or [
                 {
                     "topic_id": "product-principles",
                     "title": "产品原则",
                     "change_type": "create",
-                    "markdown": "该产品原则已由归档来源支持。",
+                    "markdown": (
+                        "该产品原则已由归档来源支持。"
+                        "产品文档孵化仅使用已完成 Ingest 的 Wiki 页面，"
+                        "保留材料、主题和产品方案之间的可追溯关系。"
+                        "缺少证据的结论必须标记为证据缺口，"
+                        "不得直接写入已接受结论。"
+                    ),
                     "source_ids": [inputs["source"]["id"]],
                 }
             ],
@@ -343,32 +358,63 @@ def test_ingest_archived_l2_source_updates_complete_wiki(ingest_fixture) -> None
     assert audit["error_code"] is None
 
 
-def test_wiki_ingest_reports_coverage_error_before_gateway(tmp_path: Path) -> None:
-    """Catches genuine source-chunk coverage excess being mislabeled or invoked."""
+def test_owner_confirmed_wiki_ingest_accepts_full_source_coverage(tmp_path: Path) -> None:
+    """Catches the legacy 25% cap blocking a small Owner-confirmed L2 source."""
     fixture = make_ingest_fixture(tmp_path, raw_text="A" * 1000)
 
-    with pytest.raises(DomainError) as caught:
-        fixture.execute(requested_by="Owner")
+    result = fixture.execute(requested_by="Owner")
 
-    assert caught.value.code == ErrorCode.OUTBOUND_COVERAGE_EXCEEDED.value
-    assert fixture.gateway.calls == []
+    assert result.status is WikiIngestStatus.INGESTED
+    assert len(fixture.gateway.calls) == 1
+    with connect(fixture.db_path) as connection:
+        audit = connection.execute(
+            "SELECT outbound_coverage, result_mode, status, error_code "
+            "FROM model_call_logs WHERE task_type = 'wiki_ingest'"
+        ).fetchone()
+    assert audit is not None
+    assert audit["outbound_coverage"] == pytest.approx(1.0)
+    assert tuple(audit)[1:] == ("realtime", "succeeded", None)
+
+
+def test_owner_confirmed_wiki_ingest_fits_chunks_under_canonical_payload_cap(
+    tmp_path: Path,
+) -> None:
+    """Catches the 20-chunk relaxation accidentally bypassing the 20k payload cap."""
+    raw_text = "\n".join(f"第{index}节 " + "A" * 900 for index in range(1, 26))
+    fixture = make_ingest_fixture(tmp_path, raw_text=raw_text)
+
+    result = fixture.execute(requested_by="Owner")
+
+    assert result.status is WikiIngestStatus.INGESTED
+    inputs = fixture.gateway.calls[0]["inputs"]
+    assert 1 < len(inputs["source_chunks"]) <= 20
+    assert (
+        len(
+            json.dumps(
+                inputs,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        <= 20_000
+    )
 
 
 def test_redaction_expansion_persists_truthful_over_one_coverage_audit(
     tmp_path: Path,
 ) -> None:
-    """Catches truthful over-one coverage being dropped by audit validation."""
+    """Catches Owner-confirmed redaction expansion corrupting truthful audit data."""
     raw_text = "a@b.co"
     redacted_text = "[已脱敏:email]"
     fixture = make_ingest_fixture(tmp_path, raw_text=raw_text)
 
-    with pytest.raises(DomainError) as caught:
-        fixture.execute(requested_by="Owner")
+    result = fixture.execute(requested_by="Owner")
 
     expected_coverage = len(redacted_text) / len(raw_text)
     assert expected_coverage > 1
-    assert caught.value.code == ErrorCode.OUTBOUND_COVERAGE_EXCEEDED.value
-    assert fixture.gateway.calls == []
+    assert result.status is WikiIngestStatus.INGESTED
+    assert fixture.gateway.calls[0]["inputs"]["source_chunks"][0]["text"] == redacted_text
     with connect(fixture.db_path) as connection:
         audit = connection.execute(
             "SELECT outbound_coverage, result_mode, status, error_code "
@@ -377,9 +423,9 @@ def test_redaction_expansion_persists_truthful_over_one_coverage_audit(
     assert audit is not None
     assert audit["outbound_coverage"] == pytest.approx(expected_coverage)
     assert tuple(audit)[1:] == (
-        "local_only",
-        "failed",
-        ErrorCode.OUTBOUND_COVERAGE_EXCEEDED.value,
+        "realtime",
+        "succeeded",
+        None,
     )
 
 
@@ -406,6 +452,45 @@ def test_successful_duplicate_returns_without_gateway_or_wiki_change(ingest_fixt
         path: hashlib.sha256(ingest_fixture.page(path).read_bytes()).hexdigest()
         for path in wiki_hashes
     } == wiki_hashes
+
+
+def test_pipeline_revision_allows_controlled_reingest_without_erasing_prior_run(
+    ingest_fixture, monkeypatch
+) -> None:
+    """A parser/projection revision must create a new audited run for the same Raw source."""
+    monkeypatch.setattr(
+        ingest_module,
+        "WIKI_INGEST_PIPELINE_VERSION",
+        "2.2.0",
+        raising=False,
+    )
+    first = ingest_fixture.execute()
+    sources = SqliteSourceRepository(ingest_fixture.db_path)
+    sources.update(
+        sources.get(ingest_fixture.source_id).model_copy(
+            update={"ingest_status": WikiIngestStatus.REINGEST_RECOMMENDED}
+        )
+    )
+
+    monkeypatch.setattr(
+        ingest_module,
+        "WIKI_INGEST_PIPELINE_VERSION",
+        "2.3.1",
+        raising=False,
+    )
+    second = ingest_fixture.execute()
+
+    assert first.duplicate is False
+    assert second.duplicate is False
+    assert len(ingest_fixture.gateway.calls) == 2
+    with connect(ingest_fixture.db_path) as connection:
+        rows = connection.execute(
+            "SELECT status, idempotency_key FROM wiki_ingest_runs "
+            "WHERE source_id = ? ORDER BY started_at",
+            (ingest_fixture.source_id,),
+        ).fetchall()
+    assert [row["status"] for row in rows] == ["ingested", "ingested"]
+    assert rows[0]["idempotency_key"] != rows[1]["idempotency_key"]
 
 
 def test_gateway_failure_records_safe_error_and_preserves_wiki(ingest_fixture) -> None:
@@ -447,6 +532,59 @@ def test_gateway_failure_records_safe_error_and_preserves_wiki(ingest_fixture) -
             (ingest_fixture.source_id,),
         ).fetchone()
     assert tuple(failed_run) == ("ingest_failed", "MODEL_TIMEOUT")
+
+
+def test_placeholder_dominated_model_output_fails_quality_gate_before_wiki_commit(
+    ingest_fixture,
+) -> None:
+    """Catches a successful model response depositing placeholder-only Wiki pages."""
+    before_protected = ingest_fixture.protected_hashes()
+    before_wiki = {
+        str(path.relative_to(ingest_fixture.paths.project_root)): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in ingest_fixture.paths.wiki_root.rglob("*")
+        if path.is_file()
+    }
+    ingest_fixture.gateway.source_page_markdown = "# 来源摘要\n\n待补充。"
+    ingest_fixture.gateway.topic_changes = [
+        {
+            "topic_id": "product-principles",
+            "title": "产品原则",
+            "change_type": "create",
+            "markdown": "暂无信息，后续补充。",
+            "source_ids": [ingest_fixture.source_id],
+        }
+    ]
+
+    with pytest.raises(DomainError, match="WIKI_CONTENT_TOO_THIN"):
+        ingest_fixture.execute()
+
+    after_wiki = {
+        str(path.relative_to(ingest_fixture.paths.project_root)): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in ingest_fixture.paths.wiki_root.rglob("*")
+        if path.is_file()
+    }
+    assert len(ingest_fixture.gateway.calls) == 1
+    assert after_wiki == before_wiki
+    assert ingest_fixture.protected_hashes() == before_protected
+    assert not any(ingest_fixture.paths.wiki_root.joinpath("sources").glob("*.md"))
+    source = SqliteSourceRepository(ingest_fixture.db_path).get(ingest_fixture.source_id)
+    assert source.ingest_status == "ingest_failed"
+    assert source.ingest_error_code == "WIKI_CONTENT_TOO_THIN"
+    with connect(ingest_fixture.db_path) as connection:
+        run = connection.execute(
+            "SELECT status, error_code FROM wiki_ingest_runs WHERE source_id = ?",
+            (ingest_fixture.source_id,),
+        ).fetchone()
+        audit = connection.execute(
+            "SELECT status, error_code FROM model_call_logs "
+            "WHERE task_type = 'wiki_ingest' ORDER BY started_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    assert tuple(run) == ("ingest_failed", "WIKI_CONTENT_TOO_THIN")
+    assert tuple(audit) == ("failed", "WIKI_CONTENT_TOO_THIN")
 
 
 def test_structural_topic_symlink_fails_closed_before_gateway(ingest_fixture) -> None:

@@ -6,6 +6,8 @@ from io import BytesIO
 from pathlib import Path
 
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from pydantic import BaseModel, ConfigDict
 from pypdf import PdfReader
 
@@ -72,22 +74,55 @@ def _extract_pdf(content: bytes) -> list[_Section]:
 
 def _extract_docx(content: bytes) -> list[_Section]:
     document = Document(BytesIO(content))
-    paragraph_chars = sum(len(paragraph.text) for paragraph in document.paragraphs)
-    if paragraph_chars > MAX_DOCX_PARAGRAPH_CHARS:
-        raise DomainError(ErrorCode.FILE_TOO_LARGE, detail="DOCX_PARAGRAPH_LIMIT")
-
     title = ""
     sections: list[_Section] = []
-    for paragraph_number, paragraph in enumerate(document.paragraphs, start=1):
-        text = paragraph.text
-        if not text:
-            continue
-        if paragraph.style.name == "Title" or paragraph.style.name.startswith("Heading"):
-            title = text
-        locator = f"paragraph:{paragraph_number}"
-        if title:
-            locator = f"title:{title}; {locator}"
-        sections.append(_Section(locator=locator, text=text))
+    paragraph_number = 0
+    table_number = 0
+
+    def append_table(table: Table, *, parent_locator: str = "") -> None:
+        nonlocal table_number
+        table_number += 1
+        current_table_number = table_number
+        # Keep the XML element proxies alive while walking the table.  Storing
+        # only ``id(cell._tc)`` is unsafe because lxml can recycle a proxy ID
+        # between distinct cells; merged cells still resolve to the same node.
+        seen_cells: set[object] = set()
+        for row_number, row in enumerate(table.rows, start=1):
+            for cell_number, cell in enumerate(row.cells, start=1):
+                cell_element = cell._tc
+                if cell_element in seen_cells:
+                    continue
+                seen_cells.add(cell_element)
+                locator = f"table:{current_table_number}; row:{row_number}; cell:{cell_number}"
+                if parent_locator:
+                    locator = f"{parent_locator}; {locator}"
+                if title:
+                    locator = f"title:{title}; {locator}"
+                for child in cell.iter_inner_content():
+                    if isinstance(child, Paragraph):
+                        text = child.text.strip()
+                        if text:
+                            sections.append(_Section(locator=locator, text=text))
+                    elif isinstance(child, Table):
+                        append_table(child, parent_locator=locator.removeprefix(f"title:{title}; "))
+
+    for block in document.iter_inner_content():
+        if isinstance(block, Paragraph):
+            paragraph_number += 1
+            text = block.text
+            if not text:
+                continue
+            if block.style.name == "Title" or block.style.name.startswith("Heading"):
+                title = text
+            locator = f"paragraph:{paragraph_number}"
+            if title:
+                locator = f"title:{title}; {locator}"
+            sections.append(_Section(locator=locator, text=text))
+        elif isinstance(block, Table):
+            append_table(block)
+
+    if sum(len(section.text) for section in sections) > MAX_DOCX_PARAGRAPH_CHARS:
+        raise DomainError(ErrorCode.FILE_TOO_LARGE, detail="DOCX_PARAGRAPH_LIMIT")
     return sections
 
 

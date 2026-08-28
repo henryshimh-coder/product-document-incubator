@@ -11,7 +11,7 @@ app:
   demo_mode: true
 
 timeouts:
-  ingest_seconds: 60
+  ingest_seconds: 300
   query_seconds: 30
   lint_seconds: 60
   document_seconds: 300

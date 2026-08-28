@@ -702,3 +702,28 @@ Task 1 双模式脱敏
 8. `docs/qa/product-document-incubator-2.3-acceptance.md` 记录最终 SHA、测试数、页面证据和全部未完成债务。
 9. 同一材料的版本已正确归组，搜索、筛选、技术详情和行内错误交互符合 AC-17～AC-18；
 10. `pending_ingest`/`ingest_failed` 可受控移入回收区，`ingesting`/`ingested` 在 UI 和用例层均不可删除，符合 AC-19～AC-20。
+
+## 五、2.3.1 节点 5 加固补充计划（2026-08-28）
+
+本节是在 Owner 现场验证候选文档内容过薄后批准的加固范围，并覆盖本计划中“所有 Wiki 来源分段始终受 25% 上限”的旧表述。覆盖只限 Wiki Owner 特例，不改变 Query、Lint、ImportSource 或其他普通调用路径。
+
+### 架构裁决
+
+1. 仅精确 `WikiIngestWorkflowInput`、Owner 明确授权、L1/L2 且已确认脱敏的请求可使用 Wiki 特例；其他路径继续执行 25% 上限。
+2. Wiki 特例最多读取 20 个安全分段，但规范化完整载荷仍不得超过 20,000 字符。
+3. Schema identity、覆盖模式、载荷摘要和覆盖值共同纳入 HMAC；Gateway 调用前必须独立重建与复核。
+4. Owner-confirmed 模式需同时遮盖正文、locator、Source 元数据、主题标题与索引投影中的硬标识；L3/L4 和未授权材料仍为零外调。
+5. DOCX 抽取保持正文顺序，支持表格、合并单元格去重和嵌套表格；Raw 字节与 SHA-256 不变。
+6. 候选文档增加内容质量门禁，证据不足时明确失败，不生成以“待补充”为主体的候选；管线版本进入幂等键。
+7. Wiki Ingest 与候选文档 Gateway 超时统一为 300 秒。
+
+### 完成证据
+
+- 聚焦安全/集成回归：234 passed；独立复审聚焦回归：235 passed。
+- 隔离真实 Owner 项目库：1198 passed、1 deselected；既有 SQLite/WAL 顺序性用例隔离 1 passed。
+- Ruff check、Ruff format check、编译和 `git diff --check` 均通过。
+- 独立复审：Critical 0、Important 0，可进入 Owner 验收。
+
+### 停止点
+
+节点 5 加固完成后不自动提交、不合并；向 Owner 报告最终差异、验证证据和已知测试隔离债务，由 Owner 明确授权下一步。

@@ -19,6 +19,19 @@ def test_repository_config_allows_slow_document_workflows():
     assert settings.timeouts.document_seconds == 300
 
 
+def test_repository_config_allows_expanded_wiki_ingest_workflows():
+    """Catches 2.3.1's wider Wiki payload retaining the former 60s limit."""
+    container = importlib.import_module("src.application.container")
+    repository_root = Path(__file__).resolve().parents[2]
+
+    settings = container.load_settings(
+        repository_root / "config" / "app.yaml",
+        repository_root / "config" / "schema.yaml",
+    )
+
+    assert settings.timeouts.ingest_seconds == 300
+
+
 def test_app_settings_defaults_lint_contract_for_non_lint_construction():
     """Catches a Lint-only setting breaking Home, Ingest, or Query test containers."""
     container = importlib.import_module("src.application.container")

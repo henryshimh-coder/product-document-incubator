@@ -5,7 +5,11 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 
-def _render_incubate_page(library_root: str, job_mode: str = "idle_then_running") -> None:
+def _render_incubate_page(
+    library_root: str,
+    job_mode: str = "idle_then_running",
+    start_error: str | None = None,
+) -> None:
     import hashlib
     from datetime import UTC, datetime
     from pathlib import Path
@@ -188,6 +192,8 @@ def _render_incubate_page(library_root: str, job_mode: str = "idle_then_running"
     class JobCoordinator:
         def start(self, command):
             del command
+            if start_error is not None:
+                raise ValueError(start_error)
             previous = int(count_path.read_text(encoding="utf-8")) if count_path.is_file() else 0
             count_path.write_text(str(previous + 1), encoding="utf-8")
             state_path.write_text("running", encoding="utf-8")
@@ -278,3 +284,19 @@ def test_incubate_page_failed_job_shows_safe_code_and_allows_retry(tmp_path: Pat
     page.multiselect(key="incubate_source_ids").select("SRC-001").run()
 
     assert page.button(key="incubate_generate").disabled is False
+
+
+def test_incubate_page_preserves_safe_start_failure_detail(tmp_path: Path) -> None:
+    """Catches actionable startup failures being collapsed into an opaque code."""
+    page = AppTest.from_function(
+        _render_incubate_page,
+        args=(str(tmp_path / "library"), "idle", "SOURCE_SELECTION_STALE"),
+    ).run()
+
+    page.multiselect(key="incubate_source_ids").select("SRC-001")
+    page.button(key="incubate_generate").click().run()
+
+    assert not page.exception
+    assert "DOCUMENT_INCUBATION_START_FAILED:SOURCE_SELECTION_STALE" in "\n".join(
+        item.value for item in page.error
+    )

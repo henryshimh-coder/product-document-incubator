@@ -39,14 +39,17 @@ from src.infrastructure.files.project_library import (
 from src.infrastructure.files.redactor import RedactionMode, redact_text
 from src.infrastructure.files.source_index_store import SourceIndexStore
 from src.infrastructure.files.wiki_change_set_store import WikiTransactionCoordinator
-from src.infrastructure.files.wiki_outbound_context import WikiOutboundContextBuilder
+from src.infrastructure.files.wiki_outbound_context import (
+    MAX_OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS,
+    WikiOutboundContextBuilder,
+)
 from src.infrastructure.files.wiki_topic_metadata import (
     validate_topic_id,
     validate_topic_title,
 )
 from src.infrastructure.files.wiki_validator import WikiValidator
 from src.infrastructure.gateways._common import (
-    MAX_OUTBOUND_COVERAGE,
+    MAX_CANONICAL_PAYLOAD_CHARS,
     OutboundCoverageMode,
     create_outbound_safety_proof,
     new_workflow_task_id,
@@ -58,8 +61,15 @@ from src.infrastructure.gateways.schemas import (
 from src.infrastructure.observability.model_call_logger import ModelCallLogger
 
 WIKI_SCHEMA_VERSION = "2.2"
-MAX_OUTBOUND_SOURCE_CHUNKS = 3
+WIKI_INGEST_PIPELINE_VERSION = "2.3.1"
 _SOURCE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_PLACEHOLDER_CONTENT = re.compile(
+    r"待补充|后续补充|暂无(?:信息|内容|资料|证据)?|未提供|未明确|\bTBD\b|\bTODO\b|\bN/?A\b",
+    flags=re.IGNORECASE,
+)
+_MARKDOWN_HEADING = re.compile(r"(?m)^\s*#{1,6}\s+.*$")
+_WIKI_CITATION = re.compile(r"【[^【】\r\n]+】")
+_SUBSTANTIVE_CHAR = re.compile(r"[A-Za-z0-9\u3400-\u9fff]")
 
 
 class IngestArchivedSource:
@@ -188,8 +198,6 @@ class IngestArchivedSource:
             audit_outbound_coverage = sum(
                 len(chunk["text"]) for chunk in workflow_inputs["source_chunks"]
             ) / len(extracted.text)
-            if audit_outbound_coverage > MAX_OUTBOUND_COVERAGE:
-                raise DomainError(ErrorCode.OUTBOUND_COVERAGE_EXCEEDED)
             safety_proof = create_outbound_safety_proof(
                 WikiIngestWorkflowInput,
                 workflow_inputs,
@@ -201,7 +209,7 @@ class IngestArchivedSource:
                 unpublished_decisions=self.unpublished_decisions,
                 source_total_chars=len(extracted.text),
                 redaction_mode=RedactionMode.OWNER_CONFIRMED,
-                coverage_mode=OutboundCoverageMode.WIKI_SOURCE_CHUNKS,
+                coverage_mode=OutboundCoverageMode.OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS,
             )
             audit_redacted = True
             wiki_authorization = self.context.authorize(
@@ -239,6 +247,7 @@ class IngestArchivedSource:
                 raise
             self._validate_topic_metadata(output)
             self._validate_model_output_citations(source, output)
+            self._validate_content_quality(workflow_inputs, output)
             audit_recorded = True
             self._record_external_model_call(
                 project_id=command.project_id,
@@ -383,7 +392,15 @@ class IngestArchivedSource:
 
     @staticmethod
     def _idempotency_key(source: SourceRecord) -> str:
-        material = f"{source.project_id}{source.id}{source.sha256}{WIKI_SCHEMA_VERSION}"
+        material = ":".join(
+            (
+                source.project_id,
+                source.id,
+                source.sha256,
+                WIKI_SCHEMA_VERSION,
+                WIKI_INGEST_PIPELINE_VERSION,
+            )
+        )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     @staticmethod
@@ -484,7 +501,7 @@ class IngestArchivedSource:
 
     def _redacted_chunks(self, source: SourceRecord, chunks: Sequence) -> list[dict[str, str]]:
         safe_chunks: list[dict[str, str]] = []
-        for chunk in chunks[:MAX_OUTBOUND_SOURCE_CHUNKS]:
+        for chunk in chunks[:MAX_OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS]:
             safe_chunks.append(
                 {
                     "chunk_id": chunk.chunk_id,
@@ -551,17 +568,26 @@ class IngestArchivedSource:
             )
         except (OSError, UnicodeError):
             raise DomainError(ErrorCode.WIKI_SCHEMA_MISSING) from None
-        return {
+        workflow_inputs = {
             "schema_version": WIKI_SCHEMA_VERSION,
             "task_id": new_workflow_task_id("WIKI"),
             "project_id": command.project_id,
             "source": {
                 "id": source.id,
-                "source_type": source.source_type,
-                "material_name": source.material_name or Path(source.original_filename).stem,
-                "document_version": source.document_version,
+                "source_type": self._owner_confirmed_redaction(source, source.source_type),
+                "material_name": self._owner_confirmed_redaction(
+                    source,
+                    source.material_name or Path(source.original_filename).stem,
+                ),
+                "document_version": self._owner_confirmed_redaction(
+                    source,
+                    source.document_version,
+                ),
                 "document_date": source.document_date.isoformat(),
-                "applicable_scope": source.applicable_baseline_version,
+                "applicable_scope": self._owner_confirmed_redaction(
+                    source,
+                    source.applicable_baseline_version,
+                ),
                 "authority_level": source.authority_level.value,
                 "security_level": source.security_level.value,
             },
@@ -570,6 +596,20 @@ class IngestArchivedSource:
             "safe_related_topics": safe_related_topics,
             "ingest_contract": contract,
         }
+        while (
+            len(
+                json.dumps(
+                    workflow_inputs,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            > MAX_CANONICAL_PAYLOAD_CHARS
+            and len(workflow_inputs["source_chunks"]) > 1
+        ):
+            workflow_inputs["source_chunks"].pop()
+        return workflow_inputs
 
     def _compile_change_set(
         self,
@@ -958,6 +998,34 @@ class IngestArchivedSource:
                 gap,
                 allowed_source_ids=allowed_output_source_ids,
             )
+
+    @staticmethod
+    def _validate_content_quality(
+        workflow_inputs: dict[str, object],
+        output: WikiIngestWorkflowOutput,
+    ) -> None:
+        source_chunks = workflow_inputs.get("source_chunks", [])
+        if not isinstance(source_chunks, list):
+            raise DomainError(ErrorCode.WIKI_CONTENT_TOO_THIN)
+        outbound_source_chars = sum(
+            len(str(chunk.get("text", ""))) for chunk in source_chunks if isinstance(chunk, dict)
+        )
+        source_signal = IngestArchivedSource._substantive_char_count(output.source_page_markdown)
+        topic_signal = sum(
+            IngestArchivedSource._substantive_char_count(topic.markdown)
+            for topic in output.topic_changes
+        )
+        required_total = min(160, max(24, outbound_source_chars // 100))
+        required_source = min(60, max(12, outbound_source_chars // 250))
+        if source_signal < required_source or source_signal + topic_signal < required_total:
+            raise DomainError(ErrorCode.WIKI_CONTENT_TOO_THIN)
+
+    @staticmethod
+    def _substantive_char_count(markdown: str) -> int:
+        content = _MARKDOWN_HEADING.sub("", markdown)
+        content = _WIKI_CITATION.sub("", content)
+        content = _PLACEHOLDER_CONTENT.sub("", content)
+        return len(_SUBSTANTIVE_CHAR.findall(content))
 
     def _validate_model_text(
         self,

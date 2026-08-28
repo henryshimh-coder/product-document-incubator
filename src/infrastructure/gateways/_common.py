@@ -27,6 +27,7 @@ _PROOF_ISSUER = object()
 class OutboundCoverageMode(StrEnum):
     CANONICAL_PAYLOAD = "canonical_payload"
     WIKI_SOURCE_CHUNKS = "wiki_source_chunks"
+    OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS = "owner_confirmed_wiki_source_chunks"
 
 
 def new_workflow_task_id(prefix: str) -> str:
@@ -47,6 +48,7 @@ class OutboundSafetyProof:
 
     __slots__ = (
         "_payload_digest",
+        "_schema_identity",
         "_outbound_chars",
         "_source_total_chars",
         "_coverage_mode",
@@ -60,6 +62,7 @@ class OutboundSafetyProof:
         issuer: object,
         *,
         payload_digest: bytes,
+        schema_identity: str,
         outbound_chars: int,
         source_total_chars: int,
         coverage_mode: OutboundCoverageMode,
@@ -70,6 +73,7 @@ class OutboundSafetyProof:
         if issuer is not _PROOF_ISSUER:
             raise TypeError("OutboundSafetyProof must be created by the local factory")
         object.__setattr__(self, "_payload_digest", payload_digest)
+        object.__setattr__(self, "_schema_identity", schema_identity)
         object.__setattr__(self, "_outbound_chars", outbound_chars)
         object.__setattr__(self, "_source_total_chars", source_total_chars)
         object.__setattr__(self, "_coverage_mode", coverage_mode)
@@ -93,6 +97,17 @@ def _canonical_payload(serialized: Mapping[str, Any]) -> str:
     )
 
 
+def _schema_identity(schema: type[BaseModel]) -> str:
+    return f"{schema.__module__}.{schema.__qualname__}"
+
+
+def _is_wiki_ingest_schema(schema: type[BaseModel]) -> bool:
+    # Local import avoids coupling the shared Gateway module to schema import order.
+    from src.infrastructure.gateways.schemas import WikiIngestWorkflowInput
+
+    return schema is WikiIngestWorkflowInput
+
+
 def _coverage_chars(
     serialized: Mapping[str, Any],
     canonical_payload: str,
@@ -100,7 +115,10 @@ def _coverage_chars(
 ) -> int:
     if mode is OutboundCoverageMode.CANONICAL_PAYLOAD:
         result = len(canonical_payload)
-    elif mode is OutboundCoverageMode.WIKI_SOURCE_CHUNKS:
+    elif mode in {
+        OutboundCoverageMode.WIKI_SOURCE_CHUNKS,
+        OutboundCoverageMode.OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS,
+    }:
         chunks = serialized.get("source_chunks")
         if not isinstance(chunks, list) or not chunks:
             raise GatewayError.outbound_safety_proof_invalid()
@@ -119,6 +137,7 @@ def _coverage_chars(
 
 def _proof_message(
     payload_digest: bytes,
+    schema_identity: str,
     outbound_chars: int,
     source_total_chars: int,
     coverage_mode: OutboundCoverageMode,
@@ -128,6 +147,7 @@ def _proof_message(
     return "\n".join(
         (
             payload_digest.hex(),
+            schema_identity,
             str(outbound_chars),
             str(source_total_chars),
             coverage_mode.value,
@@ -139,6 +159,7 @@ def _proof_message(
 
 def _sign_proof(
     payload_digest: bytes,
+    schema_identity: str,
     outbound_chars: int,
     source_total_chars: int,
     coverage_mode: OutboundCoverageMode,
@@ -149,6 +170,7 @@ def _sign_proof(
         _PROOF_HMAC_KEY,
         _proof_message(
             payload_digest,
+            schema_identity,
             outbound_chars,
             source_total_chars,
             coverage_mode,
@@ -188,11 +210,21 @@ def create_outbound_safety_proof(
     except ValidationError:
         raise GatewayError.outbound_safety_proof_invalid() from None
     serialized = validated.model_dump(mode="json")
+    schema_identity = _schema_identity(schema)
     canonical_payload = _canonical_payload(serialized)
     outbound_chars = len(canonical_payload)
     coverage_chars = _coverage_chars(serialized, canonical_payload, coverage_mode)
     coverage = coverage_chars / source_total_chars
-    if outbound_chars > MAX_CANONICAL_PAYLOAD_CHARS or coverage > MAX_OUTBOUND_COVERAGE:
+    owner_confirmed_wiki = coverage_mode is OutboundCoverageMode.OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS
+    if owner_confirmed_wiki and (
+        not _is_wiki_ingest_schema(schema)
+        or redaction_mode is not RedactionMode.OWNER_CONFIRMED
+        or security_level not in {SecurityLevel.L1_PUBLIC_SIMULATED, SecurityLevel.L2_INTERNAL}
+    ):
+        raise GatewayError.outbound_safety_proof_invalid()
+    if outbound_chars > MAX_CANONICAL_PAYLOAD_CHARS or (
+        not owner_confirmed_wiki and coverage > MAX_OUTBOUND_COVERAGE
+    ):
         raise GatewayError.outbound_safety_proof_invalid()
     redaction = redact_text(
         canonical_payload,
@@ -214,6 +246,7 @@ def create_outbound_safety_proof(
     payload_digest = hashlib.sha256(canonical_payload.encode("utf-8")).digest()
     signature = _sign_proof(
         payload_digest,
+        schema_identity,
         outbound_chars,
         source_total_chars,
         coverage_mode,
@@ -223,6 +256,7 @@ def create_outbound_safety_proof(
     return OutboundSafetyProof(
         _PROOF_ISSUER,
         payload_digest=payload_digest,
+        schema_identity=schema_identity,
         outbound_chars=outbound_chars,
         source_total_chars=source_total_chars,
         coverage_mode=coverage_mode,
@@ -258,6 +292,7 @@ def validate_input(
     if validation_failed or validated is None:
         raise GatewayError.workflow_input_invalid(invalid_detail)
     serialized = validated.model_dump(mode="json")
+    schema_identity = _schema_identity(schema)
     canonical_payload = _canonical_payload(serialized)
     if not isinstance(safety_proof, OutboundSafetyProof):
         raise GatewayError.outbound_safety_proof_invalid()
@@ -273,6 +308,7 @@ def validate_input(
         payload_digest = hashlib.sha256(canonical_payload.encode("utf-8")).digest()
         expected_signature = _sign_proof(
             payload_digest,
+            schema_identity,
             outbound_chars,
             source_total_chars,
             coverage_mode,
@@ -284,7 +320,15 @@ def validate_input(
                 outbound_chars <= MAX_CANONICAL_PAYLOAD_CHARS,
                 source_total_chars > 0,
                 math.isfinite(coverage),
-                coverage <= MAX_OUTBOUND_COVERAGE,
+                (
+                    coverage_mode is not OutboundCoverageMode.OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS
+                    and coverage <= MAX_OUTBOUND_COVERAGE
+                )
+                or (
+                    coverage_mode is OutboundCoverageMode.OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS
+                    and _is_wiki_ingest_schema(schema)
+                ),
+                schema_identity == safety_proof._schema_identity,
                 hmac.compare_digest(
                     payload_digest,
                     safety_proof._payload_digest,

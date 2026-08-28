@@ -93,6 +93,91 @@ def test_preinvoke_validation_recomputes_signed_wiki_source_coverage() -> None:
         )
 
 
+def test_owner_confirmed_wiki_proof_allows_full_source_but_keeps_payload_cap() -> None:
+    """Catches Owner-confirmed Wiki coverage being relaxed without the 20k hard cap."""
+    common = importlib.import_module("src.infrastructure.gateways._common")
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
+    inputs = _wiki_ingest_schema_input()
+    inputs["source_chunks"] = [
+        {
+            "chunk_id": f"CHK-{index}",
+            "locator": f"第{index}节",
+            "text": "A" * 100,
+        }
+        for index in range(1, 11)
+    ]
+
+    proof = common.create_outbound_safety_proof(
+        schemas.WikiIngestWorkflowInput,
+        inputs,
+        security_level=SecurityLevel.L2_INTERNAL,
+        customer_names=(),
+        strategy_terms=(),
+        financial_terms=(),
+        leader_names=(),
+        unpublished_decisions=(),
+        source_total_chars=1000,
+        redaction_mode=RedactionMode.OWNER_CONFIRMED,
+        coverage_mode=common.OutboundCoverageMode.OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS,
+    )
+
+    assert (
+        common.validate_input(
+            schemas.WikiIngestWorkflowInput,
+            inputs,
+            invalid_detail="WIKI_INGEST_INPUT_INVALID",
+            safety_proof=proof,
+        )["source_chunks"]
+        == inputs["source_chunks"]
+    )
+
+    oversized = deepcopy(inputs)
+    oversized["source_chunks"] = [
+        {
+            "chunk_id": f"CHK-{index}",
+            "locator": f"第{index}节",
+            "text": "A" * 1000,
+        }
+        for index in range(1, 21)
+    ]
+    with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        common.create_outbound_safety_proof(
+            schemas.WikiIngestWorkflowInput,
+            oversized,
+            security_level=SecurityLevel.L2_INTERNAL,
+            customer_names=(),
+            strategy_terms=(),
+            financial_terms=(),
+            leader_names=(),
+            unpublished_decisions=(),
+            source_total_chars=20_000,
+            redaction_mode=RedactionMode.OWNER_CONFIRMED,
+            coverage_mode=common.OutboundCoverageMode.OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS,
+        )
+
+
+def test_owner_confirmed_wiki_coverage_mode_rejects_legacy_ingest_schema() -> None:
+    """Catches the Wiki-only coverage exception being reused by another Gateway."""
+    common = importlib.import_module("src.infrastructure.gateways._common")
+    schemas = importlib.import_module("src.infrastructure.gateways.schemas")
+    inputs = _ingest_input()
+
+    with pytest.raises(GatewayError, match="OUTBOUND_SAFETY_PROOF_INVALID"):
+        common.create_outbound_safety_proof(
+            schemas.IngestWorkflowInput,
+            inputs,
+            security_level=SecurityLevel.L2_INTERNAL,
+            customer_names=(),
+            strategy_terms=(),
+            financial_terms=(),
+            leader_names=(),
+            unpublished_decisions=(),
+            source_total_chars=1,
+            redaction_mode=RedactionMode.OWNER_CONFIRMED,
+            coverage_mode=common.OutboundCoverageMode.OWNER_CONFIRMED_WIKI_SOURCE_CHUNKS,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -588,6 +673,7 @@ def test_proof_factory_rejects_invalid_source_total_or_derived_excess_coverage(
 @pytest.mark.parametrize(
     "tampered_field",
     [
+        "_schema_identity",
         "_outbound_chars",
         "_source_total_chars",
         "_coverage_chars",
@@ -605,6 +691,7 @@ def test_gateway_rejects_tampered_or_fake_signed_proof(
     tampered_proof = object.__new__(type(proof))
     proof_fields = (
         "_payload_digest",
+        "_schema_identity",
         "_outbound_chars",
         "_source_total_chars",
         "_coverage_mode",
@@ -616,6 +703,8 @@ def test_gateway_rejects_tampered_or_fake_signed_proof(
         object.__setattr__(tampered_proof, field, getattr(proof, field))
     if tampered_field == "_signature":
         tampered_value: Any = b"fake-signature"
+    elif tampered_field == "_schema_identity":
+        tampered_value = "untrusted.Schema"
     elif tampered_field == "_coverage":
         tampered_value = 0.0
     else:
@@ -649,6 +738,7 @@ def test_gateway_rejects_coverage_mode_tamper_when_both_modes_are_valid() -> Non
     tampered_proof = object.__new__(type(canonical_proof))
     for field in (
         "_payload_digest",
+        "_schema_identity",
         "_outbound_chars",
         "_source_total_chars",
         "_coverage_mode",

@@ -62,6 +62,7 @@ class ErrorCode(StrEnum):
     WIKI_SOURCE_INTEGRITY_FAILED = "WIKI_SOURCE_INTEGRITY_FAILED"
     WIKI_EXTERNAL_CALL_DENIED = "WIKI_EXTERNAL_CALL_DENIED"
     WIKI_CHANGESET_INVALID = "WIKI_CHANGESET_INVALID"
+    WIKI_CONTENT_TOO_THIN = "WIKI_CONTENT_TOO_THIN"
     WIKI_CONCURRENT_MODIFICATION = "WIKI_CONCURRENT_MODIFICATION"
     WIKI_TRANSACTION_FAILED = "WIKI_TRANSACTION_FAILED"
     WIKI_RECOVERY_REQUIRED = "WIKI_RECOVERY_REQUIRED"
@@ -162,6 +163,10 @@ ERROR_CATALOG: dict[ErrorCode, ErrorDefinition] = {
     ErrorCode.WIKI_SOURCE_INTEGRITY_FAILED: ErrorDefinition("Raw SHA-256 不一致，不能继续 Ingest"),
     ErrorCode.WIKI_EXTERNAL_CALL_DENIED: ErrorDefinition("安全策略不允许外部调用，请使用本地路线"),
     ErrorCode.WIKI_CHANGESET_INVALID: ErrorDefinition("变更集结构或引用非法，请修复后重试"),
+    ErrorCode.WIKI_CONTENT_TOO_THIN: ErrorDefinition(
+        "Ingest 结果有效内容过少，未写入 Wiki，请重试",
+        retryable=True,
+    ),
     ErrorCode.WIKI_CONCURRENT_MODIFICATION: ErrorDefinition(
         "目标 Wiki 页面已被修改，请重新读取后重试"
     ),
